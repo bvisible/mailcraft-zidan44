@@ -1,0 +1,45 @@
+# //// Neoffice — added file (no upstream equivalent)
+# Why: upstream runs its quality gate (`cargo xtask ci`: format, clippy without warnings, tests,
+# asset attribution, layering, wasm) on the author's machine only, and the maintainer's Mac has too
+# little disk to do it for every change. This runs the same gate on a GitHub runner, by hand or on
+# a push to version-15 that touches code. Upstream's own workflows are disabled on this fork.
+name: Neoffice CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [version-15]
+    paths: ["crates/**", "apps/**", "xtask/**", "Cargo.toml", "Cargo.lock", ".github/workflows/neoffice-ci.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neoffice-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: cargo xtask ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux build dependencies (upstream's list, .github/workflows/ci.yml)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev xvfb
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: neoffice-ci
+      - run: cargo xtask ci

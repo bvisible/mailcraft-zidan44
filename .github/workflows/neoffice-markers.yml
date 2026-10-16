@@ -1,0 +1,42 @@
+# //// Neoffice — added file (no upstream equivalent)
+# Why: every change this fork makes to upstream's code carries a `//// Neoffice` comment that says
+# why, so that `grep -rn "////"` maps the whole divergence at the next upstream merge. This is the
+# mechanical half of that rule: it runs scripts/fork_markers.py of bvisible/neoffice-ci (public)
+# and fails when a change since the common ancestor with upstream carries no marker. It needs no
+# secret. The script is fetched at a fixed commit and checked against its SHA-256; to move to a
+# newer one, change both on purpose.
+name: Neoffice fork markers
+
+on:
+  push:
+    branches: [version-15]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neoffice-markers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markers:
+    name: Markers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Find the common ancestor with upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/ZIDAN44/mailcraft.git"
+          git fetch --no-tags upstream main
+          echo "BASE=$(git merge-base HEAD upstream/main)" >> "$GITHUB_ENV"
+      - name: Fetch the marker checker (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/fork_markers.py" "https://raw.githubusercontent.com/bvisible/neoffice-ci/ee9051f7c264e48bd77ffe39437161e456ed0bc2/scripts/fork_markers.py"
+          echo "591007e9d8b6ff3dd3aad3d2549820a5fbfdfc57c37e1d0bf9aab72c406e4b70  $RUNNER_TEMP/fork_markers.py" | sha256sum -c -
+      - name: Check that every change is marked
+        run: python3 -I "$RUNNER_TEMP/fork_markers.py" check --base "$BASE" --head HEAD --verbose

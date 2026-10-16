@@ -210,6 +210,25 @@ impl Editor {
     }
 }
 
+// //// Neoffice — Nora's draft (nora.rs) goes into the message being written through the editor's
+// history, so Undo takes it back in one step, like anything typed.
+/// Put `text` at the start of the message being written, above what it already holds (the
+/// signature, the quoted message), as one step Undo takes back.
+pub(crate) fn insert_at_start(editor: &mut Option<Editor>, c: &mut Compose, text: &str) {
+    let text = text.trim_end();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(ed) = editor.as_mut().filter(|ed| ed.id == c.id) {
+        ed.remember(c, 0);
+    }
+    let old = c.body.clone();
+    // A reply starts on an empty line, which the draft takes; anything else stays below a blank line.
+    let new = if old.is_empty() || old.starts_with('\n') { format!("{text}{old}") } else { format!("{text}\n\n{old}") };
+    c.styles.edit(&old, &new, &Style::default());
+    c.body = new;
+}
+
 /// The message text box's id.
 pub(crate) fn body_id(c: &Compose) -> egui::Id {
     egui::Id::new(("compose-body", c.id))

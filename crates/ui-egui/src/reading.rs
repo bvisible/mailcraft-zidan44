@@ -197,6 +197,10 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                     if widgets::pill_button(ui, Icon::Forward, "Forward", &t).clicked() {
                         acts.push(Action::Run("mail.forward", json!({})));
                     }
+                    // //// Neoffice — Nora writes the reply, when a Neoffice page hosts the app (nora.rs).
+                    if st.nora.available {
+                        crate::nora::reading_button(ui, &t, acts);
+                    }
                     ui.add_space(6.0);
                     if widgets::pill_button(ui, Icon::Print, "Print", &t).on_hover_text(tl!("Open as a PDF to print")).clicked() {
                         acts.push(Action::Print);

@@ -1,0 +1,79 @@
+# //// Neoffice — added file (no upstream equivalent)
+# Why: Neoffice serves the browser version of MailCraft from its own build, and the maintainer's
+# Mac has no disk left for a wasm build. This runs upstream's own packaging script
+# (packaging/web/package.sh, the same one its release job runs) on a GitHub runner and keeps the
+# zip with its SHA-256. Run it by hand from the Actions tab; upstream's workflows are disabled on
+# this fork (they need upstream's signing secrets). Third-party actions are pinned by commit, as
+# upstream does, and the fork only allows the ones listed in its Actions settings.
+#
+# With `release` ticked, the zip and its SHA256SUMS.txt are also published as a GitHub release
+# (`web-<version>-<short sha>`): that is where the Suite's installer (suite/drive/wopi/craft_install.py)
+# fetches the build from, pinned by its SHA-256. A plain run only keeps the artifact.
+name: Neoffice web build
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Also publish the zip as a GitHub release (web-<version>-<short sha>)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  web:
+    name: Web (wasm)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: neoffice-web
+      - name: Install trunk 0.21.14 (SHA-256 pinned, as upstream's release job does)
+        run: |
+          set -euo pipefail
+          url="https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/trunk.tar.gz" "$url"
+          echo "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b  $RUNNER_TEMP/trunk.tar.gz" | sha256sum -c -
+          tar -xz -C "$HOME/.cargo/bin" -f "$RUNNER_TEMP/trunk.tar.gz" trunk
+          trunk --version
+      - name: Build and zip
+        run: packaging/web/package.sh
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist/release
+          sha256sum ./*.zip | tee SHA256SUMS.txt
+          ls -l
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mailcraft-web
+          path: dist/release/*
+          if-no-files-found: error
+      - name: Publish the release
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist/release
+          zip_name=$(ls mailcraft-web-*.zip)
+          version=${zip_name#mailcraft-web-}
+          version=${version%.zip}
+          tag="web-${version}-${GITHUB_SHA::7}"
+          gh release create "$tag" "$zip_name" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Browser build ${version} (${GITHUB_SHA::7})" \
+            --notes "Browser build of MailCraft ${version} from commit ${GITHUB_SHA}. SHA-256 in SHA256SUMS.txt."
+          echo "published $tag"
+

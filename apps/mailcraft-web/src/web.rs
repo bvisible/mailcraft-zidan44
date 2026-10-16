@@ -92,7 +92,9 @@ pub fn start() {
                     let mut session = Session::open(Some(store.clone()), Clock::new(now, offset));
                     session.jmap_only = true;
                     let backend = WebBackend::new(store.clone(), cc.egui_ctx.clone());
-                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone() };
+                    // //// Neoffice — Nora, when the page asked for her (`?nora`).
+                    let nora = crate::nora::requested(&query()).map(|origin| crate::nora::Nora::new(origin, cc.egui_ctx.clone()));
+                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora };
                     let mut app = MailApp::new(session, Box::new(backend), Box::new(services));
                     if sample {
                         app.ui.title_base = "MailCraft – Sample mailbox".into();
@@ -198,6 +200,8 @@ type Picked = Rc<RefCell<Vec<(String, String, Vec<u8>)>>>;
 struct WebServices {
     picked: Picked,
     ctx: egui::Context,
+    // //// Neoffice — the connection to Nora, when the page that hosts MailCraft asked for her.
+    nora: Option<crate::nora::Nora>,
 }
 
 impl Services for WebServices {
@@ -262,6 +266,18 @@ impl Services for WebServices {
     }
     fn take_picked(&mut self) -> Vec<(String, String, Vec<u8>)> {
         std::mem::take(&mut self.picked.borrow_mut())
+    }
+    // //// Neoffice — Nora, through the page's session (nora.rs).
+    fn nora_available(&self) -> bool {
+        self.nora.is_some()
+    }
+    fn nora_send(&mut self, call: mailcraft_ui_egui::NoraCall) {
+        if let Some(nora) = &self.nora {
+            nora.send(call);
+        }
+    }
+    fn nora_answers(&mut self) -> Vec<mailcraft_ui_egui::NoraAnswer> {
+        self.nora.as_ref().map(crate::nora::Nora::answers).unwrap_or_default()
     }
 }
 

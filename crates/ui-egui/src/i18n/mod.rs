@@ -125,7 +125,9 @@ impl LangInfo {
             for e in errors {
                 log::warn!("{} catalog: {e} (shown in English)", self.code);
             }
-            entries.into_iter().collect()
+            // //// Neoffice — the fork's own strings (Nora), kept in neoffice.rs so that merging
+            // upstream never touches its catalogs.
+            entries.into_iter().chain(neoffice::entries(self.code)).collect()
         })
     }
 }
@@ -383,6 +385,9 @@ pub(crate) mod pseudo {
         CACHE.with_borrow_mut(|c| *c.entry(s.to_string()).or_insert_with(|| Box::leak(format!("⟦{s}⟧").into_boxed_str())))
     }
 }
+
+// //// Neoffice — the translations of what the Neoffice fork adds (Nora).
+mod neoffice;
 
 #[cfg(test)]
 mod tests;

@@ -19,6 +19,9 @@ mod backend;
 mod fetch;
 #[cfg(target_arch = "wasm32")]
 mod idb;
+// //// Neoffice — Nora, the assistant of the Neoffice server, reached with the page's session (`?nora`).
+#[cfg(target_arch = "wasm32")]
+mod nora;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

@@ -30,6 +30,8 @@ pub mod i18n;
 pub mod icons;
 mod list;
 mod nav;
+// //// Neoffice — Nora, the assistant of the Neoffice server (« Reply with Nora »); upstream has no assistant.
+mod nora;
 mod organize;
 mod people;
 mod pim_dialogs;
@@ -38,6 +40,8 @@ mod rich_edit;
 pub mod theme;
 mod thumbs;
 pub use thumbs::VideoFrame;
+// //// Neoffice — what a host that reaches Nora sends and hands back (see nora.rs).
+pub use nora::{NoraAnswer, NoraCall};
 mod widgets;
 
 use std::collections::HashMap;
@@ -175,6 +179,18 @@ pub trait Services {
     fn take_picked(&mut self) -> Vec<(String, String, Vec<u8>)> {
         Vec::new()
     }
+    // //// Neoffice — Nora, the assistant of the Neoffice server (nora.rs): only a host that reaches
+    // the server (the browser build in a Neoffice page) can ask her; the defaults say she isn't there.
+    /// Whether Nora can be asked from here.
+    fn nora_available(&self) -> bool {
+        false
+    }
+    /// Send a call to the Neoffice server; its answer comes back through [`Services::nora_answers`].
+    fn nora_send(&mut self, _call: NoraCall) {}
+    /// The answers that came back since the last call.
+    fn nora_answers(&mut self) -> Vec<NoraAnswer> {
+        Vec::new()
+    }
 }
 
 /// Services for tests: a fixed clock, no dialogs.
@@ -257,6 +273,8 @@ pub enum Action {
     MoveDataFolder,
     /// Forget a move asked for.
     CancelDataMove,
+    // //// Neoffice — « Reply with Nora » (to everyone with `true`): nora.rs writes the reply.
+    NoraReply(bool),
 }
 
 /// Where a window was and how big (in points), and whether it was maximized: its normal place is
@@ -386,6 +404,8 @@ pub struct UiState {
     drag_out: Option<PathBuf>,
     /// The platform can drag files out.
     pub(crate) can_drag_out: bool,
+    // //// Neoffice — whether Nora can be asked, and the reply she is writing (nora.rs).
+    pub(crate) nora: nora::NoraState,
 }
 
 pub struct MailApp {
@@ -459,10 +479,14 @@ impl MailApp {
                 invite: None,
                 drag_out: None,
                 can_drag_out: false,
+                // //// Neoffice — Nora's state (nora.rs).
+                nora: nora::NoraState::default(),
             },
         };
         app.ui.craft_apps = craft_apps;
         app.ui.can_drag_out = app.services.can_drag_out();
+        // //// Neoffice — Nora can be asked when the host reaches the Neoffice server (nora.rs).
+        app.ui.nora.available = app.services.nora_available();
         app
     }
 
@@ -576,6 +600,8 @@ impl MailApp {
         }
         self.apply_language(&ctx);
         self.pump();
+        // //// Neoffice — Nora's answers (nora.rs): her draft goes into the reply that waits for it.
+        nora::pump(self);
         self.announce(&ctx);
         // A search started by a command or agent shows its query in the box.
         if let Some((q, _)) = &self.session.search
@@ -1056,6 +1082,8 @@ impl MailApp {
                     }
                 }
             }
+            // //// Neoffice — Nora writes the reply (nora.rs).
+            Action::NoraReply(all) => nora::reply(self, all),
             Action::CancelDataMove => {
                 if let Err(e) = self.services.move_data_folder(None) {
                     self.session.notice(e, true);
