@@ -58,6 +58,18 @@ their own `//// Neoffice — added file` header.
     page's when it is of the same origin, and `window.mailcraftNora` for the host's settings); marked
     changes in `apps/mailcraft-web/src/main.rs` and `apps/mailcraft-web/src/web.rs`.
 
+- **The mailboxes a hosting page hands over** (maintenance#1630): Neoffice's `/mailcraft` sets
+  `window.mailcraftJmap = { accounts: [{ email, name, session, username, secret, scheme }] }` on itself (MailCraft
+  reads it there or on the same-origin page that frames it). MailCraft then opens those mailboxes without a form:
+  their accounts are put in a memory store before the session opens (each starts once), they sign in with the given
+  secret (`scheme: "bearer"`: `Authorization: Bearer`, which the JMAP crate already knew), and nothing is kept between
+  visits, as with the sample mailbox. A message's own window is shown in the page (a new window would have no
+  mailbox). Nora writes with the style of such a mailbox and checks the person may open it
+  (`Services::nora_mailbox`). New file `apps/mailcraft-web/src/host.rs`; marked changes in
+  `apps/mailcraft-web/src/main.rs`, `apps/mailcraft-web/src/web.rs` (start-up, the services),
+  `apps/mailcraft-web/src/backend.rs` (`WebBackend::new` takes the secrets, `Job::Start` and `connect` use them) and
+  `crates/ui-egui/src/lib.rs` (`Services::nora_mailbox`). No change to `crates/jmap`.
+
 ## What cannot carry a comment
 
 Nothing yet: no change to `Cargo.lock`, to an asset or to a catalog (`*.tsv`).

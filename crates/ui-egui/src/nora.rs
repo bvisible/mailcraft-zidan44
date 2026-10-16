@@ -179,7 +179,7 @@ fn rewrite(app: &mut MailApp, (method, field): (&'static str, &'static str), lan
         app.session.notice(tl!("Write your text first: Nora works on it.").to_string(), false);
         return;
     }
-    let mut args = json!({"html_content": as_html(&sent), "account_name": ""});
+    let mut args = json!({"html_content": as_html(&sent), "account_name": mailbox(app, &c.account)});
     if let Some(lang) = lang {
         args["target_language"] = json!(lang);
     }
@@ -215,7 +215,7 @@ fn reply(app: &mut MailApp, all: bool) {
         app.session.notice(tl!("Nora is already writing a reply.").to_string(), false);
         return;
     }
-    let Some(context) = app.session.reading.as_ref().and_then(|r| r.parsed.as_ref()).map(reply_context) else {
+    let Some((account, context)) = app.session.reading.as_ref().and_then(|r| Some((r.key.account.clone(), reply_context(r.parsed.as_ref()?)))) else {
         return;
     };
     let before = app.session.compose.as_ref().map(|c| c.id);
@@ -224,8 +224,15 @@ fn reply(app: &mut MailApp, all: bool) {
     let Some(compose) = app.session.compose.as_ref().map(|c| c.id).filter(|id| Some(*id) != before) else {
         return;
     };
-    send(app, REPLY_METHOD, json!({"prompt": INSTRUCTION, "account_name": "", "reply_context": context}), Waiting::Reply(compose));
+    let mailbox = mailbox(app, &account);
+    send(app, REPLY_METHOD, json!({"prompt": INSTRUCTION, "account_name": mailbox, "reply_context": context}), Waiting::Reply(compose));
     app.session.notice(tl!("Nora is writing the reply…").to_string(), false);
+}
+
+/// The mailbox of the Neoffice server an account of MailCraft is (one the hosting page handed over), for Nora to
+/// write in its style and check the person may open it; empty for any other account (the sample mailbox).
+fn mailbox(app: &MailApp, account: &str) -> String {
+    app.session.account(account).map(|a| a.config.email.clone()).filter(|email| app.services.nora_mailbox(email)).unwrap_or_default()
 }
 
 /// The received message as the server reads it: who wrote it, its subject and its text.
@@ -470,6 +477,8 @@ mod tests {
     struct Host {
         sent: Rc<RefCell<Vec<NoraCall>>>,
         inbox: Rc<RefCell<Vec<NoraAnswer>>>,
+        /// A mailbox of the server, as a hosting page hands one over.
+        mailbox: Option<String>,
     }
 
     impl Services for Host {
@@ -493,6 +502,9 @@ mod tests {
         }
         fn nora_answers(&mut self) -> Vec<NoraAnswer> {
             std::mem::take(&mut self.inbox.borrow_mut())
+        }
+        fn nora_mailbox(&self, email: &str) -> bool {
+            self.mailbox.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(email))
         }
     }
 
@@ -720,5 +732,24 @@ mod tests {
         answers(&host, id, 200, json!({"message": {"improved_text": "Merci.", "has_changes": false}}));
         frame(&ctx, &mut app);
         assert_eq!(app.session.notices.last().map(|n| n.text.as_str()), Some("Nora found nothing to change."));
+    }
+
+    #[test]
+    fn a_mailbox_of_the_server_goes_with_the_call_and_the_sample_one_does_not() {
+        let (mut app, host, _ctx) = hosted();
+        app.act(Action::Nora(Ask::Reply { all: false }));
+        assert_eq!(host.sent.borrow().last().map(|c| c.args["account_name"].clone()), Some(json!("")), "the sample mailbox");
+
+        let store = Store::memory();
+        sample::seed_if_empty(&store, NOW).unwrap();
+        let host = Host { mailbox: Some("Riley@Studio.example".into()), ..Host::default() };
+        let mut app = MailApp::new(Session::open(Some(store), Clock::new(NOW, 0)), Box::new(NullBackend), Box::new(host.clone()));
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut app);
+        let key = app.session.list.iter().find(|m| m.subject.starts_with("Your proof")).map(|m| m.key.clone()).unwrap();
+        app.session.open_message(&key);
+        frame(&ctx, &mut app);
+        app.act(Action::Nora(Ask::Reply { all: false }));
+        assert_eq!(host.sent.borrow().last().map(|c| c.args["account_name"].clone()), Some(json!("riley@studio.example")));
     }
 }

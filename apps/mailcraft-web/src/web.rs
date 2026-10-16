@@ -34,8 +34,12 @@ pub fn start() {
             return;
         };
         let sample = query().contains("sample");
+        // //// Neoffice — the mailboxes a hosting page hands over (host.rs): opened at once, nothing kept.
+        let host = if sample || param("open").is_some() { Vec::new() } else { crate::host::accounts() };
+        let hosted = !host.is_empty();
         // The cache from the last visit.
-        let (db, kept) = if sample {
+        // //// Neoffice — none with the host's mailboxes, as with the sample one.
+        let (db, kept) = if sample || hosted {
             (None, Vec::new())
         } else {
             match crate::idb::open().await {
@@ -70,6 +74,9 @@ pub fn start() {
                             log::error!("the sample mailbox couldn't be made: {e}");
                         }
                         s
+                    // //// Neoffice — the host's mailboxes, in memory (host.rs).
+                    } else if hosted {
+                        crate::host::store(&host)
                     } else if !kept.is_empty() {
                         Store::memory_from(kept)
                     } else {
@@ -91,10 +98,12 @@ pub fn start() {
                     }
                     let mut session = Session::open(Some(store.clone()), Clock::new(now, offset));
                     session.jmap_only = true;
-                    let backend = WebBackend::new(store.clone(), cc.egui_ctx.clone());
+                    // //// Neoffice — the host's mailboxes sign in with what the page gave (host.rs).
+                    let backend = WebBackend::new(store.clone(), cc.egui_ctx.clone(), crate::host::secrets(&host));
                     // //// Neoffice — Nora, when the page asked for her (`?nora`).
                     let nora = crate::nora::requested(&query()).map(|origin| crate::nora::Nora::new(origin, cc.egui_ctx.clone()));
-                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora };
+                    let hosted_mail = host.iter().map(|a| a.email.to_lowercase()).collect();
+                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora, hosted: hosted_mail };
                     let mut app = MailApp::new(session, Box::new(backend), Box::new(services));
                     if sample {
                         app.ui.title_base = "MailCraft – Sample mailbox".into();
@@ -106,7 +115,8 @@ pub fn start() {
                     if let Some(key) = param("open") {
                         app.show_message_page(&key);
                     }
-                    Ok(Box::new(WebShell { app, store, sample, db }))
+                    // //// Neoffice — with the host's mailboxes, as with the sample one, nothing is kept between visits.
+                    Ok(Box::new(WebShell { app, store, sample: sample || hosted, db }))
                 }),
             )
             .await;
@@ -200,8 +210,10 @@ type Picked = Rc<RefCell<Vec<(String, String, Vec<u8>)>>>;
 struct WebServices {
     picked: Picked,
     ctx: egui::Context,
-    // //// Neoffice — the connection to Nora, when the page that hosts MailCraft asked for her.
+    // //// Neoffice — the connection to Nora, when the page that hosts MailCraft asked for her; the addresses of
+    // the mailboxes it handed over (lower case).
     nora: Option<crate::nora::Nora>,
+    hosted: std::collections::HashSet<String>,
 }
 
 impl Services for WebServices {
@@ -226,6 +238,10 @@ impl Services for WebServices {
         true
     }
     fn open_message_window(&mut self, key: &str) -> bool {
+        // //// Neoffice — a window of its own would have no mailbox of the page: the message shows in the page.
+        if !self.hosted.is_empty() {
+            return false;
+        }
         let Some(w) = web_sys::window() else { return false };
         let path = w.location().pathname().unwrap_or_else(|_| "/".into());
         // The same mailbox (the sample stays the sample) in a window of its own, message-sized and
@@ -278,6 +294,9 @@ impl Services for WebServices {
     }
     fn nora_answers(&mut self) -> Vec<mailcraft_ui_egui::NoraAnswer> {
         self.nora.as_ref().map(crate::nora::Nora::answers).unwrap_or_default()
+    }
+    fn nora_mailbox(&self, email: &str) -> bool {
+        self.hosted.contains(&email.to_lowercase())
     }
 }
 

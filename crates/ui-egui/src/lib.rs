@@ -191,6 +191,11 @@ pub trait Services {
     fn nora_answers(&mut self) -> Vec<NoraAnswer> {
         Vec::new()
     }
+    /// Whether this address is a mailbox of the Neoffice server (handed over by the hosting page): Nora then
+    /// works with that mailbox (its style, its rights).
+    fn nora_mailbox(&self, _email: &str) -> bool {
+        false
+    }
 }
 
 /// Services for tests: a fixed clock, no dialogs.

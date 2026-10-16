@@ -55,6 +55,9 @@ struct Shared {
     accounts: HashMap<String, Account>,
     ctx: egui::Context,
     opts: SyncOptions,
+    // //// Neoffice — what the mailboxes a hosting page handed over sign in with: address (lower case) →
+    // (secret, Bearer); in memory only (host.rs).
+    host: HashMap<String, (String, bool)>,
 }
 
 type Rcs = Rc<RefCell<Shared>>;
@@ -64,9 +67,10 @@ pub struct WebBackend {
 }
 
 impl WebBackend {
-    pub fn new(store: Store, ctx: egui::Context) -> WebBackend {
+    // //// Neoffice — `host`: the secrets of the mailboxes a hosting page handed over (host.rs).
+    pub fn new(store: Store, ctx: egui::Context, host: HashMap<String, (String, bool)>) -> WebBackend {
         let opts = SyncOptions { window: 300, prefetch: 20, ..SyncOptions::default() };
-        WebBackend { shared: Rc::new(RefCell::new(Shared { store, events: Vec::new(), accounts: HashMap::new(), ctx, opts })) }
+        WebBackend { shared: Rc::new(RefCell::new(Shared { store, events: Vec::new(), accounts: HashMap::new(), ctx, opts, host })) }
     }
 }
 
@@ -179,7 +183,9 @@ async fn connect(sh: &Rcs, id: &str) {
     };
     status(sh, id, SyncStatus::Connecting);
     let user = if config.username.is_empty() { config.email.clone() } else { config.username.clone() };
-    match Client::connect(Fetch, &url, &user, &password, false).await {
+    // //// Neoffice — a mailbox the hosting page handed over signs in the way the page said (Bearer, host.rs).
+    let bearer = sh.borrow().host.get(&config.email.to_lowercase()).is_some_and(|(_, bearer)| *bearer);
+    match Client::connect(Fetch, &url, &user, &password, bearer).await {
         Ok(c) => {
             let ops = {
                 let mut s = sh.borrow_mut();
@@ -547,6 +553,8 @@ impl Backend for WebBackend {
                     let old = s.accounts.remove(&id);
                     let generation = old.as_ref().map_or(1, |a| a.generation.wrapping_add(1));
                     let password = password.map(|p| p.0).or_else(|| old.as_ref().and_then(|a| a.password.clone()));
+                    // //// Neoffice — else what the hosting page handed over for this mailbox (host.rs).
+                    let password = password.or_else(|| s.host.get(&account.email.to_lowercase()).map(|(secret, _)| secret.clone()));
                     s.accounts.insert(
                         id.clone(),
                         Account {

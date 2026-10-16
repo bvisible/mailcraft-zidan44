@@ -19,7 +19,10 @@ mod backend;
 mod fetch;
 #[cfg(target_arch = "wasm32")]
 mod idb;
-// //// Neoffice — Nora, the assistant of the Neoffice server, reached with the page's session (`?nora`).
+// //// Neoffice — the mailboxes a hosting page hands over (`window.mailcraftJmap`), and Nora, the assistant of
+// the Neoffice server, reached with the page's session (`?nora`).
+#[cfg(target_arch = "wasm32")]
+mod host;
 #[cfg(target_arch = "wasm32")]
 mod nora;
 #[cfg(target_arch = "wasm32")]
