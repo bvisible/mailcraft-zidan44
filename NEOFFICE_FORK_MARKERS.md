@@ -36,12 +36,19 @@ their own `//// Neoffice — added file` header.
   which runs its injection guard on that message first), and the draft goes in above the signature
   and the quoted message, as one step Undo takes back. Nothing is sent. Every other page, and the
   desktop app, behave exactly as upstream.
-  - New file `crates/ui-egui/src/nora.rs` (the button, the call, the answer, the insertion, tests).
+  - **« Translate »** (the same menu, French, German or English): the server translates the open message
+    (`nora.api.nora_webmail.translate`, injection guard first) and it is shown in place of the message,
+    under « Translated by Nora » and its « Show the original ».
+  - **The band of the message being written** (under the subject, same condition): « Correct », « Improve »,
+    « Translate ». Only the person's own text is sent (above the signature `-- ` and the quoted message's
+    rule), and the answer goes in only over that same text, as one step Undo takes back.
+  - New file `crates/ui-egui/src/nora.rs` (the button and its menu, the band, the calls, the answers, the
+    insertions, the translated view, tests).
   - Marked changes in `crates/ui-egui/src/lib.rs` (the module, `Services::nora_available`,
     `Services::nora_send`, `Services::nora_answers` with defaults that say Nora isn't there,
-    `Action::NoraReply`, the state in `UiState`, a line in the frame), `crates/ui-egui/src/reading.rs`
-    (the button) and `crates/ui-egui/src/rich_edit.rs` (`insert_at_start`, through the editor's
-    history).
+    `Action::Nora`, the state in `UiState`, a line in the frame), `crates/ui-egui/src/reading.rs`
+    (the button, the translated view, the band) and `crates/ui-egui/src/rich_edit.rs` (`insert_at_start`,
+    `replace_start`, through the editor's history).
   - Her strings are translated outside upstream's catalogs, in the new file
     `crates/ui-egui/src/i18n/neoffice.rs` (the twelve languages), which every language's catalog adds
     to its own entries (marked lines in `crates/ui-egui/src/i18n/mod.rs`); upstream's coverage test

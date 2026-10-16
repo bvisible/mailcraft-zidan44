@@ -284,7 +284,10 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
             let sep = ui.available_rect_before_wrap();
             ui.painter().line_segment([sep.left_top(), sep.right_top()], egui::Stroke::new(1.0, t.border));
             ui.add_space(12.0);
-            if s.prefs.show_html && !p.rich.is_empty() {
+            // //// Neoffice — the message as Nora translated it, with the way back to the original (nora.rs).
+            if crate::nora::translated_body(st, ui, &t, &r.key, acts) {
+                // Drawn by nora.rs.
+            } else if s.prefs.show_html && !p.rich.is_empty() {
                 rich_body(s, st, ui, &r.key, p, acts);
             } else if crate::bidi::has_rtl(&p.text) {
                 // Right-to-left text, laid out line by line (not selectable: the lines are in the
@@ -1504,6 +1507,13 @@ fn compose(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                 ui.add_space(76.0);
                 ui.vertical(|ui| field(ui, &t, "Subject", &mut c.subject, "Add a subject", false, false));
             });
+            // //// Neoffice — Nora's band: correct, improve or translate the person's own text (nora.rs).
+            if st.nora.available {
+                ui.horizontal(|ui| {
+                    ui.add_space(76.0 + LABEL_W);
+                    crate::nora::compose_band(ui, &t, acts);
+                });
+            }
             if !c.attachments.is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(76.0 + LABEL_W);

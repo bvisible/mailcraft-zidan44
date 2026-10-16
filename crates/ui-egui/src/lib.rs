@@ -273,8 +273,8 @@ pub enum Action {
     MoveDataFolder,
     /// Forget a move asked for.
     CancelDataMove,
-    // //// Neoffice — « Reply with Nora » (to everyone with `true`): nora.rs writes the reply.
-    NoraReply(bool),
+    // //// Neoffice — what the person asks of Nora (reply, translate): nora.rs does it.
+    Nora(nora::Ask),
 }
 
 /// Where a window was and how big (in points), and whether it was maximized: its normal place is
@@ -1082,8 +1082,8 @@ impl MailApp {
                     }
                 }
             }
-            // //// Neoffice — Nora writes the reply (nora.rs).
-            Action::NoraReply(all) => nora::reply(self, all),
+            // //// Neoffice — what the person asked of Nora (nora.rs).
+            Action::Nora(ask) => nora::act(self, ask),
             Action::CancelDataMove => {
                 if let Err(e) = self.services.move_data_folder(None) {
                     self.session.notice(e, true);
