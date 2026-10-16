@@ -293,7 +293,10 @@ mod tests {
         assert_eq!(call.method, "nora.api.nora_webmail.generate_email");
         assert_eq!(call.args["account_name"], "");
         let context = call.args["reply_context"].as_str().unwrap_or_default();
-        assert!(context.starts_with("From: Print Shop <orders@printshop.example>\nSubject: Your proof for the festival poster is ready"), "{context}");
+        assert!(
+            context.starts_with("From: Print Shop <orders@printshop.example>\nSubject: Your proof for the festival poster is ready"),
+            "{context}"
+        );
         assert!(context.contains("The proof for order 4471"), "{context}");
         let before = app.session.compose.as_ref().map(|c| c.body.clone()).unwrap();
         assert!(before.starts_with('\n'), "a reply starts on an empty line: {before:?}");
@@ -302,13 +305,21 @@ mod tests {
         app.act(Action::NoraReply(false));
         assert_eq!(host.sent.borrow().len(), 1);
 
-        answers(&host, call.id, 200, json!({"message": {"success": true, "draft_text": "Bonjour,\n\nC'est approuvé, merci.\n\nMeilleures salutations"}}));
+        answers(
+            &host,
+            call.id,
+            200,
+            json!({"message": {"success": true, "draft_text": "Bonjour,\n\nC'est approuvé, merci.\n\nMeilleures salutations"}}),
+        );
         frame(&ctx, &mut app);
         let c = app.session.compose.as_ref().unwrap();
         assert_eq!(c.body, format!("Bonjour,\n\nC'est approuvé, merci.\n\nMeilleures salutations{before}"), "the draft, then the reply as it was");
         assert!(c.body.contains("Riley Moreno · Studio Lantern") && c.body.contains("\nFrom: Print Shop <orders@printshop.example>\nSent: "));
         assert_eq!(c.styles.chars.len(), c.body.chars().count(), "the styles follow the text");
-        assert_eq!(app.session.notices.last().map(|n| (n.text.as_str(), n.error)), Some(("Nora's draft is in the reply: read it before sending.", false)));
+        assert_eq!(
+            app.session.notices.last().map(|n| (n.text.as_str(), n.error)),
+            Some(("Nora's draft is in the reply: read it before sending.", false))
+        );
         assert!(app.ui.nora.pending.is_none());
     }
 
