@@ -352,6 +352,12 @@ upstream's coverage test reads `nora.rs`, `read_only.rs` and `messages.rs` too, 
 (`form_row`: the fork's « Apply to » had shown in English), marked lines in `crates/ui-egui/src/i18n/tests.rs`. The messages `messages.rs` looks up whole (« the server refused the
 user name or password », the hosting page's answers) are in it too.
 
+Ten of upstream's own French sentences put a name right after « de » (« Propriétés de Archives », « De Anne ») and
+are said otherwise in the same file (`UPSTREAM_SAID_OTHERWISE`: the English, upstream's sentence, the fork's), never
+in `fr.tsv`, which merging upstream then never touches. A test fails when upstream changes one of those sentences
+(look at the fork's again: keep it, or drop it if upstream fixed it), and another refuses any French sentence of
+either catalog that puts a name right after a word it would elide (« La fiche de Essai » for « d’Essai »).
+
 ## What cannot carry a comment
 
 Nothing yet: no change to `Cargo.lock`, to an asset or to a catalog (`*.tsv`).

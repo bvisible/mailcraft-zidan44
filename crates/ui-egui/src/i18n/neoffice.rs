@@ -1348,12 +1348,12 @@ const STRINGS: &[Entry] = &[
         "Every occurrence of {title} will be removed from your Neoffice calendar.",
         &[
             ("es", "Cada repetición de {title} se eliminará de tu calendario Neoffice."),
-            ("fr", "Toutes les occurrences de {title} seront retirées de votre agenda Neoffice."),
+            ("fr", "Toutes les occurrences de l’événement {title} seront retirées de votre agenda Neoffice."),
             ("de", "Jeder Termin von {title} wird aus Ihrem Neoffice-Kalender entfernt."),
             ("nl", "Elke keer van {title} wordt uit je Neoffice-agenda verwijderd."),
             ("pt-br", "Cada ocorrência de {title} será removida da sua agenda Neoffice."),
             ("it", "Ogni ricorrenza di {title} verrà rimossa dal tuo calendario Neoffice."),
-            ("ru", "Каждое повторение {title} будет удалено из вашего календаря Neoffice."),
+            ("ru", "Каждое повторение события «{title}» будет удалено из вашего календаря Neoffice."),
             ("ja", "{title} のすべての回が Neoffice のカレンダーから削除されます。"),
             ("ko", "{title}의 모든 일정이 Neoffice 일정표에서 삭제됩니다."),
             ("zh-hans", "{title} 的每一次都将从你的 Neoffice 日历中移除。"),
@@ -1402,12 +1402,12 @@ const STRINGS: &[Entry] = &[
         "This occurrence of {title} will be removed from your Neoffice calendar.",
         &[
             ("es", "Esta repetición de {title} se eliminará de tu calendario Neoffice."),
-            ("fr", "Cette occurrence de {title} sera retirée de votre agenda Neoffice."),
+            ("fr", "Cette occurrence de l’événement {title} sera retirée de votre agenda Neoffice."),
             ("de", "Dieser Termin von {title} wird aus Ihrem Neoffice-Kalender entfernt."),
             ("nl", "Deze keer van {title} wordt uit je Neoffice-agenda verwijderd."),
             ("pt-br", "Esta ocorrência de {title} será removida da sua agenda Neoffice."),
             ("it", "Questa ricorrenza di {title} verrà rimossa dal tuo calendario Neoffice."),
-            ("ru", "Это повторение {title} будет удалено из вашего календаря Neoffice."),
+            ("ru", "Это повторение события «{title}» будет удалено из вашего календаря Neoffice."),
             ("ja", "{title} のこの回は Neoffice のカレンダーから削除されます。"),
             ("ko", "{title}의 이 일정은 Neoffice 일정표에서 삭제됩니다."),
             ("zh-hans", "{title} 的这一次将从你的 Neoffice 日历中移除。"),
@@ -1600,7 +1600,7 @@ const STRINGS: &[Entry] = &[
         "{name}'s card will be removed from Neoffice's contacts for the whole team. An administrator can restore it.",
         &[
             ("es", "La ficha de {name} se eliminará de los contactos de Neoffice para todo el equipo. Un administrador puede restaurarla."),
-            ("fr", "La fiche de {name} sera retirée des contacts de Neoffice pour toute l’équipe. Un administrateur peut la restaurer."),
+            ("fr", "La fiche « {name} » sera retirée des contacts de Neoffice pour toute l’équipe. Un administrateur peut la restaurer."),
             (
                 "de",
                 "Die Kontaktkarte von {name} wird für das gesamte Team aus den Kontakten von Neoffice entfernt. Ein Administrator kann sie wiederherstellen.",
@@ -1608,7 +1608,7 @@ const STRINGS: &[Entry] = &[
             ("nl", "De kaart van {name} wordt voor het hele team uit de contactpersonen van Neoffice verwijderd. Een beheerder kan hem herstellen."),
             ("pt-br", "O cartão de contato de {name} será removido dos contatos do Neoffice para toda a equipe. Um administrador pode restaurá-lo."),
             ("it", "La scheda di {name} verrà rimossa dai contatti di Neoffice per tutto il team. Un amministratore può ripristinarla."),
-            ("ru", "Карточка {name} будет удалена из контактов Neoffice для всей команды. Администратор может её восстановить."),
+            ("ru", "Карточка контакта «{name}» будет удалена из контактов Neoffice для всей команды. Администратор может её восстановить."),
             ("ja", "{name} の連絡先カードは、チーム全体で Neoffice の連絡先から削除されます。管理者が復元できます。"),
             ("ko", "{name}의 연락처 카드는 팀 전체의 Neoffice 연락처에서 삭제됩니다. 관리자가 복원할 수 있습니다."),
             ("zh-hans", "{name}的联系人卡片将从整个团队的 Neoffice 联系人中移除。管理员可以将其恢复。"),
@@ -1673,17 +1673,41 @@ const STRINGS: &[Entry] = &[
     ),
 ];
 
+/// Upstream's own sentences this fork says otherwise: (language code, English, upstream's translation, this
+/// fork's). Upstream's French put a name right after « de » (« Propriétés de Archives », « De Anne »), which
+/// `a_french_sentence_never_puts_a_name_right_after_a_word_it_would_elide` refuses; they are said here rather
+/// than in upstream's catalogs, which merging upstream then never touches. When upstream changes one of these
+/// sentences, a test says so, and the fork's is looked at again (kept, or dropped if upstream fixed it).
+const UPSTREAM_SAID_OTHERWISE: &[(&str, &str, &str, &str)] = &[
+    ("fr", "At the top of {account}", "En haut de {account}", "En haut du compte {account}"),
+    ("fr", "Enter the password for {email}.", "Saisissez le mot de passe de {email}.", "Saisissez le mot de passe du compte {email}."),
+    ("fr", "From {names}", "De {names}", "Envoyés par {names}"),
+    ("fr", "Mail from {sender}", "Courrier de {sender}", "Courrier envoyé par {sender}"),
+    ("fr", "Updating {folder}…", "Mise à jour de {folder}…", "Mise à jour du dossier {folder}…"),
+    ("fr", "from “{text}”", "vient de « {text} »", "envoyé par « {text} »"),
+    ("fr", "In the address book of {account}", "Dans le carnet d’adresses de {account}", "Dans le carnet d’adresses du compte {account}"),
+    ("fr", "Opening {file}…", "Ouverture de {file}…", "Ouverture du fichier {file}…"),
+    ("fr", "Delete everything in “{folder}”?", "Supprimer tout le contenu de « {folder} » ?", "Supprimer tout le contenu du dossier « {folder} » ?"),
+    ("fr", "{folder} Properties", "Propriétés de {folder}", "Propriétés du dossier {folder}"),
+];
+
 /// This fork's entries for the language `code`: (English, translation).
 pub(super) fn entries(code: &str) -> impl Iterator<Item = (String, String)> + '_ {
     STRINGS
         .iter()
         .filter_map(move |(english, all)| all.iter().find(|(lang, _)| *lang == code).map(|(_, text)| ((*english).to_string(), (*text).to_string())))
+        .chain(
+            UPSTREAM_SAID_OTHERWISE
+                .iter()
+                .filter(move |(lang, ..)| *lang == code)
+                .map(|(_, english, _, ours)| ((*english).to_string(), (*ours).to_string())),
+        )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{LANGUAGES, placeholders};
-    use super::STRINGS;
+    use super::super::{LANGUAGES, parse, placeholders};
+    use super::{STRINGS, UPSTREAM_SAID_OTHERWISE};
 
     #[test]
     fn every_string_is_in_every_language_with_its_placeholders() {
@@ -1698,5 +1722,48 @@ mod tests {
             }
             assert_eq!(all.len(), LANGUAGES.len() - 1, "{english:?}: one translation per language, no more");
         }
+    }
+
+    #[test]
+    fn what_this_fork_says_otherwise_is_still_what_upstream_says() {
+        for (code, english, upstream, ours) in UPSTREAM_SAID_OTHERWISE {
+            let Some(lang) = LANGUAGES.iter().find(|lang| lang.code == *code) else { panic!("no {code} catalog") };
+            let (entries, _) = parse(lang.source);
+            let said = entries.iter().find(|(key, _)| key == english).map(|(_, text)| text.as_str());
+            assert_eq!(said, Some(*upstream), "{code} {english:?}: upstream changed it, look at this fork's again");
+            assert_eq!(placeholders(english), placeholders(ours), "{code} {english:?}");
+            assert_eq!(english.ends_with('…'), ours.ends_with('…'), "{code} {english:?}");
+            assert!(STRINGS.iter().all(|(own, _)| own != english), "{english:?} is the fork's own string");
+        }
+    }
+
+    /// A name the interface puts in a French sentence is unknown when the sentence is written: right after « de »,
+    /// « que », « le »… or an apostrophe, its first letter would have to change the word before it (« La fiche de
+    /// Essai » for « d’Essai »), which no translation can do. The sentence names the thing first (« la fiche
+    /// « {name} » », « du dossier {folder} »). Upstream's catalog is read too: its sentences show in the same windows.
+    #[test]
+    fn a_french_sentence_never_puts_a_name_right_after_a_word_it_would_elide() {
+        // Filled with a weekday first (`dates::day_label`, `dates::full_time`): lun., mar.… start with a consonant.
+        const DATES: [&str; 2] = ["date", "when"];
+        const ELIDED: [&str; 12] = ["de", "que", "le", "la", "je", "me", "te", "se", "ne", "jusque", "lorsque", "puisque"];
+        let Some(fr) = LANGUAGES.iter().find(|lang| lang.code == "fr") else { panic!("no French catalog") };
+        let mut wrong = Vec::new();
+        for (key, text) in fr.catalog() {
+            let mut rest = text.as_str();
+            while let Some(open) = rest.find('{') {
+                let written = &rest[..open];
+                let before = written.trim_end();
+                let before = before.strip_suffix('«').map_or(before, str::trim_end);
+                let name = rest[open + 1..].split('}').next().unwrap_or("");
+                let word = before.rsplit(|c: char| !c.is_alphabetic()).next().unwrap_or("").to_lowercase();
+                let apart = before.len() < written.len();
+                if before.ends_with(['’', '\'']) || (apart && ELIDED.contains(&word.as_str()) && !DATES.contains(&name)) {
+                    wrong.push(format!("{key:?}: {text:?}"));
+                }
+                rest = &rest[open + 1..];
+            }
+        }
+        wrong.sort();
+        assert!(wrong.is_empty(), "a name right after a word it would elide:\n{}", wrong.join("\n"));
     }
 }
