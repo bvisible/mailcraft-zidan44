@@ -2,6 +2,19 @@ use std::collections::BTreeSet;
 
 use super::*;
 
+// //// Neoffice — the product's name a hosting page gives replaces "MailCraft" when drawn (rename_product).
+#[test]
+fn the_host_s_product_name_replaces_mailcraft_everywhere_it_is_drawn() {
+    assert_eq!(t("About MailCraft"), "About MailCraft");
+    rename_product("");
+    assert_eq!(t("About MailCraft"), "About MailCraft", "an empty name changes nothing");
+    rename_product("NeoMail");
+    assert_eq!(t("About MailCraft"), "About NeoMail");
+    assert_eq!(tfmt("MailCraft {version}", &[("version", "0.13.0")]), "NeoMail 0.13.0");
+    assert_eq!(t("Inbox"), "Inbox", "other text is untouched");
+    assert!(std::ptr::eq(t("About MailCraft"), t("About MailCraft")), "kept once for the session");
+}
+
 /// Every interface string: literals in the UI code (`tl!`, `tf!` and the helpers that translate
 /// their label), the names the model hands up, and whatever a tour of the interface looks up.
 pub(crate) fn interface_strings() -> BTreeSet<String> {

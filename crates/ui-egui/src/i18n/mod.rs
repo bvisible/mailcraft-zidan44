@@ -260,14 +260,49 @@ pub fn current() -> Lang {
 
 /// `s` in the current language, ready to draw.
 pub fn t(s: &str) -> &str {
-    shown(tr(current(), s))
+    // //// Neoffice — under the product's name the hosting page gives (rename_product).
+    shown(branded(tr(current(), s)))
 }
 
 /// A template in the current language with its `{name}` values filled in, ready to draw (see
 /// `tf!`).
 pub fn tfmt(template: &str, args: &[(&str, &str)]) -> String {
-    let filled = fmt(tr(current(), template), args);
+    // //// Neoffice — under the product's name the hosting page gives (rename_product).
+    let filled = fmt(branded(tr(current(), template)), args);
     if reorder() { crate::bidi::line(&filled, None) } else { filled }
+}
+
+// //// Neoffice — the product's name the person reads (Neoffice calls this fork NeoMail), when the hosting page gives
+// one: upstream's strings say "MailCraft" in English and in every catalog, and renaming them there would conflict at
+// each upstream merge. Set once on the interface's thread, before the first frame.
+thread_local! {
+    static PRODUCT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static BRANDED: std::cell::RefCell<HashMap<String, &'static str>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Show `name` wherever the interface says "MailCraft"; an empty or overlong name changes nothing.
+pub fn rename_product(name: &str) {
+    let name = name.trim();
+    if !name.is_empty() && name.chars().count() <= 40 {
+        PRODUCT.with(|p| *p.borrow_mut() = Some(name.to_string()));
+        BRANDED.with(|m| m.borrow_mut().clear());
+    }
+}
+
+/// `s` with the product's name the host gave in place of "MailCraft"; kept for the session, as catalogs are.
+fn branded(s: &str) -> &str {
+    if !s.contains("MailCraft") {
+        return s;
+    }
+    let Some(name) = PRODUCT.with(|p| p.borrow().clone()) else { return s };
+    BRANDED.with(|m| {
+        if let Some(v) = m.borrow().get(s) {
+            return *v;
+        }
+        let v: &'static str = Box::leak(s.replace("MailCraft", &name).into_boxed_str());
+        m.borrow_mut().insert(s.to_string(), v);
+        v
+    })
 }
 
 /// Interface text of a right-to-left language in the order egui draws right ([`crate::bidi`]);

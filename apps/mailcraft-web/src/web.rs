@@ -34,9 +34,14 @@ pub fn start() {
             return;
         };
         let sample = query().contains("sample");
-        // //// Neoffice — the desk's language for « Automatic » when a Neoffice page hosts MailCraft (host.rs).
+        // //// Neoffice — the desk's language for « Automatic », and the product's name (NeoMail), when a Neoffice page
+        // hosts MailCraft (host.rs).
         if let Some(tag) = crate::host::language() {
             mailcraft_ui_egui::i18n::prefer_host_language(&tag);
+        }
+        let product = crate::host::product();
+        if let Some(name) = &product {
+            mailcraft_ui_egui::i18n::rename_product(name);
         }
         // //// Neoffice — the mailboxes a hosting page hands over (host.rs): opened at once, nothing kept.
         let host = if sample || param("open").is_some() { Vec::new() } else { crate::host::accounts() };
@@ -111,6 +116,10 @@ pub fn start() {
                     let mut app = MailApp::new(session, Box::new(backend), Box::new(services));
                     if sample {
                         app.ui.title_base = "MailCraft – Sample mailbox".into();
+                    }
+                    // //// Neoffice — the window's title under the product's name the page gives.
+                    if let Some(name) = &product {
+                        app.ui.title_base = app.ui.title_base.replace("MailCraft", name);
                     }
                     if let Some(v) = cc.storage.and_then(|s| s.get_string(UI_KEY)).and_then(|j| serde_json::from_str(&j).ok()) {
                         app.restore_state(&v);

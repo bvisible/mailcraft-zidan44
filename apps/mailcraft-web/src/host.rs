@@ -12,7 +12,8 @@
 //!   username: "jane@example.com",
 //!   secret: "<token>",           // kept in this tab's memory only, never stored
 //!   scheme: "bearer"             // or "basic"
-//! }], language: "fr" };          // the person's language: MailCraft draws in it for « Automatic »
+//! }], language: "fr",           // the person's language: MailCraft draws in it for « Automatic »
+//!   product: "NeoMail" };        // the name the person reads, shown wherever MailCraft names itself
 //! ```
 //!
 //! It is read on this page, or on the page that frames it when that one is of the same origin (reading another
@@ -79,6 +80,12 @@ pub fn accounts() -> Vec<HostAccount> {
         }
     }
     out
+}
+
+/// The product's name the person reads (Neoffice's "NeoMail"), if the page gives one.
+pub fn product() -> Option<String> {
+    let host = windows().iter().find_map(|w| get(w, "mailcraftJmap").filter(JsValue::is_object))?;
+    Some(text(&host, "product")).filter(|name| !name.is_empty())
 }
 
 /// The language of the person the page is for (a tag such as `fr` or `de-CH`), if it says one.
