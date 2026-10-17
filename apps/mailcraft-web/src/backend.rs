@@ -52,7 +52,15 @@ struct Account {
     // //// Neoffice — when the address books and calendars were last read (pim), so a sync of the mail reads them at most
     // every CONTACTS_EVERY seconds.
     contacts_at: Option<i64>,
+    // //// Neoffice — how many times in a row the hosting page had nothing new for this mailbox (renew): it is asked again
+    // a little later, RENEW_TRIES times, before the mailbox asks for a reload.
+    renew_tries: u8,
 }
+
+// //// Neoffice — after a sleep the page's own credential may be stale for a few minutes (Neodesk refreshes it every five):
+// a renewal that got nothing is tried again this long after, this many times.
+const RENEW_AGAIN_MS: i32 = 60_000;
+const RENEW_TRIES: u8 = 6;
 
 // //// Neoffice — the address books and calendars are read again with the mail, at most this often (seconds).
 const CONTACTS_EVERY: i64 = 600;
@@ -183,16 +191,7 @@ fn failed(sh: &Rcs, id: &str, e: Error) {
             // //// Neoffice — one request to the page at a time: the others refused meanwhile wait for its answer.
             if hosted {
                 status(sh, id, SyncStatus::Connecting);
-                let first = {
-                    let mut s = sh.borrow_mut();
-                    let waiting = s.renewal.get_or_insert_with(Vec::new);
-                    waiting.push(id.to_string());
-                    waiting.len() == 1
-                };
-                if first {
-                    let sh = sh.clone();
-                    wasm_bindgen_futures::spawn_local(async move { renew(&sh).await });
-                }
+                ask_renewal(sh, id);
                 return;
             }
             status(sh, id, SyncStatus::NeedsPassword { error: m });
@@ -207,8 +206,25 @@ fn failed(sh: &Rcs, id: &str, e: Error) {
     }
 }
 
+// //// Neoffice — this mailbox waits for new tokens from the page: with the request on its way, or a new one.
+fn ask_renewal(sh: &Rcs, id: &str) {
+    let first = {
+        let mut s = sh.borrow_mut();
+        let waiting = s.renewal.get_or_insert_with(Vec::new);
+        if !waiting.iter().any(|w| w == id) {
+            waiting.push(id.to_string());
+        }
+        waiting.len() == 1
+    };
+    if first {
+        let sh = sh.clone();
+        wasm_bindgen_futures::spawn_local(async move { renew(&sh).await });
+    }
+}
+
 // //// Neoffice — new tokens from the hosting page (host.rs) for the accounts waiting for them, which then sign in
-// again. They replace what the page handed over before: a mailbox it no longer gives, or no answer, means reloading.
+// again. They replace what the page handed over before: a mailbox it no longer gives means reloading; no answer at all
+// (the page's own credential stale after a sleep) is asked again a little later, a few times, before that.
 async fn renew(sh: &Rcs) {
     let fresh = crate::host::renew().await;
     let waiting = {
@@ -224,12 +240,24 @@ async fn renew(sh: &Rcs) {
             let given = s.accounts.get(&id).and_then(|a| s.host.get(&a.config.email.to_lowercase()));
             given.filter(|_| fresh.is_some()).map(|(secret, _)| secret.clone())
         };
+        let again = fresh.is_none() && sh.borrow().accounts.get(&id).is_some_and(|a| a.renew_tries < RENEW_TRIES);
         match secret {
             Some(secret) => {
                 if let Some(a) = sh.borrow_mut().accounts.get_mut(&id) {
                     a.password = Some(secret);
                 }
                 enqueue(sh, &id, Task::Connect);
+            }
+            None if again => {
+                if let Some(a) = sh.borrow_mut().accounts.get_mut(&id) {
+                    a.renew_tries += 1;
+                }
+                status(sh, &id, SyncStatus::Connecting);
+                let (sh, id) = (sh.clone(), id.clone());
+                wasm_bindgen_futures::spawn_local(async move {
+                    sleep(RENEW_AGAIN_MS).await;
+                    ask_renewal(&sh, &id);
+                });
             }
             None => status(sh, &id, SyncStatus::NeedsPassword { error: "the page gave no new access to this mailbox: reload it".into() }),
         }
@@ -256,6 +284,7 @@ async fn connect(sh: &Rcs, id: &str) {
                 a.client = Some(Rc::new(c));
                 // //// Neoffice — signed in: a later refusal may ask the hosting page again (renew).
                 a.renewing = false;
+                a.renew_tries = 0;
                 std::mem::take(&mut a.ops)
             };
             for op in ops {
@@ -667,6 +696,7 @@ impl Backend for WebBackend {
                             // //// Neoffice — see `renew`.
                             renewing: false,
                             contacts_at: None,
+                            renew_tries: 0,
                             pushing: false,
                         },
                     );
