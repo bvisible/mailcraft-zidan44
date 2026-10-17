@@ -6,18 +6,18 @@ the items it deferred (calendar, contacts, Exchange, PST import, a web build) ar
 limits below. What each version brought is under [Done](#done); the milestones are in
 [ROADMAP.md](../ROADMAP.md).
 
-_Status: v0.10, 2026-10-15._
+_Status: v0.13, 2026-10-17._
 
 ## Open
 
 | # | Gap | Notes |
 |---|---|---|
 | 1 | **Browser version: accounts other than JMAP** | The web build syncs JMAP accounts over `fetch`, with push, and keeps its cache in IndexedDB; the server must allow the page (CORS). A browser can't open IMAP or SMTP connections, so IMAP accounts would need a relay server that holds the password and speaks JMAP to the page: a server product of its own, not built. |
-| 2 | **Right-to-left: inside the editor, selecting, Hebrew in the browser** | The window mirrors and right-to-left mail and interface text read right to left. In the message editor a line that mixes right-to-left and left-to-right words is shown in the order egui lays it out (reordering it would put the caret in the wrong places); right-to-left mail bodies can't be selected. Release builds draw Arabic, Japanese and Thai in the browser with fonts from [storytold/craft-fonts](https://github.com/storytold/craft-fonts); it has no Hebrew or Korean font yet, and its Simplified Chinese one is too large for the page, so those still need the system (the desktop app) until craft-fonts has them. |
-| 3 | **Outlook data files: what the `.pst` libraries can't do** | Mail, contacts, calendar items and tasks with a due date come in; export writes the mail as `.pst` and the calendar and contacts beside it as `.ics` and `.vcf`. The writer (`outlook-pst-rw`) makes mail items only, marked read, so contacts, appointments and flags can't go inside the `.pst`; the reader (`outlook-pst`) doesn't open the attachments of an attached message; notes and tasks without a date are left out. |
+| 2 | **Right-to-left: inside the editor, selecting, Hebrew in the browser** | The window mirrors and right-to-left mail and interface text read right to left. In the message editor a line that mixes right-to-left and left-to-right words is shown in the order egui lays it out (reordering it would put the caret in the wrong places); right-to-left mail can't be selected with the pointer (egui 0.36's text layout counts right-to-left letters wrongly, so a selection would copy nothing), but a right-click copies the line or the whole message as written. Release builds draw Arabic, Japanese and Thai in the browser with fonts from [storytold/craft-fonts](https://github.com/storytold/craft-fonts); it has no Hebrew or Korean font yet, and its Simplified Chinese one is too large for the page, so those still need the system (the desktop app) until craft-fonts has them. |
+| 3 | **Outlook data files: what the `.pst` libraries can't do** | Mail, contacts, calendar items, notes and tasks with a due date come in; export writes the mail as `.pst` and the calendar and contacts beside it as `.ics` and `.vcf`. The writer (`outlook-pst-rw`) makes mail items only, marked read, so contacts, appointments and flags can't go inside the `.pst`; the reader (`outlook-pst`) doesn't open the attachments of an attached message; tasks without a due date are left out (MailCraft has no task list). |
 | 4 | **Drag attachments out under Wayland** | Works on Windows, macOS, and Linux and the BSDs under X11 (XDND). A native Wayland window would need the compositor's data-device drag from the window's own Wayland connection, which egui's window layer doesn't share (reaching it would take unsafe code). |
 | 5 | **On-premises Exchange: Kerberos-only servers** | EWS signs in with NTLMv2 or Basic and is found with Autodiscover; a server that only takes Kerberos can't be signed in to. ActiveSync is licensed and out of scope. |
-| 6 | **HTML layout: positioning and background pictures** | Tables, flexbox rows, grids, inline-block and floated boxes keep their columns; absolutely positioned boxes and background pictures still flow as text. |
+| 6 | **Public folders on Exchange Online** | Public folders list and sync on on-premises Exchange through EWS. Exchange Online reaches them only through EWS, which Microsoft blocks there from October 2026 and removes in April 2027, and Microsoft Graph has no public folders; its suggested replacement, Microsoft 365 Groups, needs permissions only a tenant's administrator can grant. |
 
 ## Done
 
@@ -171,3 +171,74 @@ mailbox; packaging for every desktop.
   - **Fixed:** the language menu drew Japanese, Korean and Chinese as boxes unless the interface
     was in one of them (and so did mail in them); a chip's tooltip said "Double-click to open
     it"; "Pin", "Unpin" and "Always move to Focused/Other" weren't translated.
+
+### v0.11 — Notes, previews and Exchange beyond the mailbox
+From [issue #1](https://github.com/ZIDAN44/mailcraft/issues/1), an Exchange user's list:
+- **Attachment previews in the reading pane:** a click on an attachment shows it in place of
+  the message (Back to message, Open, Save As): pictures, a PDF's pages, text, attached mail,
+  and Word documents, Excel workbooks and PowerPoint slides read by MailCraft itself.
+- **Notes**, as Outlook's: coloured sticky notes (Ctrl+5), kept in an Exchange mailbox's
+  Notes folder (EWS) or on this computer.
+- **People in three layouts** (Outlook's Change View): the list with an a–z index, business
+  cards, and a phone list.
+- **Other people's Exchange calendars**, opened by their address (read-only), through Graph or
+  EWS; and **public folders** on on-premises Exchange, under a folder of their own.
+- **Dutch** interface.
+- **Outlook.com and Hotmail:** the Add account dialog and the account's status say they need
+  Microsoft sign-in rather than asking for a password again and again; release builds carry
+  the sign-in once the repository has its secret.
+- **Fixed:** the list's filter tabs ran into "By Date" in long-worded languages; the status
+  bar counted mail in People and Calendar.
+
+### v0.12 — Microsoft sign-in that works
+Microsoft sign-in, tried end to end once the release builds carried a registration:
+- **The sign-in page opens:** on Windows, web addresses went through the way files are opened
+  and nothing appeared, so Sign in with Microsoft waited on a page that never opened (and links
+  from mail went nowhere). They go to Windows' URL handler.
+- **"Sign in again", not "Password needed",** for accounts that sign in in the browser; the link
+  opens the sign-in.
+- **A refusal says why:** an account the server turns down (a Microsoft account with no mailbox
+  Graph can reach) was asked again and again and sat at "Connecting…"; it stops with the reason
+  until Send / Receive.
+- **Sent Items catches up:** Graph and Exchange file the copy a moment after sending; it showed
+  only at the next poll. Sent Items is read again a few seconds later.
+- **Tokens name their permissions:** each token request says what it's for (a personal
+  account's token could otherwise cover reading but not sending), and an SMTP refusal says
+  whether the sign-in covered sending. A Microsoft account made with a Gmail address sends
+  only once an Outlook.com address is its primary alias ([docs/oauth.md](oauth.md)).
+- **Fixed:** small dialogs opened as tall as the last big one, their buttons halfway down (and
+  OK, Connect and Remove wore the send icon); opening People widened the folder pane for every
+  module.
+
+### v0.13 — The open gaps, again
+- **Microsoft sign-in in release builds:** the test builds carry MailCraft's Microsoft Entra
+  registration (the repository secret), so Outlook.com, Hotmail and Live accounts sign in
+  ([docs/oauth.md](oauth.md)); the gap is closed.
+- **Other people's calendars can be changed** where their owner made this account an editor:
+  Graph reads the calendar's `canEdit` (with `Calendars.ReadWrite.Shared`), EWS the folder's
+  EffectiveRights; new events go into the owner's calendar, and changes and deletions reach it
+  too. Those they didn't allow stay read-only, and only those say "read-only".
+- **HTML layout: background pictures and placed boxes:** a picture behind a table, a cell or a
+  box (`background`, `background-image: url(…)`, `background: … url(…)`) is drawn behind its
+  content, cropped to cover it, and held back like the message's other web pictures until
+  they're allowed (its colour shows meanwhile); boxes placed with `position: absolute` in a
+  `position: relative` one (a label on a picture) sit over it at their offsets, as wide as their
+  text unless they say. Text now takes its cell's or table's `color`, so white on a dark band
+  stays white.
+- **Outlook's notes from a data file:** importing a `.pst` brings its Notes folders' notes into
+  MailCraft's notes, with their colour and time (they were left out).
+- **Right-to-left mail can be copied:** a right-click on Arabic or Hebrew text in the reading
+  pane copies the line, or the whole message, as written (selecting it with the pointer isn't
+  possible: egui's layout miscounts right-to-left letters).
+- **Several accounts, as Outlook keeps them:** MailCraft opens on the first account's Inbox (All
+  Inboxes stays in Favorites), accounts move up and down from their right-click menu (the order is
+  kept), and the status bar says one thing for all of them ("All folders are up to date",
+  "Updating…", "2 accounts disconnected"), each account's own status on hover, with only those
+  that need a password or a sign-in shown on their own.
+- **MailCraft's own data files:** a POP account can start from a `.mailcraft` file as well as a
+  `.pst`, and File › Open a data file opens one as a mailbox of its own (read from a copy, so
+  the file itself isn't touched).
+- **The folder pane remembers:** Favorites, accounts and folders with folders in them collapse,
+  and stay as they were left from one start to the next; accounts can also be dragged into a
+  new order.
+

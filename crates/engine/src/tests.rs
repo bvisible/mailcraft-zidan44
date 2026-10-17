@@ -590,6 +590,10 @@ fn oauth_accounts_sign_in_through_the_browser() {
     assert!(matches!(s.take_jobs().as_slice(), [Job::Start { password: None, .. }]));
     s.run("account.signIn", &json!({"account": id})).unwrap();
     assert!(matches!(s.take_jobs().as_slice(), [Job::SignIn { .. }]));
+    // It has no password: it asks to sign in again.
+    s.apply(Event::Status { account: id.clone(), status: SyncStatus::NeedsPassword { error: String::new() } });
+    let said = &s.notices.last().unwrap().text;
+    assert!(said.contains("sign in again") && !said.contains("password"), "{said}");
     // Saved with the account (no secret in it).
     let saved = std::fs::read_to_string(store.root().join("accounts.json")).unwrap();
     assert!(saved.contains("\"oauth\":\"google\""));
@@ -1647,4 +1651,183 @@ fn delay_delivery_holds_mail_in_the_outbox_until_its_time() {
     assert!(s.outbox.iter().all(|(_, i)| i.not_before == 0 || i.not_before <= NOW + 3601));
     assert!(s.take_jobs().iter().any(|j| matches!(j, Job::FlushOutbox { .. })));
     done(s);
+}
+
+#[test]
+fn the_samples_office_files_read_as_documents() {
+    use mailcraft_mime::office::{Block, Preview, preview};
+    let Some(Preview::Document(b)) = preview("order-4471.docx", "", &sample::sample_docx()) else { panic!("not a document") };
+    assert!(matches!(&b[0], Block::Paragraph { heading: true, .. }));
+    assert!(b.iter().any(|x| matches!(x, Block::Table(rows) if rows.len() == 3 && rows[1][1] == "A2")));
+    let Some(Preview::Workbook(sheets)) = preview("order-4471.xlsx", "", &sample::sample_xlsx()) else { panic!("not a workbook") };
+    assert_eq!(sheets[0].0, "Order 4471");
+    assert_eq!(sheets[0].1[3], vec!["Total".to_string(), String::new(), String::new(), "802.5".into()]);
+}
+
+#[test]
+fn notes_are_written_coloured_and_deleted() {
+    let mut s = sample_session("notes");
+    assert_eq!(s.notes("").len(), 3, "the sample's notes");
+    let uid = s.run("note.create", &json!({"text": "Call the print shop", "color": 9})).unwrap()["uid"].as_str().unwrap().to_string();
+    let n = s.notes("").into_iter().find(|n| n.note.uid == uid).unwrap();
+    assert_eq!((n.note.color, n.note.text.as_str()), (4, "Call the print shop"), "a colour past the last is the last");
+    s.set_clock(NOW + 60, 0);
+    s.run("note.update", &json!({"uid": uid, "text": "Call the print shop\nabout paper", "color": 0})).unwrap();
+    let first = &s.notes("")[0];
+    assert_eq!((first.note.uid.as_str(), first.note.title(), first.note.color), (uid.as_str(), "Call the print shop", 0), "the latest first");
+    assert_eq!(s.notes("paper").len(), 2);
+    assert!(s.run("note.update", &json!({"uid": "nope", "text": "x"})).is_err());
+    s.run("note.delete", &json!({"uid": uid})).unwrap();
+    assert!(s.notes("").iter().all(|n| n.note.uid != uid));
+    // Kept with the account's calendar and contacts, across starts.
+    let root = s.store.as_ref().unwrap().root().to_path_buf();
+    drop(s);
+    let s = Session::open(Some(Store::open(&root).unwrap()), mailcraft_model::dates::Clock::new(NOW, 0));
+    assert_eq!(s.notes("").len(), 3);
+    done(s);
+
+    // An Exchange account: notes go to its Notes folder, and what the server says follows.
+    let mut s = Session::open(Some(temp("notes-ews")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id = s
+        .run("account.add", &json!({"email": "zoe@contoso.example", "password": "pw", "ews": "https://mail.contoso.example/EWS/Exchange.asmx"}))
+        .unwrap()["account"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.take_jobs();
+    let uid = s.run("note.create", &json!({"text": "Sync me"})).unwrap()["uid"].as_str().unwrap().to_string();
+    assert!(s.take_jobs().iter().any(|j| matches!(j, Job::SyncDav { .. })), "asks for a sync");
+    assert!(s.pim[&id].notes[0].dirty);
+    let stored = mailcraft_model::pim::StoredNote { href: "note:X1".into(), note: s.pim[&id].notes[0].note.clone(), ..Default::default() };
+    let server_copy =
+        mailcraft_model::pim::StoredNote { note: mailcraft_model::pim::Note { uid: "note:X1".into(), ..stored.note.clone() }, ..stored.clone() };
+    let other = mailcraft_model::pim::StoredNote {
+        href: "note:X2".into(),
+        note: mailcraft_model::pim::Note { uid: "note:X2".into(), text: "From Outlook".into(), color: 2, modified: 1 },
+        ..Default::default()
+    };
+    let sync = mailcraft_model::pim::DavSync { pushed_notes: vec![stored], notes: Some(vec![server_copy, other]), ..Default::default() };
+    s.apply_dav(&id, &sync);
+    let texts: Vec<String> = s.notes("").into_iter().map(|n| n.note.text).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}: the note sent isn't doubled");
+    assert!(texts.contains(&"From Outlook".to_string()) && texts.contains(&"Sync me".to_string()));
+    let _ = uid;
+    s.run("note.delete", &json!({"uid": "note:X2"})).unwrap();
+    assert!(s.pim[&id].deleted.iter().any(|t| t.href == "note:X2"), "deleted on the server next time");
+    done(s);
+}
+
+#[test]
+fn shared_calendars_open_from_exchange_accounts_and_close() {
+    let mut s = sample_session("shared-cal");
+    assert!(s.run("calendar.openShared", &json!({"email": "ana@soundlab.example"})).is_err(), "the sample isn't an Exchange account");
+    done(s);
+    let mut s = Session::open(Some(temp("shared-cal-ews")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id = s
+        .run("account.add", &json!({"email": "zoe@contoso.example", "password": "pw", "ews": "https://mail.contoso.example/EWS/Exchange.asmx"}))
+        .unwrap()["account"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.take_jobs();
+    assert!(s.run("calendar.openShared", &json!({"email": "not an address"})).is_err());
+    assert!(s.run("calendar.openShared", &json!({"email": "zoe@contoso.example"})).is_err(), "not one's own");
+    s.run("calendar.openShared", &json!({"email": "Ana@Contoso.example"})).unwrap();
+    s.run("calendar.openShared", &json!({"email": "ana@contoso.example"})).unwrap();
+    assert_eq!(s.pim[&id].shared, vec!["ana@contoso.example".to_string()], "once, lower-case");
+    assert!(s.take_jobs().iter().any(|j| matches!(j, Job::SyncDav { .. })));
+    // The server shows it: read-only, with its events; closing takes it and them away.
+    let cal = mailcraft_model::pim::shared_calendar_id("ana@contoso.example");
+    let sync = mailcraft_model::pim::DavSync {
+        calendars: Some(vec![
+            mailcraft_model::pim::CalendarInfo { id: "ews:calendar".into(), name: "Calendar".into(), ..Default::default() },
+            mailcraft_model::pim::CalendarInfo { id: cal.clone(), name: "ana@contoso.example".into(), read_only: true, ..Default::default() },
+        ]),
+        synced_calendars: vec![cal.clone()],
+        events: vec![mailcraft_model::pim::StoredEvent {
+            calendar: cal.clone(),
+            href: "S1".into(),
+            event: mailcraft_model::ical::CalEvent {
+                uid: "b1".into(),
+                summary: "Budget review".into(),
+                start: NOW,
+                end: NOW + 3600,
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    s.apply_dav(&id, &sync);
+    assert!(s.agenda(NOW - 10, NOW + 10).iter().any(|a| a.calendar == cal && a.summary == "Budget review"));
+    s.run("calendar.closeShared", &json!({"email": "ana@contoso.example"})).unwrap();
+    assert!(s.pim[&id].shared.is_empty() && s.pim[&id].calendars.iter().all(|c| c.id != cal));
+    assert!(s.agenda(NOW - 10, NOW + 10).is_empty());
+    assert!(s.run("calendar.closeShared", &json!({"email": "ana@contoso.example"})).is_err());
+    done(s);
+}
+
+/// With several accounts, the first one's Inbox opens (as Outlook opens on its first mailbox),
+/// and accounts can be put in another order, which is kept.
+#[test]
+fn the_first_account_opens_and_accounts_can_be_reordered() {
+    use mailcraft_model::dates::Clock;
+    use mailcraft_model::{AccountConfig, Folder};
+    let dir = std::env::temp_dir().join(format!("mailcraft-acct-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let config = |id: &str, email: &str| AccountConfig { id: id.into(), email: email.into(), ..Default::default() };
+    store.save_accounts(&[config("a1", "zoe@studio.example"), config("a2", "ana@soundlab.example"), config("a3", "sam@studio.example")]).unwrap();
+    for id in ["a1", "a2", "a3"] {
+        store.save_folders(id, &[Folder { path: "INBOX".into(), role: FolderRole::Inbox, ..Default::default() }]).unwrap();
+    }
+    let mut s = Session::open(Some(store.clone()), Clock::new(1_700_000_000, 0));
+    assert_eq!(s.view, View::Folder { account: "a1".into(), folder: "INBOX".into() });
+    s.run("account.move", &json!({"account": "a3", "by": -1})).unwrap();
+    s.run("account.move", &json!({"account": "a3", "by": -1})).unwrap();
+    s.run("account.move", &json!({"account": "a3", "by": -1})).unwrap();
+    let order = |s: &Session| s.accounts.iter().map(|a| a.config.id.clone()).collect::<Vec<_>>();
+    assert_eq!(order(&s), ["a3", "a1", "a2"], "at the top it stays there");
+    s.run("account.move", &json!({"account": "a1", "by": 1})).unwrap();
+    assert_eq!(order(&s), ["a3", "a2", "a1"]);
+    assert!(s.run("account.move", &json!({"account": "nobody", "by": 1})).is_err());
+    // Kept: the next start has the new order and opens its first account.
+    let s = Session::open(Some(store), Clock::new(1_700_000_000, 0));
+    assert_eq!(order(&s), ["a3", "a2", "a1"]);
+    assert_eq!(s.view, View::Folder { account: "a3".into(), folder: "INBOX".into() });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An account whose folders were kept under another account's name (a data file brought in from
+/// it) opens them as its own: opening one said "no folder … in account a1".
+#[test]
+fn folders_kept_under_another_account_open_as_this_ones() {
+    use mailcraft_model::dates::Clock;
+    use mailcraft_model::{AccountConfig, Folder};
+    let dir = std::env::temp_dir().join(format!("mailcraft-folder-owner-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    store.save_accounts(&[AccountConfig { id: "a2".into(), email: "zidan@garnetbyte.example".into(), ..Default::default() }]).unwrap();
+    let f = |path: &str| Folder { account: "a1".into(), path: path.into(), ..Default::default() };
+    store.save_folders("a2", &[Folder { role: FolderRole::Inbox, ..f("INBOX") }, f("INBOX/gzamer")]).unwrap();
+    let mut s = Session::open(Some(store), Clock::new(1_700_000_000, 0));
+    assert!(s.accounts[0].folders.iter().all(|f| f.account == "a2"));
+    s.run("folder.open", &json!({"account": "a2", "folder": "INBOX/gzamer"})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Collapsing in the folder pane is kept with the settings (as Outlook keeps it).
+#[test]
+fn collapsing_in_the_folder_pane_is_kept() {
+    let mut s = sample_session("collapse");
+    s.run("view.collapse", &json!({"key": "favorites"})).unwrap();
+    s.run("view.collapse", &json!({"key": "account:sample", "collapsed": true})).unwrap();
+    s.run("view.collapse", &json!({"key": "folder:sample/Projects"})).unwrap();
+    s.run("view.collapse", &json!({"key": "folder:sample/Projects"})).unwrap();
+    let kept: Vec<&str> = s.prefs.collapsed.iter().map(String::as_str).collect();
+    assert_eq!(kept, ["account:sample", "favorites"]);
+    // Saved with the rest of the settings and read back.
+    let back: crate::Prefs = serde_json::from_value(serde_json::to_value(&s.prefs).unwrap()).unwrap();
+    assert_eq!(back.collapsed, s.prefs.collapsed);
+    assert!(s.run("view.collapse", &json!({"key": ""})).is_err());
 }

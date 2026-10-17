@@ -199,6 +199,10 @@ pub struct Prefs {
     pub ignored: BTreeSet<String>,
     /// The folder pane minimized to a narrow strip (View › Folder pane, or its ‹ button).
     pub folder_pane_minimized: bool,
+    /// What's collapsed in the folder pane, kept from one start to the next as Outlook keeps it:
+    /// `favorites`, `account:<id>`, `folder:<account>/<path>`.
+    #[serde(default)]
+    pub collapsed: BTreeSet<String>,
     /// When flagged messages are due (Follow Up › Today, Tomorrow…): Message-ID → local day.
     /// IMAP has nowhere for it, so it's kept here, as Outlook keeps it for IMAP accounts.
     #[serde(default)]
@@ -356,6 +360,7 @@ impl Default for Prefs {
             ignored: BTreeSet::new(),
             follow_up: BTreeMap::new(),
             folder_pane_minimized: false,
+            collapsed: BTreeSet::new(),
         }
     }
 }
@@ -610,6 +615,13 @@ impl Session {
             });
             for config in accounts {
                 let mut folders = store.load_folders(&config.id).unwrap_or_default();
+                // A folder belongs to the account it's kept with (a data file brought in from
+                // another account once kept that one's name).
+                for f in &mut folders {
+                    if f.account != config.id {
+                        f.account.clone_from(&config.id);
+                    }
+                }
                 sort_folders(&mut folders);
                 s.accounts.push(AccountState { config, folders, status: SyncStatus::Offline, quota: None, vacation: VacationState::Unknown });
             }
@@ -721,10 +733,9 @@ impl Session {
         self.account(account).and_then(|a| a.folders.iter().find(|f| f.path == path))
     }
 
+    /// What opens at the start: the first account's Inbox, as Outlook opens on its first mailbox
+    /// (All Inboxes is a click away in Favorites; the accounts can be put in any order).
     fn default_view(&self) -> View {
-        if self.accounts.len() > 1 {
-            return View::Unified { role: FolderRole::Inbox };
-        }
         match self.accounts.first() {
             Some(a) => {
                 let folder = a.folder(FolderRole::Inbox).map(|f| f.path.clone()).unwrap_or_else(|| "INBOX".to_string());
@@ -2478,6 +2489,20 @@ impl Session {
         }
     }
 
+    /// Move an account up (`by` < 0) or down the folder pane, as Outlook moves a mailbox.
+    pub fn move_account(&mut self, id: &str, by: i64) -> CmdResult {
+        let from = self.accounts.iter().position(|a| a.config.id == id).ok_or_else(|| CmdError::Params(format!("no account `{id}`")))?;
+        let last = self.accounts.len().saturating_sub(1);
+        let to = if by < 0 { from.saturating_sub(by.unsigned_abs() as usize) } else { from.saturating_add(by as usize).min(last) };
+        if to != from {
+            let a = self.accounts.remove(from);
+            self.accounts.insert(to, a);
+            self.save_accounts();
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(serde_json::json!({ "account": id, "position": to }))
+    }
+
     pub fn remove_account(&mut self, id: &str) -> CmdResult {
         if self.account(id).is_none() {
             return Err(CmdError::Params(format!("no account `{id}`")));
@@ -2561,15 +2586,23 @@ impl Session {
         match e {
             Event::Status { account, status } => {
                 if let SyncStatus::NeedsPassword { error } = &status {
-                    let who = self.account(&account).map(|a| a.config.email.clone()).unwrap_or_default();
+                    let (who, browser) = self.account(&account).map(|a| (a.config.email.clone(), a.config.oauth.is_some())).unwrap_or_default();
                     let why = if error.is_empty() { String::new() } else { format!(": {error}") };
-                    self.notice(format!("{who} needs its password{why}"), true);
+                    // An account that signs in in the browser has no password to ask for.
+                    let what = if browser { "needs you to sign in again" } else { "needs its password" };
+                    self.notice(format!("{who} {what}{why}"), true);
                 }
                 if let Some(a) = self.account_mut(&account) {
                     a.status = status;
                 }
             }
             Event::Folders { account, mut folders } => {
+                // They're this account's, whatever name they were kept under.
+                for f in &mut folders {
+                    if f.account != account {
+                        f.account.clone_from(&account);
+                    }
+                }
                 sort_folders(&mut folders);
                 let first = self.account(&account).is_some_and(|a| a.folders.is_empty());
                 if let Some(a) = self.account_mut(&account) {

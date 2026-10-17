@@ -44,6 +44,14 @@ pub struct Data {
     pub contacts: Vec<Value>,
     /// Every request, as `METHOD path`.
     pub calls: Vec<String>,
+    /// The signed-in Microsoft account has no mailbox.
+    pub no_mailbox: bool,
+    /// File a sent message's copy in Sent Items a moment after `sendMail`, as Graph does.
+    pub file_late: bool,
+    /// Other people whose calendars are shared with this account: (address, may edit). Their
+    /// events have `calendar` = `user:<address>`.
+    pub others: Vec<(String, bool)>,
+    late: Vec<(std::time::Instant, Vec<u8>)>,
     next: u32,
 }
 
@@ -114,6 +122,11 @@ impl Data {
     /// One request: (status, body, content type).
     fn route(&mut self, method: &str, target: &str, body: &[u8], base: &str) -> (u16, Vec<u8>, &'static str) {
         self.calls.push(format!("{method} {target}"));
+        let now = std::time::Instant::now();
+        for (_, raw) in self.late.extract_if(.., |(at, _)| *at <= now).collect::<Vec<_>>() {
+            let sent = self.resolve("sentitems").unwrap_or_default();
+            self.deliver(&sent, &raw, true, "2030-01-01T00:00:00Z");
+        }
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         let q = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}=")).map(str::to_string));
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
@@ -121,6 +134,11 @@ impl Data {
         let not_found =
             || (404, json!({"error": {"code": "ErrorItemNotFound", "message": "Not found."}}).to_string().into_bytes(), "application/json");
         let input: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        // As Graph answers a Microsoft account with no mailbox (one made with a Gmail address).
+        if self.no_mailbox && matches!(parts.as_slice(), ["me", "mailFolders" | "messages" | "sendMail" | "mailboxSettings", ..]) {
+            let e = json!({"error": {"code": "MailboxNotEnabledForRESTAPI", "message": "The mailbox is either inactive, soft-deleted, or is hosted on-premise."}});
+            return (404, e.to_string().into_bytes(), "application/json");
+        }
         match (method, parts.as_slice()) {
             ("POST", ["$batch"]) => {
                 let mut out = Vec::new();
@@ -239,8 +257,12 @@ impl Data {
                         "application/json",
                     );
                 }
-                let sent = self.resolve("sentitems").unwrap_or_default();
-                self.deliver(&sent, &raw, true, "2030-01-01T00:00:00Z");
+                if self.file_late {
+                    self.late.push((std::time::Instant::now() + std::time::Duration::from_secs(1), raw.clone()));
+                } else {
+                    let sent = self.resolve("sentitems").unwrap_or_default();
+                    self.deliver(&sent, &raw, true, "2030-01-01T00:00:00Z");
+                }
                 self.sent.push(raw);
                 (202, Vec::new(), "text/plain")
             }
@@ -271,18 +293,67 @@ impl Data {
                 self.events.push(e.clone());
                 (201, e.to_string().into_bytes(), "application/json")
             }
-            ("PATCH", ["me", "events", id]) => match self.events.iter_mut().find(|e| e["id"] == *id) {
-                Some(e) => {
-                    for (k, v) in input.as_object().cloned().unwrap_or_default() {
-                        e[k.as_str()] = v;
+            // Someone else's calendar, by their address: read when shared, changed when they allow it.
+            ("GET" | "POST" | "PATCH" | "DELETE", ["users", who, ..]) => {
+                let who = who.replace("%40", "@").to_ascii_lowercase();
+                let Some(edit) = self.others.iter().find(|(e, _)| *e == who).map(|(_, e)| *e) else {
+                    return (404, json!({"error": {"code": "ErrorItemNotFound"}}).to_string().into_bytes(), "application/json");
+                };
+                let denied = || {
+                    (
+                        403,
+                        json!({"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}}).to_string().into_bytes(),
+                        "application/json",
+                    )
+                };
+                let cal = format!("user:{who}");
+                match (method, parts.get(2..).unwrap_or_default()) {
+                    ("GET", ["calendar"]) => ok(json!({"id": cal, "canEdit": edit})),
+                    ("GET", ["calendar", "events"]) => {
+                        ok(json!({"value": self.events.iter().filter(|e| e["calendar"] == cal.as_str()).cloned().collect::<Vec<_>>()}))
                     }
-                    e["changeKey"] = json!("ck2");
-                    ok(e.clone())
+                    (_, _) if !edit => denied(),
+                    ("POST", ["calendar", "events"]) => {
+                        let id = self.id("EV");
+                        let mut e = input.clone();
+                        e["id"] = json!(id);
+                        e["iCalUId"] = json!(format!("ical-{id}"));
+                        e["changeKey"] = json!("ck1");
+                        e["calendar"] = json!(cal);
+                        self.events.push(e.clone());
+                        (201, e.to_string().into_bytes(), "application/json")
+                    }
+                    ("PATCH", ["events", id]) => match self.events.iter_mut().find(|e| e["id"] == *id && e["calendar"] == cal.as_str()) {
+                        Some(e) => {
+                            for (k, v) in input.as_object().cloned().unwrap_or_default() {
+                                e[k.as_str()] = v;
+                            }
+                            ok(e.clone())
+                        }
+                        None => not_found(),
+                    },
+                    ("DELETE", ["events", id]) => {
+                        self.events.retain(|e| !(e["id"] == *id && e["calendar"] == cal.as_str()));
+                        (204, Vec::new(), "text/plain")
+                    }
+                    _ => not_found(),
                 }
-                None => not_found(),
-            },
+            }
+            // `/me/events` reaches only this mailbox's own events, as Graph's does.
+            ("PATCH", ["me", "events", id]) => {
+                match self.events.iter_mut().find(|e| e["id"] == *id && !e["calendar"].as_str().unwrap_or("").starts_with("user:")) {
+                    Some(e) => {
+                        for (k, v) in input.as_object().cloned().unwrap_or_default() {
+                            e[k.as_str()] = v;
+                        }
+                        e["changeKey"] = json!("ck2");
+                        ok(e.clone())
+                    }
+                    None => not_found(),
+                }
+            }
             ("DELETE", ["me", "events", id]) => {
-                self.events.retain(|e| e["id"] != *id);
+                self.events.retain(|e| e["id"] != *id || e["calendar"].as_str().unwrap_or("").starts_with("user:"));
                 (204, Vec::new(), "text/plain")
             }
             ("GET", ["me", "contacts"]) => ok(json!({ "value": self.contacts })),
@@ -426,6 +497,65 @@ mod tests {
             .into_bytes()
     }
 
+    /// Someone else's calendar: editable when they let this account edit it (events added, changed
+    /// and deleted there, not in this mailbox), read-only when they don't.
+    #[test]
+    fn other_peoples_calendars_are_written_where_allowed() {
+        use mailcraft_model::ical::CalEvent;
+        use mailcraft_model::pim::{Pim, StoredEvent, Tombstone, shared_calendar_id};
+        let mut d = Data { others: vec![("ana@contoso.example".into(), true), ("ben@contoso.example".into(), false)], ..Default::default() };
+        d.folder("Inbox", None, Some("inbox"));
+        d.calendars.push(("CAL1".into(), "Calendar".into()));
+        let at = |h: u32| json!({"dateTime": format!("2026-10-20T{h:02}:00:00.0000000")});
+        for (id, cal, subject) in [
+            ("A1", "user:ana@contoso.example", "Ana's review"),
+            ("A2", "user:ana@contoso.example", "Ana's lunch"),
+            ("B1", "user:ben@contoso.example", "Ben's call"),
+        ] {
+            d.events.push(json!({"id": id, "calendar": cal, "iCalUId": id.to_lowercase(), "subject": subject, "start": at(9), "end": at(10)}));
+        }
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap();
+        let (ana, ben) = (shared_calendar_id("ana@contoso.example"), shared_calendar_id("ben@contoso.example"));
+        let mut pim = Pim { shared: vec!["ana@contoso.example".into(), "ben@contoso.example".into()], ..Default::default() };
+        let first = crate::graph_pim::sync(&c, &pim, 1_792_000_000).unwrap();
+        let cals = first.calendars.clone().unwrap();
+        let ro = |id: &str| cals.iter().find(|x| x.id == id).map(|x| x.read_only);
+        assert_eq!((ro(&ana), ro(&ben)), (Some(false), Some(true)), "Ana lets this account edit, Ben doesn't");
+        assert_eq!(first.events.iter().filter(|e| e.calendar == ana).count(), 2);
+        // Here: a new event in Ana's calendar, one of hers changed, the other deleted.
+        let review = first.events.iter().find(|e| e.event.summary == "Ana's review").cloned().unwrap();
+        let lunch = first.events.iter().find(|e| e.event.summary == "Ana's lunch").cloned().unwrap();
+        let mut changed = review.clone();
+        changed.event.summary = "Ana's review (moved)".into();
+        changed.dirty = true;
+        pim.events = vec![
+            changed,
+            StoredEvent {
+                calendar: ana.clone(),
+                event: CalEvent {
+                    uid: "new-1".into(),
+                    summary: "Poster check".into(),
+                    start: 1_792_000_000,
+                    end: 1_792_003_600,
+                    ..Default::default()
+                },
+                dirty: true,
+                ..Default::default()
+            },
+        ];
+        pim.deleted = vec![Tombstone { href: lunch.href.clone(), etag: String::new(), calendar: ana.clone() }];
+        let second = crate::graph_pim::sync(&c, &pim, 1_792_000_100).unwrap();
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        let d = server.data.lock().unwrap();
+        let in_ana = |subject: &str| d.events.iter().any(|e| e["subject"] == subject && e["calendar"] == "user:ana@contoso.example");
+        assert!(in_ana("Ana's review (moved)") && in_ana("Poster check"), "changed and added in Ana's calendar");
+        assert!(!d.events.iter().any(|e| e["id"] == "A2"), "deleted from Ana's calendar");
+        assert!(d.events.iter().all(|e| e["calendar"] != "CAL1"), "nothing landed in this mailbox's own calendar");
+        assert!(second.pushed_events.iter().all(|e| e.calendar == ana), "they stay in Ana's calendar here");
+        assert_eq!(second.deleted, [lunch.href]);
+    }
+
     #[test]
     fn exchange_calendars_and_contacts_sync_both_ways() {
         use mailcraft_model::ical::CalEvent;
@@ -466,7 +596,7 @@ mod tests {
             dirty: true,
             ..Default::default()
         });
-        pim.deleted.push(Tombstone { href: "OLD".into(), etag: String::new() });
+        pim.deleted.push(Tombstone { href: "OLD".into(), etag: String::new(), ..Default::default() });
         let sync = crate::graph_pim::sync(&c, &pim, 1_792_000_000).unwrap();
         assert!(sync.errors.is_empty(), "{:?}", sync.errors);
         {
@@ -486,6 +616,58 @@ mod tests {
         assert_eq!(sync.cards.len(), 2);
         assert_eq!(sync.calendars.as_ref().map(Vec::len), Some(1));
         assert!(server.data.lock().unwrap().calls.iter().all(|c| !c.contains("contacts/p1")), "a local uid is never sent as an id");
+    }
+
+    /// A Microsoft account with no mailbox (signed in with a Gmail address) said "Connecting…" for
+    /// good: each refusal was retried at once. It says why and waits until asked.
+    #[test]
+    fn a_microsoft_account_without_a_mailbox_says_so_and_stops() {
+        let server = serve(Data { no_mailbox: true, ..Default::default() });
+        let dir = std::env::temp_dir().join(format!("mailcraft-graph-nomailbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut pool = crate::worker::Pool::new(Store::open(&dir).unwrap(), Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig { id: "a1".into(), email: "me@gmail.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        let seen = until(&pool, "the error", |e| matches!(e, Event::Status { status: SyncStatus::Error { .. }, .. }));
+        let error = seen.iter().find_map(|e| match e {
+            Event::Status { status: SyncStatus::Error { error }, .. } => Some(error.clone()),
+            _ => None,
+        });
+        assert!(error.as_deref().is_some_and(|e| e.contains("no Outlook.com or Microsoft 365 mailbox")), "{error:?}");
+        std::thread::sleep(Duration::from_millis(1500));
+        let tries = server.data.lock().unwrap().calls.len();
+        assert!(tries <= 2, "asked once, not over and over: {tries} requests");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Graph files a sent message's copy a moment after taking it: Sent Items showed it only at the
+    /// next poll (minutes) or Send / Receive. It's read again soon after.
+    #[test]
+    fn a_sent_message_shows_in_sent_items_soon_after() {
+        let mut d = Data { file_late: true, ..Default::default() };
+        d.folder("Inbox", None, Some("inbox"));
+        d.folder("Sent Items", None, Some("sentitems"));
+        let server = serve(d);
+        let dir = std::env::temp_dir().join(format!("mailcraft-graph-sentsoon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig { id: "a1".into(), email: "me@contoso.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        until(&pool, "online", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+        pool.submit(Job::Send {
+            account: "a1".into(),
+            id: 1,
+            raw: mail("Poster", "s1"),
+            from: "me@contoso.example".into(),
+            recipients: vec!["zoe@contoso.example".into()],
+            sent_folder: Some("Sent Items".into()),
+        });
+        until(&pool, "sent", |e| matches!(e, Event::Sent { .. }));
+        eventually("the copy in Sent Items", || {
+            store.load_folder("a1", "Sent Items").is_ok_and(|f| f.messages.iter().any(|m| m.subject == "Poster"))
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

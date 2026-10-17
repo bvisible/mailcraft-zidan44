@@ -714,3 +714,47 @@ month	May	مايو
 	Clear formatting	مسح التنسيق
 	Insert link	إدراج ارتباط
 	The selected text	النص المحدد
+	Outlook.com, Hotmail and Live addresses only connect with Sign in with Microsoft: Microsoft no longer accepts passwords from mail apps. This copy of MailCraft wasn't built with Microsoft sign-in, so it can't add this account.	لا تتصل عناوين Outlook.com وHotmail وLive إلا عبر تسجيل الدخول باستخدام Microsoft: لم تعد Microsoft تقبل كلمات المرور من تطبيقات البريد. لم تُبنَ هذه النسخة من MailCraft مع تسجيل دخول Microsoft، لذا لا يمكنها إضافة هذا الحساب.
+	Back to message	العودة إلى الرسالة
+	Esc	Esc
+	Open it in its app, or save it.	افتحه في تطبيقه أو احفظه.
+	Page {n}	الصفحة {n}
+	Slide {n}	الشريحة {n}
+	The document is empty.	المستند فارغ.
+	The first {shown} of {total} pages: open it to read the rest.	أول {shown} من {total} صفحة: افتحه لقراءة الباقي.
+	The sheet is empty.	الورقة فارغة.
+	There's no preview for this file.	لا تتوفر معاينة لهذا الملف.
+	{n} people	{n} شخص
+	Cards	بطاقات
+	Phone list	قائمة الهاتف
+	Full name	الاسم الكامل
+	Search notes	البحث في الملاحظات
+	{n} notes	{n} ملاحظة
+	No notes yet: New note starts one.	لا توجد ملاحظات بعد: ملاحظة جديدة تبدأ واحدة.
+	No note matches.	لا توجد ملاحظة مطابقة.
+	Write your note…	اكتب ملاحظتك…
+	Blue	أزرق
+	Green	أخضر
+	Pink	وردي
+	Yellow	أصفر
+	White	أبيض
+	Color	اللون
+	New note	ملاحظة جديدة
+	Open a shared calendar	فتح تقويم مشترك
+	Open shared calendar…	فتح تقويم مشترك…
+	Remove this calendar	إزالة هذا التقويم
+	Shared with you, opened from {account}	مُشارك معك، فُتح من {account}
+	Whose calendar? It opens read-only beside yours, when they've shared it with you in Exchange.	تقويم من؟ يُفتح للقراءة فقط بجانب تقويمك إذا شاركه معك في Exchange.
+	read-only	للقراءة فقط
+	Public Folders	المجلدات العامة
+	Copy the whole message	نسخ الرسالة كاملة
+	Existing data file (optional)	ملف بيانات موجود (اختياري)
+	Mail from an old .pst or .mailcraft file comes in first	يُستورد بريد ملف ‎.pst أو ‎.mailcraft قديم أولاً
+	Open a data file	فتح ملف بيانات
+	Bring in an Outlook data file (.pst) or a MailCraft one (.mailcraft). It opens as a mailbox of its own, with its folders, kept on this computer.	استورد ملف بيانات Outlook ‏(.pst) أو ملف MailCraft ‏(.mailcraft). يُفتح كصندوق بريد مستقل بمجلداته، محفوظ على هذا الكمبيوتر.
+	Move up	نقل لأعلى
+	Move down	نقل لأسفل
+	Updating…	جارٍ التحديث…
+	All folders are up to date	كل المجلدات محدّثة
+	{n} accounts disconnected	{n} حسابات غير متصلة
+	{account}: {status}	{account}: {status}

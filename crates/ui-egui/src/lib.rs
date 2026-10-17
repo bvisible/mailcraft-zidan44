@@ -32,6 +32,7 @@ mod list;
 mod nav;
 // //// Neoffice — Nora, the assistant of the Neoffice server (« Reply with Nora »); upstream has no assistant.
 mod nora;
+mod notes;
 mod organize;
 mod people;
 mod pim_dialogs;
@@ -239,6 +240,8 @@ pub enum Action {
     SaveAttachment(usize),
     AttachFiles,
     FocusSearch,
+    /// Make a note and write on it.
+    NewNote,
     /// Search every folder for this (shown in the box, with the Search tab).
     Search(String),
     SetDark(Option<bool>),
@@ -356,6 +359,9 @@ pub struct UiState {
     search_cursor_end: bool,
     /// Why the message being written couldn't be sent or saved, shown over it until dismissed.
     pub compose_alert: Option<String>,
+    /// The attachment shown in place of its message's text (a click on its chip), as Outlook
+    /// previews attachments in the reading pane.
+    pub attachment_view: Option<(MessageKey, usize)>,
     /// Where the ribbon was last drawn (a click on the Search tab's buttons takes the focus
     /// from the box, and mustn't close the tab).
     ribbon_rect: Option<egui::Rect>,
@@ -404,8 +410,16 @@ pub struct UiState {
     /// screen's).
     pub(crate) mini_month: Option<i64>,
     /// The hours were scrolled to the working day once.
-    pub(crate) cal_scrolled: bool,
+    /// The day and week views have been scrolled to the working day once (each has its own scroll).
+    pub(crate) cal_scrolled: [bool; 2],
     pub(crate) people_query: String,
+    /// How People lays contacts out (Outlook's Change View).
+    pub people_view: people::PeopleView,
+    /// Notes: the search, the note being written on (and its text), a new note to write on,
+    /// and the keyboard to give its text box.
+    pub(crate) notes_query: String,
+    pub(crate) note_edit: Option<(String, String)>,
+    pub(crate) note_focus: bool,
     /// The person whose card is shown (uid).
     pub(crate) person: Option<String>,
     /// The invitation in the open message, worked out once per message and calendar change.
@@ -456,6 +470,7 @@ impl MailApp {
                 search_focused: false,
                 search_cursor_end: false,
                 compose_alert: None,
+                attachment_view: None,
                 ribbon_rect: None,
                 dialog: None,
                 previews: HashMap::new(),
@@ -483,8 +498,12 @@ impl MailApp {
                 video_frames: HashMap::new(),
                 backstage: None,
                 mini_month: None,
-                cal_scrolled: false,
+                cal_scrolled: [false; 2],
                 people_query: String::new(),
+                people_view: people::PeopleView::default(),
+                notes_query: String::new(),
+                note_edit: None,
+                note_focus: false,
                 person: None,
                 invite: None,
                 drag_out: None,
@@ -713,6 +732,7 @@ impl MailApp {
                             Module::Mail => nav::show(&self.session, &t, ui, &mut acts),
                             Module::Calendar => calendar::nav(&self.session, &mut self.ui, ui, &mut acts),
                             Module::People => people::nav(&self.session, &mut self.ui, ui, &mut acts),
+                            Module::Notes => notes::nav(&self.session, &mut self.ui, ui, &mut acts),
                         }
                     });
             }
@@ -727,6 +747,11 @@ impl MailApp {
                 (Module::People, _) => {
                     egui::CentralPanel::default().frame(egui::Frame::new().fill(t.surface)).show(ui, |ui| {
                         people::show(&self.session, &mut self.ui, ui, &mut acts);
+                    });
+                }
+                (Module::Notes, _) => {
+                    egui::CentralPanel::default().frame(egui::Frame::new().fill(t.surface)).show(ui, |ui| {
+                        notes::show(&self.session, &mut self.ui, ui, &mut acts);
                     });
                 }
                 (Module::Mail, pane) => match pane {
@@ -989,6 +1014,7 @@ impl MailApp {
                 Module::Mail => view_title(&self.session),
                 Module::Calendar => tl!("Calendar").to_string(),
                 Module::People => tl!("People").to_string(),
+                Module::Notes => tl!("Notes").to_string(),
             };
             (view, tl!(&self.ui.title_base).to_string())
         });
@@ -1025,6 +1051,16 @@ impl MailApp {
             }
             Action::Dialog(d) => self.ui.dialog = Some(d),
             Action::FocusSearch => self.ui.focus_search = true,
+            Action::NewNote => match self.session.run("note.create", &json!({})) {
+                Ok(v) => {
+                    if let Some(uid) = v.get("uid").and_then(Value::as_str) {
+                        self.ui.notes_query.clear();
+                        self.ui.note_edit = Some((uid.to_string(), String::new()));
+                        self.ui.note_focus = true;
+                    }
+                }
+                Err(e) => self.session.notice(e.to_string(), true),
+            },
             Action::Search(q) => {
                 self.ui.search_text = q.clone();
                 self.ui.tab = RibbonTab::Search;
@@ -1551,6 +1587,30 @@ impl MailApp {
                             acts.push(Action::Run("calendar.view", json!({"mode": code})));
                         }
                     }
+                } else if s.module == Module::Notes {
+                    if widgets::accent_button(ui, Icon::Note, "New note", &t, !s.accounts.is_empty()).clicked() {
+                        notes::new_note(&mut self.ui, acts);
+                    }
+                    widgets::group_sep(ui, &t);
+                    let editing = self.ui.note_edit.as_ref().map(|(u, _)| u.clone());
+                    if widgets::tool_button(ui, Icon::Delete, "Delete", &t, editing.is_some()).clicked()
+                        && let Some(uid) = editing.clone()
+                    {
+                        self.ui.note_edit = None;
+                        acts.push(Action::Run("note.delete", json!({"uid": uid})));
+                    }
+                    // The note's colour, as Outlook's Categorize on a note.
+                    let r = widgets::tool_button(ui, Icon::Tag, "Color", &t, editing.is_some());
+                    egui::Popup::menu(&r).show(|ui| {
+                        for (i, name) in notes::NAMES.iter().enumerate() {
+                            if ui.button(tl!(name)).clicked()
+                                && let Some(uid) = &editing
+                            {
+                                acts.push(Action::Run("note.update", json!({"uid": uid, "color": i})));
+                                ui.close();
+                            }
+                        }
+                    });
                 } else {
                     if widgets::accent_button(ui, Icon::Person, "New contact", &t, !s.accounts.is_empty()).clicked() {
                         acts.push(Action::Dialog(Dialog::new_contact()));
@@ -1566,6 +1626,13 @@ impl MailApp {
                         && let Some(p) = &picked
                     {
                         acts.push(Action::Run("contact.delete", json!({"uid": p.card.uid})));
+                    }
+                    // Outlook's Change View: the list with a card, business cards, a phone list.
+                    widgets::group_sep(ui, &t);
+                    for v in people::PeopleView::ALL {
+                        if widgets::tool_toggle(ui, v.icon(), v.label(), &t, self.ui.people_view == v).clicked() {
+                            self.ui.people_view = v;
+                        }
                     }
                 }
             });
@@ -1828,10 +1895,15 @@ impl MailApp {
         let s = &self.session;
         let mut again: Option<String> = None;
         ui.horizontal_centered(|ui| {
-            let unread = s.list.iter().filter(|m| !m.flags.seen).count();
-            ui.label(RichText::new(tf!("Items: {n}", n = s.list.len())).color(t.dim).small());
-            if unread > 0 {
-                ui.label(RichText::new(tf!("Unread: {n}", n = unread)).color(t.dim).small());
+            // The items of what's shown: the list's mail, or (in People) the contacts.
+            if s.module == Module::People {
+                ui.label(RichText::new(tf!("Items: {n}", n = s.people(&self.ui.people_query).len())).color(t.dim).small());
+            } else if s.module == Module::Mail {
+                let unread = s.list.iter().filter(|m| !m.flags.seen).count();
+                ui.label(RichText::new(tf!("Items: {n}", n = s.list.len())).color(t.dim).small());
+                if unread > 0 {
+                    ui.label(RichText::new(tf!("Unread: {n}", n = unread)).color(t.dim).small());
+                }
             }
             if !s.outbox.is_empty() {
                 ui.label(RichText::new(tf!("Outbox: {n}", n = s.outbox.len())).color(t.warn).small());
@@ -1840,39 +1912,55 @@ impl MailApp {
                 ui.label(RichText::new(tl!("Working offline")).color(t.warn).small());
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                for a in s.accounts.iter().rev() {
-                    let (color, text) = match &a.status {
-                        SyncStatus::Online { at } => {
-                            (t.ok, tf!("Updated {time}", time = i18n::date(&mailcraft_engine::model::dates::list_time(*at, &s.clock))))
+                let dot = |ui: &mut Ui, color: egui::Color32| {
+                    let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, color);
+                };
+                // One account: its own status. Several: one status for them all (a line per
+                // account didn't fit), with each on hover; only those that need you stand out.
+                if s.accounts.len() <= 1 {
+                    for a in &s.accounts {
+                        let (color, text) = account_status(s, &t, a);
+                        // "Password needed" is a link: click it to enter the password again.
+                        if matches!(a.status, SyncStatus::NeedsPassword { .. }) {
+                            if ui.link(RichText::new(text).color(t.danger).small()).on_hover_text(&a.config.email).clicked() {
+                                again = Some(a.config.id.clone());
+                            }
+                        } else {
+                            ui.label(RichText::new(text).color(t.dim).small()).on_hover_text(&a.config.email);
                         }
-                        SyncStatus::Syncing { .. } if a.is_data_file() => (t.accent, tf!("Opening {file}…", file = a.config.email)),
-                        SyncStatus::Syncing { folder } => (
-                            t.accent,
-                            tf!(
-                                "Updating {folder}…",
-                                folder =
-                                    s.folder(&a.config.id, folder).map(|f| i18n::tc("folder", &f.display_name()).to_string()).unwrap_or_default()
-                            ),
-                        ),
-                        SyncStatus::Connecting => (t.accent, tl!("Connecting…").to_string()),
-                        SyncStatus::Offline if a.is_data_file() => (t.faint, tl!("Outlook data file").to_string()),
-                        SyncStatus::Offline if a.is_local() => (t.faint, tl!("Sample mailbox (offline)").to_string()),
-                        SyncStatus::Offline => (t.faint, tl!("Offline").to_string()),
-                        SyncStatus::NeedsPassword { .. } => (t.danger, tl!("Password needed").to_string()),
-                        SyncStatus::Error { error } => (t.warn, tf!("Disconnected: {error}", error = widgets::shorten(error, 60))),
-                    };
-                    let label = a.config.email.clone();
-                    // "Password needed" is a link: click it to enter the password again.
-                    if matches!(a.status, SyncStatus::NeedsPassword { .. }) {
-                        if ui.link(RichText::new(text).color(t.danger).small()).on_hover_text(label).clicked() {
-                            again = Some(a.config.id.clone());
-                        }
-                    } else {
-                        ui.label(RichText::new(text).color(t.dim).small()).on_hover_text(label);
+                        dot(ui, color);
                     }
-                    let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                    ui.painter().circle_filled(dot.center(), 4.0, color);
+                    return;
+                }
+                let each: Vec<String> =
+                    s.accounts.iter().map(|a| tf!("{account}: {status}", account = a.config.email, status = account_status(s, &t, a).1)).collect();
+                let each = each.join("\n");
+                let busy = s.accounts.iter().any(|a| matches!(a.status, SyncStatus::Syncing { .. }));
+                let connecting = s.accounts.iter().any(|a| matches!(a.status, SyncStatus::Connecting));
+                let failed = s.accounts.iter().filter(|a| matches!(a.status, SyncStatus::Error { .. })).count();
+                let online = s.accounts.iter().any(|a| matches!(a.status, SyncStatus::Online { .. }));
+                let (color, text) = if busy {
+                    (t.accent, tl!("Updating…").to_string())
+                } else if connecting {
+                    (t.accent, tl!("Connecting…").to_string())
+                } else if failed > 0 {
+                    (t.warn, tf!("{n} accounts disconnected", n = failed))
+                } else if online {
+                    (t.ok, tl!("All folders are up to date").to_string())
+                } else {
+                    (t.faint, tl!("Offline").to_string())
+                };
+                ui.label(RichText::new(text).color(t.dim).small()).on_hover_text(&each);
+                dot(ui, color);
+                // Accounts waiting for you: a link each (it signs in again).
+                for a in s.accounts.iter().rev().filter(|a| matches!(a.status, SyncStatus::NeedsPassword { .. })) {
                     ui.add_space(10.0);
+                    let text = tf!("{account}: {status}", account = a.config.email, status = account_status(s, &t, a).1);
+                    if ui.link(RichText::new(text).color(t.danger).small()).clicked() {
+                        again = Some(a.config.id.clone());
+                    }
+                    dot(ui, t.danger);
                 }
             });
         });
@@ -1916,7 +2004,7 @@ impl MailApp {
 
     /// Preferences and theme for the app to save.
     pub fn saved_state(&self) -> Value {
-        json!({ "prefs": self.session.prefs, "dark": self.ui.dark, "language": self.ui.language, "windows": self.ui.places })
+        json!({ "prefs": self.session.prefs, "dark": self.ui.dark, "language": self.ui.language, "windows": self.ui.places, "peopleView": self.ui.people_view })
     }
 
     pub fn restore_state(&mut self, v: &Value) {
@@ -1930,6 +2018,9 @@ impl MailApp {
             }
         }
         self.ui.dark = v.get("dark").and_then(Value::as_bool);
+        if let Some(pv) = v.get("peopleView").and_then(|w| serde_json::from_value(w.clone()).ok()) {
+            self.ui.people_view = pv;
+        }
         if let Some(w) = v.get("windows").and_then(|w| serde_json::from_value(w.clone()).ok()) {
             self.ui.places = w;
         }
@@ -1941,6 +2032,29 @@ impl MailApp {
 
 /// The toolbar of a message window. Replying and forwarding happen in the main window, so
 /// they close this one; so do Delete and Archive.
+/// An account's status for the status bar: its colour and words.
+fn account_status(s: &Session, t: &Tokens, a: &mailcraft_engine::AccountState) -> (egui::Color32, String) {
+    match &a.status {
+        SyncStatus::Online { at } => (t.ok, tf!("Updated {time}", time = i18n::date(&mailcraft_engine::model::dates::list_time(*at, &s.clock)))),
+        SyncStatus::Syncing { .. } if a.is_data_file() => (t.accent, tf!("Opening {file}…", file = a.config.email)),
+        SyncStatus::Syncing { folder } => (
+            t.accent,
+            tf!(
+                "Updating {folder}…",
+                folder = s.folder(&a.config.id, folder).map(|f| i18n::tc("folder", &f.display_name()).to_string()).unwrap_or_default()
+            ),
+        ),
+        SyncStatus::Connecting => (t.accent, tl!("Connecting…").to_string()),
+        SyncStatus::Offline if a.is_data_file() => (t.faint, tl!("Outlook data file").to_string()),
+        SyncStatus::Offline if a.is_local() => (t.faint, tl!("Sample mailbox (offline)").to_string()),
+        SyncStatus::Offline => (t.faint, tl!("Offline").to_string()),
+        // An account that signs in in the browser has no password to ask for.
+        SyncStatus::NeedsPassword { .. } if a.config.oauth.is_some() => (t.danger, tl!("Sign in again").to_string()),
+        SyncStatus::NeedsPassword { .. } => (t.danger, tl!("Password needed").to_string()),
+        SyncStatus::Error { error } => (t.warn, tf!("Disconnected: {error}", error = widgets::shorten(error, 60))),
+    }
+}
+
 fn window_toolbar(ui: &mut Ui, s: &Session, t: &Tokens, key: &MessageKey, acts: &mut Vec<Action>) {
     let close = || Action::Run("message.closeWindow", json!({"key": key.to_id()}));
     let flagged = s.summary(key).is_some_and(|m| m.flags.flagged);
@@ -2005,6 +2119,7 @@ fn module_switch(ui: &mut Ui, t: &Tokens, module: Module, acts: &mut Vec<Action>
             (Module::Mail, Icon::Unread, "Mail", "mail"),
             (Module::Calendar, Icon::Calendar, "Calendar", "calendar"),
             (Module::People, Icon::People, "People", "people"),
+            (Module::Notes, Icon::Note, "Notes", "notes"),
         ] {
             let (r, resp) = ui.allocate_exact_size(vec2(40.0, 34.0), Sense::click());
             let on = m == module;
@@ -2025,6 +2140,7 @@ fn module_switch_vertical(ui: &mut Ui, t: &Tokens, module: Module, acts: &mut Ve
         (Module::Mail, Icon::Unread, "Mail", "mail"),
         (Module::Calendar, Icon::Calendar, "Calendar", "calendar"),
         (Module::People, Icon::People, "People", "people"),
+        (Module::Notes, Icon::Note, "Notes", "notes"),
     ] {
         let (r, resp) = ui.allocate_exact_size(vec2(40.0, 34.0), Sense::click());
         let on = m == module;

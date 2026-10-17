@@ -39,7 +39,7 @@ pub struct AccountForm {
     pub pop_security: Security,
     /// POP: when the server's copy of downloaded mail goes.
     pub pop_keep: PopKeep,
-    /// POP: an existing Outlook data file whose mail comes in first (Outlook's "use an existing data file").
+    /// POP: an existing data file (Outlook's `.pst` or MailCraft's own `.mailcraft`) whose mail comes in first.
     pub pst: String,
     pub error: Option<String>,
     /// The address whose looked-up settings are filled in, and where they came from.
@@ -427,6 +427,11 @@ pub enum Dialog {
         folder: String,
         name: String,
         for_good: bool,
+    },
+    /// Open someone else's calendar by their address (Outlook's Open Calendar).
+    OpenSharedCalendar {
+        email: String,
+        error: Option<String>,
     },
     /// A folder's Properties: where it is, how many messages, how much is on this computer.
     FolderProperties {
@@ -817,6 +822,7 @@ impl Dialog {
             Dialog::Event(f) => f.error = Some(e),
             Dialog::Contact(f) => f.error = Some(e),
             Dialog::Vacation(f) => f.error = Some(e),
+            Dialog::OpenSharedCalendar { error, .. } => *error = Some(e),
             _ => {}
         }
     }
@@ -895,11 +901,22 @@ fn security_combo(ui: &mut Ui, id: &str, v: &mut Security) {
         });
 }
 
+/// A dialog's bottom row, right-aligned and one row tall: a layout given all the room left made
+/// every dialog as tall as the last one shown, with its buttons floating halfway down.
+fn button_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 30.0), egui::Layout::right_to_left(egui::Align::Center), add).inner
+}
+
+/// A Close button on its own row; whether the dialog stays open.
+fn close_row(ui: &mut Ui) -> bool {
+    button_row(ui, |ui| !ui.button(tl!("Close")).clicked())
+}
+
 fn buttons(ui: &mut Ui, t: &Tokens, ok: &str, ok_enabled: bool) -> (bool, bool) {
     let mut res = (false, false);
     ui.add_space(10.0);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if widgets::accent_button(ui, crate::icons::Icon::Send, ok, t, ok_enabled).clicked() {
+    button_row(ui, |ui| {
+        if widgets::primary_button(ui, ok, t, ok_enabled).clicked() {
             res.0 = true;
         }
         if ui.button(tl!("Cancel")).clicked() {
@@ -1031,7 +1048,9 @@ fn select_names(ui: &mut Ui, f: &mut NamesForm, t: &Tokens, acts: &mut Vec<Actio
 /// Show the dialog; returns whether it stays open.
 pub fn show(ctx: &egui::Context, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Action>) -> bool {
     let frame = dialog_frame(t);
-    let modal = egui::Modal::new(egui::Id::new("dialog")).frame(frame).show(ctx, |ui| body(ui, d, s, t, acts));
+    // Each kind of dialog keeps its own size: one id for all let a small one open at the size
+    // of the last big one.
+    let modal = egui::Modal::new(egui::Id::new(("dialog", std::mem::discriminant(d)))).frame(frame).show(ctx, |ui| body(ui, d, s, t, acts));
     let keep = modal.inner;
     keep && !modal.should_close()
 }
@@ -1226,11 +1245,11 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                     if f.pop {
                         // Outlook's "use an existing data file": mail kept from before comes in first.
                         ui.add_space(4.0);
-                        label(ui, "Existing Outlook data file (optional)");
+                        label(ui, "Existing data file (optional)");
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [w - 90.0, 26.0],
-                                egui::TextEdit::singleline(&mut f.pst).hint_text(tl!("Mail from an old .pst comes in first")),
+                                egui::TextEdit::singleline(&mut f.pst).hint_text(tl!("Mail from an old .pst or .mailcraft file comes in first")),
                             );
                             if ui.button(tl!("Browse…")).clicked() {
                                 acts.push(Action::PickAccountDataFile);
@@ -1304,7 +1323,23 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             // Providers that sign in through the browser (OAuth), when this copy can.
             let provider = if f.graph { Some("microsoft") } else { mailcraft_engine::model::oauth_provider_for(&f.imap_host) }
                 .filter(|p| s.oauth_available.iter().any(|a| a == p));
-            if f.graph && provider.is_none() {
+            // Outlook.com, Hotmail and Live take no passwords from mail apps any more: without
+            // Microsoft sign-in in this copy, say so rather than take a password that can't work.
+            let consumer = !f.jmap && !f.ews && mailcraft_engine::model::microsoft_consumer(&f.email);
+            let blocked = consumer && provider.is_none();
+            if blocked {
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(tl!(
+                            "Outlook.com, Hotmail and Live addresses only connect with Sign in with Microsoft: Microsoft no longer accepts passwords from mail apps. This copy of MailCraft wasn't built with Microsoft sign-in, so it can't add this account."
+                        ))
+                        .color(t.warn)
+                        .small(),
+                    )
+                    .wrap(),
+                );
+            } else if f.graph && provider.is_none() {
                 ui.add_space(6.0);
                 ui.label(RichText::new(tl!("Signing in with Microsoft isn't set up in this copy of MailCraft.")).color(t.warn).small());
             }
@@ -1332,7 +1367,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                     ui.label(RichText::new(tl!("in your browser: no password stored")).color(t.faint).small());
                 });
             }
-            let ready = !f.graph && !f.email.trim().is_empty() && !f.password.is_empty() && (!f.jmap || !f.jmap_url.trim().is_empty());
+            let ready = !f.graph && !blocked && !f.email.trim().is_empty() && !f.password.is_empty() && (!f.jmap || !f.jmap_url.trim().is_empty());
             let (ok, cancel) = buttons(ui, t, "Connect", ready);
             if ok {
                 if !f.jmap && !f.ews && f.imap_host.is_empty() {
@@ -1387,7 +1422,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             ui.label(RichText::new(tl!("The message is kept in Drafts if you save it.")).color(t.dim));
             ui.add_space(10.0);
             let mut keep = true;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            button_row(ui, |ui| {
                 if ui.button(tl!("Cancel")).clicked() {
                     keep = false;
                 }
@@ -1589,7 +1624,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                 if ui.button(tl!("Open")).clicked() {
                     acts.push(Action::InWindow(key.clone(), Box::new(Action::OpenAttachment(*index))));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| !ui.button(tl!("Close")).clicked()).inner
+                close_row(ui)
             })
             .inner
         }
@@ -1612,7 +1647,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                 );
             });
             ui.add_space(6.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| !ui.button(tl!("Close")).clicked()).inner
+            close_row(ui)
         }
         Dialog::NewCategory { name, color, error } => {
             ui.set_width(340.0);
@@ -1703,7 +1738,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                 acts.push(Action::Dialog(Dialog::rule_from("", "")));
             }
             ui.add_space(6.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| !ui.button(tl!("Close")).clicked()).inner
+            close_row(ui)
         }
         Dialog::EditRule(f) => {
             ui.set_width(440.0);
@@ -1804,6 +1839,32 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             !cancel
         }
         Dialog::EditAccount(f) => edit_account(ui, f, t, acts),
+        Dialog::OpenSharedCalendar { email, error } => {
+            ui.set_width(420.0);
+            title(ui, t, "Open a shared calendar");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tl!("Whose calendar? It opens read-only beside yours, when they've shared it with you in Exchange.")).color(t.dim),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
+            let r = ui.add(egui::TextEdit::singleline(email).hint_text("name@example.com").desired_width(f32::INFINITY));
+            if ui.memory(|m| m.focused().is_none()) {
+                r.request_focus();
+            }
+            if let Some(e) = error {
+                ui.add_space(4.0);
+                ui.label(RichText::new(e.as_str()).color(t.danger).small());
+            }
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let ready = email.contains('@');
+            let (ok, cancel) = buttons(ui, t, "Open", ready);
+            if (ok || enter) && ready {
+                acts.push(Action::Submit("calendar.openShared", json!({"email": email.trim()})));
+            }
+            !cancel
+        }
         Dialog::FolderProperties { name, account, location, total, unread, size } => {
             ui.set_width(380.0);
             title(ui, t, &tf!("{folder} Properties", folder = name));
@@ -1822,7 +1883,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                 }
             });
             ui.add_space(8.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| !ui.button(tl!("Close")).clicked()).inner
+            close_row(ui)
         }
         Dialog::Event(f) => crate::pim_dialogs::event(ui, f, t, acts),
         Dialog::Contact(f) => crate::pim_dialogs::contact(ui, f, t, acts),

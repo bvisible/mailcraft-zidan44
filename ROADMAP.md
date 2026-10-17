@@ -1,6 +1,6 @@
 # Roadmap
 
-**Stage:** v0.10 — Windows, folders and rules as Outlook keeps them (2026-10-15). Each milestone below is a version: v0.1 was
+**Stage:** v0.13 — The open gaps, again (2026-10-17). Each milestone below is a version: v0.1 was
 the first working client, and every later one is named for what it added.
 Scope: [storytold/artcraft#2177](https://github.com/storytold/artcraft/issues/2177) (lightweight,
 local-first, media-aware v1); the fuller request is
@@ -11,9 +11,9 @@ local-first, media-aware v1); the fuller request is
 | | |
 |---|---|
 | Crates | 8 libraries + 3 apps + xtask |
-| Commands | 113 (`mailcraft-cli commands`) |
+| Commands | 130 (`mailcraft-cli commands`) |
 | Tests | 218 (unit, in-memory IMAP, JMAP, Graph, EWS (mail, calendars, contacts, Autodiscover), CalDAV/CardDAV and ManageSieve servers, NTLM test vectors, SMTP and HTTP stubs, data files, TCP end-to-end, an X server drag, headless UI) |
-| Languages | 13 (English, Spanish, French, German, Brazilian Portuguese, Italian, Russian, Japanese, Korean, Simplified and Traditional Chinese, Arabic, Hebrew) |
+| Languages | 14 (English, Spanish, French, German, Dutch, Brazilian Portuguese, Italian, Russian, Japanese, Korean, Simplified and Traditional Chinese, Arabic, Hebrew) |
 | Platforms | Windows, macOS, Linux; the browser (JMAP accounts) |
 
 ## Milestones
@@ -44,8 +44,21 @@ local-first, media-aware v1); the fuller request is
    sizes, subfolders under their parents, rules run at once, attachments in message windows; from
    a second audit: the Search tab, Follow Up dates, Delay delivery and Replies to, Outlook's menu
    items, hover everywhere.
-11. **Next:** what's left in [docs/gaps.md](docs/gaps.md): a relay for IMAP accounts in the
-   browser, bidirectional editing, Wayland drag-out, what the `.pst` libraries can't do yet.
+11. **v0.11 — Notes, previews and Exchange beyond the mailbox** ✅ From issue #1: attachments
+   previewed in the reading pane (Word, Excel and PowerPoint too), Notes, three People layouts,
+   other people's Exchange calendars, public folders, Dutch; Outlook.com and Hotmail say why
+   they need Microsoft sign-in.
+12. **v0.12 — Microsoft sign-in that works** ✅ Microsoft sign-in tried end to end: the sign-in page
+   opens in the browser on Windows, accounts that sign in that way ask to sign in again rather
+   than for a password, an account Microsoft refuses says why, sent mail shows in Sent Items at
+   once; dialogs and the folder pane keep their sizes.
+13. **v0.13 — The open gaps, again** ✅ From an audit of [docs/gaps.md](docs/gaps.md): other
+   people's Exchange calendars can be changed where they allow it, HTML mail's background
+   pictures and boxes placed over others, text in its cell's colour, Outlook's notes from a data
+   file, right-to-left mail copied as written; calendar boxes that fit their lines.
+14. **Next:** what's left in [docs/gaps.md](docs/gaps.md): a relay for IMAP accounts in the
+   browser, bidirectional editing, Wayland drag-out, Kerberos-only Exchange, what the `.pst`
+   libraries can't do yet.
 
 ## Progress log
 
@@ -88,3 +101,13 @@ local-first, media-aware v1); the fuller request is
 - **2026-10-16** — **v0.10**: a second audit against Outlook: a Search tab, Follow Up with dates,
   Delay delivery and Replies to, Forward as attachment, Reply with meeting, Find related, Delete
   all and folder Properties, hover on every control; CJK names drawn in any interface language.
+- **2026-10-17** — **v0.11**: issue #1: attachments preview in the reading pane (pictures, PDF
+  pages, text, Word, Excel, PowerPoint), Notes, three People layouts, other people's Exchange
+  calendars, public folders, Dutch; Outlook.com and Hotmail say why they need Microsoft sign-in.
+- **2026-10-17** — **v0.12**: Microsoft sign-in tried end to end (Outlook.com over IMAP, a
+  personal Microsoft account through Graph): the sign-in page opens on Windows, "Sign in again"
+  instead of a password, refusals say why, Sent Items catches up at once; dialog and pane sizes.
+- **2026-10-17** — **v0.13**: the gaps audited again: shared Exchange calendars editable where
+  allowed (Graph and EWS), background pictures and placed boxes in HTML mail, cell colours, notes
+  from `.pst` files, right-to-left text copied from a right-click; Exchange Online's public
+  folders wait on Microsoft (EWS is being retired there).

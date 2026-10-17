@@ -111,6 +111,9 @@ fn keep_draft(store: &Store, account: &str, folder: &str, replaces: Option<mailc
     store.save_account_doc(account, PENDING_DRAFTS, &list).map_err(NetError::from)
 }
 
+/// Why a Microsoft account signing in with a password can't connect.
+pub const MICROSOFT_NO_PASSWORDS: &str = "Microsoft doesn't accept passwords from mail apps for this account: it needs Sign in with Microsoft";
+
 pub(crate) fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)).unwrap_or(0)
 }
@@ -209,11 +212,27 @@ impl Pool {
         }
     }
 
-    /// Import a data file on a thread of its own.
+    /// Import a data file on a thread of its own: an Outlook one (`.pst`), or MailCraft's own
+    /// (`.mailcraft`, copied in as it is).
     fn import_pst(&mut self, account: String, path: String) {
         let sink = self.sink.clone();
         let store = self.store.clone();
         let spawned = std::thread::Builder::new().name("mail-import".into()).spawn(move || {
+            if path.to_ascii_lowercase().ends_with(".mailcraft") {
+                match store.import_data_file(&account, std::path::Path::new(&path)) {
+                    Ok(messages) => {
+                        let folders = store.load_folders(&account).unwrap_or_default();
+                        let paths: Vec<String> = folders.iter().map(|f| f.path.clone()).collect();
+                        sink.emit(Event::Folders { account: account.clone(), folders });
+                        for folder in paths {
+                            sink.emit(Event::FolderChanged { account: account.clone(), folder });
+                        }
+                        sink.emit(Event::Imported { account, messages, skipped: 0, done: true, error: None });
+                    }
+                    Err(e) => sink.emit(Event::Imported { account, messages: 0, skipped: 0, done: true, error: Some(e.to_string()) }),
+                }
+                return;
+            }
             let mut progress = |messages| sink.emit(Event::Imported { account: account.clone(), messages, skipped: 0, done: false, error: None });
             let result = crate::pst::import(std::path::Path::new(&path), &store, &account, &mut progress);
             match result {
@@ -433,6 +452,10 @@ const MAX_PICTURE: usize = 8 << 20;
 const FULL_SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
 const IDLE_FOR: Duration = Duration::from_secs(10 * 60);
 const POLL_EVERY: Duration = Duration::from_secs(120);
+/// When Sent Items is read again after Graph or Exchange took a message (its copy is filed a
+/// moment later), and once more in case that was too soon.
+const SENT_SOON: Duration = Duration::from_secs(3);
+const SENT_LATER: Duration = Duration::from_secs(15);
 
 /// The connection to an account's server.
 enum Conn {
@@ -459,6 +482,8 @@ struct Worker {
     backoff: Duration,
     next_attempt: Instant,
     last_full: Option<Instant>,
+    /// Not connecting again until asked (Send / Receive, a new start): the sign-in was refused,
+    /// or the server said no to the account itself.
     auth_failed: bool,
     closed: bool,
     /// Where a rotated OAuth refresh token is saved.
@@ -469,6 +494,9 @@ struct Worker {
     no_push: bool,
     /// The last push wait ended in an Inbox sync (so the next one needn't check first).
     pushed: bool,
+    /// Folders to look at again soon: Graph and Exchange file a sent message's copy a moment
+    /// after taking it, so Sent Items is read again then rather than at the next poll.
+    soon: Vec<(Instant, String)>,
     /// The current OAuth access token.
     access: Option<crate::oauth::Tokens>,
 }
@@ -499,6 +527,7 @@ impl Worker {
             sieve_port: crate::sieve::PORT,
             no_push: false,
             pushed: false,
+            soon: Vec::new(),
         }
     }
 
@@ -603,9 +632,21 @@ impl Worker {
         }
         let idle = matches!(&self.conn, Some(Conn::Imap(c)) if c.has("IDLE"));
         if !idle || inbox.is_none() {
-            match rx.recv_timeout(POLL_EVERY) {
+            let next_soon = self.soon.iter().map(|(at, _)| *at).min();
+            let wait = next_soon.map_or(POLL_EVERY, |at| at.saturating_duration_since(Instant::now()).min(POLL_EVERY));
+            match rx.recv_timeout(wait) {
                 Ok(j) => self.queue.push_back(j),
                 Err(RecvTimeoutError::Disconnected) => self.closed = true,
+                Err(RecvTimeoutError::Timeout) if next_soon.is_some_and(|at| at <= Instant::now()) => {
+                    let now = Instant::now();
+                    let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.soon).into_iter().partition(|(at, _)| *at <= now);
+                    self.soon = later;
+                    let mut folders: Vec<String> = due.into_iter().map(|(_, f)| f).collect();
+                    folders.dedup();
+                    for f in folders {
+                        self.sync_one(&f);
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some(f) = inbox {
                         self.sync_one(&f);
@@ -704,6 +745,12 @@ impl Worker {
     fn failed(&mut self, e: NetError) {
         log::warn!("{}: {e}", self.acc.id);
         match e {
+            // Microsoft's servers refuse passwords from mail apps: asking for it again only loops.
+            NetError::Auth(m) if mailcraft_model::microsoft_password_account(&self.acc) => {
+                self.conn = None;
+                self.auth_failed = true;
+                self.status(SyncStatus::Error { error: format!("{MICROSOFT_NO_PASSWORDS} ({m})") });
+            }
             NetError::Auth(m) => {
                 self.conn = None;
                 self.auth_failed = true;
@@ -771,9 +818,25 @@ impl Worker {
         Ok(())
     }
 
+    /// A connection that couldn't be made is never tried again at once (that looped, showing
+    /// "Connecting…" for good): a refusal (Graph's "no mailbox", a setting the server won't take)
+    /// waits until asked, anything else for the backoff.
+    fn connect_failed(&mut self, e: NetError) {
+        match e {
+            e @ NetError::Auth(_) => self.failed(e),
+            e if e.is_fatal() => self.failed(e),
+            e => {
+                log::warn!("{}: {e}", self.acc.id);
+                self.conn = None;
+                self.auth_failed = true;
+                self.status(SyncStatus::Error { error: e.to_string() });
+            }
+        }
+    }
+
     fn connect_and_sync(&mut self) {
         if let Err(e) = self.connect() {
-            self.failed(e);
+            self.connect_failed(e);
             return;
         }
         self.replay();
@@ -1260,7 +1323,21 @@ impl Worker {
         }
         let user = if self.acc.username.is_empty() { self.acc.email.clone() } else { self.acc.username.clone() };
         let secret = self.secret()?;
-        smtp::send_with(&self.acc.smtp, &user, &secret, self.acc.oauth.is_some(), from, recipients, raw)
+        smtp::send_with(&self.acc.smtp, &user, &secret, self.acc.oauth.is_some(), from, recipients, raw).map_err(|e| match e {
+            // Say whether the sign-in covered sending: Microsoft lists what it granted.
+            NetError::Auth(m) if self.acc.oauth.as_deref() == Some("microsoft") => {
+                let granted = self.access.as_ref().map(|t| t.granted.clone()).unwrap_or_default();
+                let why = if granted.is_empty() {
+                    String::new()
+                } else if granted.to_ascii_lowercase().contains("smtp.send") {
+                    " (the sign-in includes sending: Microsoft's server refused it)".to_string()
+                } else {
+                    format!(" (Microsoft's sign-in didn't include sending; it granted: {granted})")
+                };
+                NetError::Auth(format!("{m}{why}"))
+            }
+            e => e,
+        })
     }
 
     fn send(&mut self, id: u64, raw: &[u8], from: &str, recipients: &[String], sent_folder: Option<String>) {
@@ -1336,6 +1413,13 @@ impl Worker {
             let sent = sent_folder.or_else(|| self.folders.iter().find(|f| f.role == FolderRole::Sent).map(|f| f.path.clone()));
             if let Some(f) = sent.filter(|_| self.conn.is_some()) {
                 self.sync_one(&f);
+                // Graph and Exchange file the copy a moment later: look again then.
+                if matches!(self.conn, Some(Conn::Graph(_) | Conn::Ews(_))) {
+                    let now = Instant::now();
+                    self.soon.retain(|(_, g)| *g != f);
+                    self.soon.push((now + SENT_SOON, f.clone()));
+                    self.soon.push((now + SENT_LATER, f));
+                }
             }
             return;
         }
@@ -1485,6 +1569,34 @@ mod tests {
         assert_eq!(m.get(&a).as_deref(), Some("pw"));
         m.delete(&a);
         assert_eq!(m.get(&a), None);
+    }
+
+    /// A MailCraft data file (`.mailcraft`) comes in through the same job as a `.pst`.
+    #[test]
+    fn a_mailcraft_data_file_is_imported() {
+        let t = std::env::temp_dir().join(format!("mailcraft-worker-datafile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let old = Store::open_packed(t.join("old"), t.join("Old Files")).unwrap();
+        old.save_accounts(&[AccountConfig { id: "a1".into(), email: "zoe@studio.example".into(), ..Default::default() }]).unwrap();
+        old.save_folders("a1", &[Folder { path: "INBOX".into(), role: FolderRole::Inbox, ..Default::default() }]).unwrap();
+        let k = MessageKey { account: "a1".into(), folder: "INBOX".into(), validity: 1, uid: 3 };
+        let mut st = old.load_folder("a1", "INBOX").unwrap();
+        st.messages.push(mailcraft_model::Summary { key: k, subject: "Kept".into(), ..Default::default() });
+        old.save_folder("a1", "INBOX", &st).unwrap();
+        let file = old.data_file("a1").unwrap();
+        drop(old);
+        let store = Store::open_packed(t.join("app"), t.join("Files")).unwrap();
+        let mut p = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        p.submit(Job::ImportPst { account: "p1".into(), path: file.to_string_lossy().into_owned() });
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut seen = Vec::new();
+        while Instant::now() < end && !seen.iter().any(|e| matches!(e, Event::Imported { done: true, .. })) {
+            seen.extend(p.wait(Duration::from_millis(100)));
+        }
+        assert!(seen.iter().any(|e| matches!(e, Event::Imported { messages: 1, done: true, error: None, .. })), "{seen:?}");
+        assert!(seen.iter().any(|e| matches!(e, Event::Folders { folders, .. } if folders.len() == 1)));
+        assert_eq!(store.load_folder("p1", "INBOX").unwrap().messages[0].key.account, "p1");
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

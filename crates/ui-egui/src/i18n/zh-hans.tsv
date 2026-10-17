@@ -715,3 +715,47 @@ month	May	5月
 	Clear formatting	清除格式
 	Insert link	插入链接
 	The selected text	所选文字
+	Outlook.com, Hotmail and Live addresses only connect with Sign in with Microsoft: Microsoft no longer accepts passwords from mail apps. This copy of MailCraft wasn't built with Microsoft sign-in, so it can't add this account.	Outlook.com、Hotmail 和 Live 地址只能通过“使用 Microsoft 登录”连接:Microsoft 不再接受邮件应用的密码。此 MailCraft 副本构建时未包含 Microsoft 登录,因此无法添加此帐户。
+	Back to message	返回邮件
+	Esc	Esc
+	Open it in its app, or save it.	在其应用中打开,或保存它。
+	Page {n}	第 {n} 页
+	Slide {n}	幻灯片 {n}
+	The document is empty.	文档为空。
+	The first {shown} of {total} pages: open it to read the rest.	共 {total} 页中的前 {shown} 页:打开它以阅读其余部分。
+	The sheet is empty.	工作表为空。
+	There's no preview for this file.	此文件没有预览。
+	{n} people	{n} 人
+	Cards	名片
+	Phone list	电话列表
+	Full name	全名
+	Search notes	搜索便笺
+	{n} notes	{n} 条便笺
+	No notes yet: New note starts one.	还没有便笺:点“新建便笺”开始一条。
+	No note matches.	没有匹配的便笺。
+	Write your note…	写下便笺…
+	Blue	蓝色
+	Green	绿色
+	Pink	粉色
+	Yellow	黄色
+	White	白色
+	Color	颜色
+	New note	新建便笺
+	Open a shared calendar	打开共享日历
+	Open shared calendar…	打开共享日历…
+	Remove this calendar	移除此日历
+	Shared with you, opened from {account}	已与你共享,从 {account} 打开
+	Whose calendar? It opens read-only beside yours, when they've shared it with you in Exchange.	谁的日历?如果对方已在 Exchange 中与你共享,它会以只读方式在你的日历旁打开。
+	read-only	只读
+	Public Folders	公用文件夹
+	Copy the whole message	复制整封邮件
+	Existing data file (optional)	现有数据文件(可选)
+	Mail from an old .pst or .mailcraft file comes in first	先导入旧 .pst 或 .mailcraft 文件中的邮件
+	Open a data file	打开数据文件
+	Bring in an Outlook data file (.pst) or a MailCraft one (.mailcraft). It opens as a mailbox of its own, with its folders, kept on this computer.	导入 Outlook 数据文件 (.pst) 或 MailCraft 文件 (.mailcraft)。它会连同文件夹作为独立的邮箱打开,保存在此计算机上。
+	Move up	上移
+	Move down	下移
+	Updating…	正在更新…
+	All folders are up to date	所有文件夹都是最新的
+	{n} accounts disconnected	{n} 个帐户已断开连接
+	{account}: {status}	{account}:{status}

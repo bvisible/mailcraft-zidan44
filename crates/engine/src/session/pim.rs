@@ -19,6 +19,8 @@ pub enum Module {
     Mail,
     Calendar,
     People,
+    /// Outlook's Notes.
+    Notes,
 }
 
 /// How much of the calendar is shown.
@@ -274,7 +276,7 @@ impl Session {
                 let gone: Vec<StoredEvent> = p.events.iter().filter(|e| e.event.uid == uid).cloned().collect();
                 for g in gone.iter().filter(|g| !g.href.is_empty()) {
                     remote = true;
-                    p.deleted.push(Tombstone { href: g.href.clone(), etag: g.etag.clone() });
+                    p.deleted.push(Tombstone { href: g.href.clone(), etag: g.etag.clone(), calendar: g.calendar.clone() });
                 }
                 p.events.retain(|e| e.event.uid != uid);
             }
@@ -310,6 +312,24 @@ impl Session {
                 // Stored in another calendar (a new event goes to the server's default one).
                 e.calendar = x.calendar.clone();
                 e.dirty &= e.event != x.event;
+            }
+        }
+        // Notes stored on the server: their item there, and no longer to send.
+        for x in &sync.pushed_notes {
+            for n in p.notes.iter_mut().filter(|n| n.note.uid == x.note.uid) {
+                n.href = x.href.clone();
+                n.etag = x.etag.clone();
+                n.dirty &= n.note != x.note;
+            }
+        }
+        // The server's notes, by their item there; those changed here (and those never sent)
+        // stay.
+        if let Some(server) = &sync.notes {
+            p.notes.retain(|n| n.dirty || n.href.is_empty());
+            for x in server {
+                if !p.notes.iter().any(|n| !n.href.is_empty() && n.href == x.href) {
+                    p.notes.push(x.clone());
+                }
             }
         }
         for x in &sync.pushed_cards {
@@ -422,12 +442,169 @@ impl Session {
         let mut remote = false;
         for c in p.cards.iter().filter(|c| c.card.uid == uid && !c.href.is_empty()) {
             remote = true;
-            p.deleted.push(Tombstone { href: c.href.clone(), etag: c.etag.clone() });
+            p.deleted.push(Tombstone { href: c.href.clone(), etag: c.etag.clone(), ..Default::default() });
         }
         p.cards.retain(|c| c.card.uid != uid);
         self.after_pim_change(&account, remote);
         Ok(serde_json::json!({"deleted": uid}))
     }
+}
+
+/// A note with the account it's in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteRef {
+    pub account: String,
+    pub note: mailcraft_model::pim::Note,
+}
+
+impl Session {
+    // ----- other people's calendars -----
+
+    /// Open someone else's calendar from an Exchange account (Outlook's Open Calendar › From
+    /// Address Book): read with the account's own, read-only, once the server shows it.
+    pub fn open_shared_calendar(&mut self, account: Option<&str>, email: &str) -> CmdResult {
+        let account = match account {
+            Some(a) => self.pim_account(Some(a))?,
+            None => self
+                .accounts
+                .iter()
+                .find(|a| a.config.graph.is_some() || a.config.ews.is_some())
+                .map(|a| a.config.id.clone())
+                .ok_or_else(|| CmdError::Disabled("other people's calendars open from an Exchange account".into()))?,
+        };
+        if !self.account(&account).is_some_and(|a| a.config.graph.is_some() || a.config.ews.is_some()) {
+            return Err(CmdError::Params("other people's calendars open from an Exchange account".into()));
+        }
+        let email = email.trim().to_ascii_lowercase();
+        let ok =
+            mailcraft_model::addr::parse_list(&email).is_ok_and(|l| l.len() == 1 && l.first().is_some_and(|a| a.email.eq_ignore_ascii_case(&email)));
+        if !ok {
+            return Err(CmdError::Params(format!("not an email address: {email}")));
+        }
+        let mine = self.account(&account).is_some_and(|a| a.config.email.eq_ignore_ascii_case(&email));
+        if mine {
+            return Err(CmdError::Params("that's this account's own calendar".into()));
+        }
+        let p = self.pim_mut(&account);
+        if !p.shared.contains(&email) {
+            if p.shared.len() >= 50 {
+                return Err(CmdError::Params("at most 50 other calendars can be open".into()));
+            }
+            p.shared.push(email.clone());
+        }
+        self.after_pim_change(&account, true);
+        Ok(serde_json::json!({"account": account, "calendar": mailcraft_model::pim::shared_calendar_id(&email)}))
+    }
+
+    /// Close someone else's calendar: it and its events go from this computer.
+    pub fn close_shared_calendar(&mut self, email: &str) -> CmdResult {
+        let email = email.trim().to_ascii_lowercase();
+        let id = mailcraft_model::pim::shared_calendar_id(&email);
+        let account = self.pim.iter().find(|(_, p)| p.shared.contains(&email) || p.calendars.iter().any(|c| c.id == id)).map(|(a, _)| a.clone());
+        let Some(account) = account else { return Err(CmdError::Params(format!("no calendar of {email} is open"))) };
+        let p = self.pim_mut(&account);
+        p.shared.retain(|e| *e != email);
+        p.calendars.retain(|c| c.id != id);
+        p.events.retain(|e| e.calendar != id);
+        self.after_pim_change(&account, false);
+        Ok(serde_json::json!({"closed": email}))
+    }
+
+    // ----- notes -----
+
+    /// Every note matching a search (in its text), the most recently changed first.
+    pub fn notes(&self, query: &str) -> Vec<NoteRef> {
+        let q = query.trim().to_lowercase();
+        let mut out: Vec<NoteRef> = self
+            .pim
+            .iter()
+            .flat_map(|(a, p)| {
+                p.notes
+                    .iter()
+                    .filter(|n| q.is_empty() || n.note.text.to_lowercase().contains(&q))
+                    .map(|n| NoteRef { account: a.clone(), note: n.note.clone() })
+            })
+            .collect();
+        out.sort_by(|a, b| b.note.modified.cmp(&a.note.modified).then_with(|| a.note.uid.cmp(&b.note.uid)));
+        out
+    }
+
+    fn note_account(&self, uid: &str) -> Result<String, CmdError> {
+        self.pim
+            .iter()
+            .find(|(_, p)| p.notes.iter().any(|n| n.note.uid == uid))
+            .map(|(a, _)| a.clone())
+            .ok_or_else(|| CmdError::Params(format!("no note `{uid}`")))
+    }
+
+    /// Notes go to the server only where it keeps them (Exchange's Notes folder).
+    fn notes_sync(&self, account: &str) -> bool {
+        self.account(account).is_some_and(|a| !a.is_local() && a.config.ews.is_some())
+    }
+
+    /// A new note; returns its uid.
+    pub fn create_note(&mut self, account: Option<&str>, text: &str, color: Option<u8>) -> CmdResult {
+        let account = self.pim_account(account)?;
+        let note = mailcraft_model::pim::Note {
+            uid: self.new_uid(),
+            text: cap_note(text),
+            color: color.unwrap_or(mailcraft_model::pim::NOTE_YELLOW).min(mailcraft_model::pim::NOTE_COLORS - 1),
+            modified: self.clock.now,
+        };
+        let uid = note.uid.clone();
+        let remote = self.notes_sync(&account);
+        let p = self.pim_mut(&account);
+        if p.notes.len() >= MAX_NOTES {
+            return Err(CmdError::Params(format!("an account keeps at most {MAX_NOTES} notes")));
+        }
+        p.notes.push(mailcraft_model::pim::StoredNote { note, dirty: remote, ..Default::default() });
+        self.after_pim_change(&account, remote);
+        Ok(serde_json::json!({"uid": uid, "account": account}))
+    }
+
+    /// Change a note's text or colour.
+    pub fn update_note(&mut self, uid: &str, text: Option<&str>, color: Option<u8>) -> CmdResult {
+        let account = self.note_account(uid)?;
+        let remote = self.notes_sync(&account);
+        let now = self.clock.now;
+        let p = self.pim_mut(&account);
+        let Some(n) = p.notes.iter_mut().find(|n| n.note.uid == uid) else { return Err(CmdError::Params(format!("no note `{uid}`"))) };
+        let before = n.note.clone();
+        if let Some(t) = text {
+            n.note.text = cap_note(t);
+        }
+        if let Some(c) = color {
+            n.note.color = c.min(mailcraft_model::pim::NOTE_COLORS - 1);
+        }
+        if n.note == before {
+            return Ok(serde_json::json!({"uid": uid, "changed": false}));
+        }
+        n.note.modified = now;
+        n.dirty |= remote;
+        self.after_pim_change(&account, remote);
+        Ok(serde_json::json!({"uid": uid}))
+    }
+
+    pub fn delete_note(&mut self, uid: &str) -> CmdResult {
+        let account = self.note_account(uid)?;
+        let p = self.pim_mut(&account);
+        let mut remote = false;
+        for n in p.notes.iter().filter(|n| n.note.uid == uid && !n.href.is_empty()) {
+            remote = true;
+            p.deleted.push(Tombstone { href: n.href.clone(), etag: n.etag.clone(), ..Default::default() });
+        }
+        p.notes.retain(|n| n.note.uid != uid);
+        self.after_pim_change(&account, remote);
+        Ok(serde_json::json!({"deleted": uid}))
+    }
+}
+
+/// Most notes an account keeps, and most characters in one.
+const MAX_NOTES: usize = 5_000;
+const MAX_NOTE_CHARS: usize = 100_000;
+
+fn cap_note(text: &str) -> String {
+    text.chars().take(MAX_NOTE_CHARS).collect()
 }
 
 fn check_event(e: &CalEvent) -> Result<(), CmdError> {

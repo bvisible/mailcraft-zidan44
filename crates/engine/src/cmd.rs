@@ -304,6 +304,25 @@ pub fn registry() -> Registry {
             Ok(json!({"minimized": s.prefs.folder_pane_minimized}))
         })
         .params(r#"{"minimized"?: bool}"#),
+        CommandSpec::new("view.collapse", "Collapse or expand in the folder pane", "Folder pane", |s, v| {
+            let key = p::req_str(v, "key")?.trim();
+            if key.is_empty() || key.len() > 600 {
+                return Err(CmdError::Params("`key` names what to collapse: favorites, account:<id> or folder:<account>/<path>".into()));
+            }
+            let collapse = p::bool(v, "collapsed").unwrap_or(!s.prefs.collapsed.contains(key));
+            if collapse {
+                // A bounded list: the oldest go first when there are very many.
+                while s.prefs.collapsed.len() >= 2_000 {
+                    let Some(first) = s.prefs.collapsed.iter().next().cloned() else { break };
+                    s.prefs.collapsed.remove(&first);
+                }
+                s.prefs.collapsed.insert(key.to_string());
+            } else {
+                s.prefs.collapsed.remove(key);
+            }
+            Ok(json!({"key": key, "collapsed": collapse}))
+        })
+        .params(r#"{"key": string (favorites, account:<id> or folder:<account>/<path>), "collapsed"?: bool (default: the other way)}"#),
         CommandSpec::new("view.focused", "Focused Inbox", "View › Messages", |s, v| {
             s.prefs.focused_inbox = p::bool(v, "on").unwrap_or(!s.prefs.focused_inbox);
             s.focus_other = false;
@@ -358,16 +377,38 @@ pub fn registry() -> Registry {
         .params(r#"{"address": string, "on"?: bool}"#),
         // Accounts
         // Calendar and People
-        CommandSpec::new("view.module", "Mail, Calendar or People", "Navigation", |s, v| {
+        CommandSpec::new("view.module", "Mail, Calendar, People or Notes", "Navigation", |s, v| {
             s.module = match p::req_str(v, "name")? {
                 "mail" => crate::Module::Mail,
                 "calendar" => crate::Module::Calendar,
                 "people" => crate::Module::People,
+                "notes" => crate::Module::Notes,
                 other => return Err(CmdError::Params(format!("unknown module `{other}`"))),
             };
             Ok(json!({"module": s.module}))
         })
-        .params(r#"{"name": "mail"|"calendar"|"people"}"#),
+        .params(r#"{"name": "mail"|"calendar"|"people"|"notes"}"#),
+        // Outlook's keys for its modules: Ctrl+1 Mail, Ctrl+2 Calendar, Ctrl+3 People, Ctrl+5 Notes.
+        CommandSpec::new("view.mail", "Mail", "Navigation", |s, _| {
+            s.module = crate::Module::Mail;
+            Ok(json!({"module": s.module}))
+        })
+        .key("Mod+1"),
+        CommandSpec::new("view.calendar", "Calendar", "Navigation", |s, _| {
+            s.module = crate::Module::Calendar;
+            Ok(json!({"module": s.module}))
+        })
+        .key("Mod+2"),
+        CommandSpec::new("view.people", "People", "Navigation", |s, _| {
+            s.module = crate::Module::People;
+            Ok(json!({"module": s.module}))
+        })
+        .key("Mod+3"),
+        CommandSpec::new("view.notes", "Notes", "Navigation", |s, _| {
+            s.module = crate::Module::Notes;
+            Ok(json!({"module": s.module}))
+        })
+        .key("Mod+5"),
         CommandSpec::new("calendar.view", "Day, week or month", "Calendar › View", |s, v| {
             s.cal_mode = match p::req_str(v, "mode")? {
                 "day" => crate::CalMode::Day,
@@ -500,6 +541,30 @@ pub fn registry() -> Registry {
             s.create_card(account.as_deref(), card)
         })
         .when(has_reading),
+        CommandSpec::new("calendar.openShared", "Open shared calendar", "Calendar", |s, v| s.open_shared_calendar(p::str(v, "account"), p::req_str(v, "email")?))
+            .params(r#"{"email": string (whose calendar), "account"?: string (an Exchange account; else the first)}"#),
+        CommandSpec::new("calendar.closeShared", "Close shared calendar", "Calendar", |s, v| s.close_shared_calendar(p::req_str(v, "email")?))
+            .params(r#"{"email": string}"#),
+        CommandSpec::new("note.list", "Notes", "Notes", |s, v| {
+            let list: Vec<Value> = s
+                .notes(p::str(v, "query").unwrap_or(""))
+                .into_iter()
+                .map(|n| json!({"uid": n.note.uid, "text": n.note.text, "color": n.note.color, "modified": n.note.modified, "account": n.account}))
+                .collect();
+            Ok(json!({"notes": list}))
+        })
+        .params(r#"{"query"?: string}"#),
+        CommandSpec::new("note.create", "New note", "Notes", |s, v| {
+            let color = p::u64(v, "color").and_then(|c| u8::try_from(c).ok());
+            s.create_note(p::str(v, "account"), p::str(v, "text").unwrap_or(""), color)
+        })
+        .params(r#"{"text"?: string, "color"?: 0|1|2|3|4 (blue, green, pink, yellow, white), "account"?: string}"#),
+        CommandSpec::new("note.update", "Edit note", "Notes", |s, v| {
+            let color = p::u64(v, "color").and_then(|c| u8::try_from(c).ok());
+            s.update_note(p::req_str(v, "uid")?, p::str(v, "text"), color)
+        })
+        .params(r#"{"uid": string, "text"?: string, "color"?: 0|1|2|3|4}"#),
+        CommandSpec::new("note.delete", "Delete note", "Notes", |s, v| s.delete_note(p::req_str(v, "uid")?)).params(r#"{"uid": string}"#),
         CommandSpec::new("folder.empty", "Empty folder", "Folder › Empty", |s, v| {
             let account = account_param(s, v)?;
             let folder = match (p::str(v, "folder"), p::str(v, "role")) {
@@ -519,7 +584,7 @@ pub fn registry() -> Registry {
             let path = p::req_str(v, "path")?.to_string();
             s.import_pst(&path)
         })
-        .params(r#"{"path": string (a .pst file; its mail goes into a new account on this computer)}"#),
+        .params(r#"{"path": string (a .pst or .mailcraft data file; its mail goes into a new account on this computer)}"#),
         CommandSpec::new("account.exportPst", "Export to Outlook data file", "File › Open & Export", |s, v| {
             let path = p::req_str(v, "path")?.to_string();
             let account = match p::str(v, "account") {
@@ -548,6 +613,12 @@ pub fn registry() -> Registry {
             }
         })
         .params(r#"{"email": string} (asks once; call again for the answer)"#),
+        CommandSpec::new("account.move", "Move account", "Folder pane › account menu", |s, v| {
+            let id = p::req_str(v, "account")?.to_string();
+            let by = p::i64(v, "by").ok_or_else(|| CmdError::Params("`by` is required: -1 (up) or 1 (down)".into()))?;
+            s.move_account(&id, by.clamp(-1000, 1000))
+        })
+        .params(r#"{"account": string, "by": number (-1 moves it up, 1 down)}"#),
         CommandSpec::new("account.remove", "Remove account", "File › Accounts", |s, v| {
             let id = p::req_str(v, "account")?.to_string();
             s.remove_account(&id)

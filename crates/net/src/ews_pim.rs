@@ -8,7 +8,7 @@
 //! mail is ever sent); then both folders are read again.
 
 use mailcraft_model::ical::{Attendee, CalEvent};
-use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, Pim, StoredCard, StoredEvent};
+use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, Note, Pim, StoredCard, StoredEvent, StoredNote};
 use mailcraft_model::vcard::{Card, Typed};
 use serde_json::{Value, json};
 
@@ -276,15 +276,60 @@ pub fn card_of(it: &El) -> Option<Card> {
     })
 }
 
+/// A sticky note's colour (MS-OXONOTE PidLidNoteColor), as EWS asks for it.
+const NOTE_COLOR: &str = r#"<t:ExtendedFieldURI PropertySetId="0006200E-0000-0000-C000-000000000046" PropertyId="35584" PropertyType="Integer"/>"#;
+
+/// A note in Exchange's Notes folder (`IPM.StickyNote`).
+pub fn note_of(it: &El) -> Option<StoredNote> {
+    if !it.text_of("ItemClass").is_some_and(|c| c.starts_with("IPM.StickyNote")) {
+        return None;
+    }
+    let id = it.child("ItemId")?;
+    let href = format!("note:{}", id.attr("Id")?);
+    let text = it.text_of("Body").map(str::to_string).filter(|b| !b.trim().is_empty()).unwrap_or_else(|| text(it, "Subject"));
+    let color = it
+        .children("ExtendedProperty")
+        .find(|p| p.find("ExtendedFieldURI").and_then(|f| f.attr("PropertyId")) == Some("35584"))
+        .and_then(|p| p.text_of("Value"))
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .filter(|c| *c < mailcraft_model::pim::NOTE_COLORS)
+        .unwrap_or(mailcraft_model::pim::NOTE_YELLOW);
+    let modified = it.text_of("LastModifiedTime").and_then(mailcraft_jmap::utc_date).unwrap_or(0);
+    Some(StoredNote {
+        href: href.clone(),
+        etag: id.attr("ChangeKey").unwrap_or("").to_string(),
+        note: Note { uid: href, text: text.replace("\r\n", "\n"), color, modified },
+        dirty: false,
+    })
+}
+
+/// A note as EWS creates it: a message of class `IPM.StickyNote`, its first line the subject.
+fn note_xml(n: &Note) -> String {
+    let subject: String = n.title().chars().take(255).collect();
+    format!(
+        "<t:Message><t:ItemClass>IPM.StickyNote</t:ItemClass><t:Subject>{}</t:Subject><t:Body BodyType=\"Text\">{}</t:Body>\
+         <t:ExtendedProperty>{NOTE_COLOR}<t:Value>{}</t:Value></t:ExtendedProperty></t:Message>",
+        esc(&subject),
+        esc(&n.text),
+        n.color
+    )
+}
+
 /// Every item of a distinguished folder, with all its properties (bodies as text).
 fn items(c: &Client, folder: &str) -> Result<Vec<El>> {
+    items_in(c, &format!("<t:DistinguishedFolderId Id=\"{folder}\"/>"), if folder == "notes" { NOTE_COLOR } else { "" })
+}
+
+/// Every item of a folder (given as its EWS folder id element), with all its properties.
+fn items_in(c: &Client, parent: &str, extra: &str) -> Result<Vec<El>> {
+    let folder = parent;
     let mut ids: Vec<String> = Vec::new();
     let mut offset = 0;
     loop {
         let m = c.call_one(&format!(
             "<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape>\
              <m:IndexedPageItemView MaxEntriesReturned=\"500\" Offset=\"{offset}\" BasePoint=\"Beginning\"/>\
-             <m:ParentFolderIds><t:DistinguishedFolderId Id=\"{folder}\"/></m:ParentFolderIds></m:FindItem>"
+             <m:ParentFolderIds>{folder}</m:ParentFolderIds></m:FindItem>"
         ))?;
         let Some(rf) = m.child("RootFolder") else { break };
         let page: Vec<String> =
@@ -301,8 +346,9 @@ fn items(c: &Client, folder: &str) -> Result<Vec<El>> {
         let list: String = chunk.iter().map(|id| format!("<t:ItemId Id=\"{}\"/>", esc(id))).collect();
         let doc = c.call(&format!(
             "<m:GetItem><m:ItemShape><t:BaseShape>AllProperties</t:BaseShape><t:BodyType>Text</t:BodyType>\
-             <t:AdditionalProperties><t:FieldURI FieldURI=\"calendar:Recurrence\"/></t:AdditionalProperties></m:ItemShape>\
-             <m:ItemIds>{list}</m:ItemIds></m:GetItem>"
+             <t:AdditionalProperties><t:FieldURI FieldURI=\"calendar:Recurrence\"/>{}</t:AdditionalProperties></m:ItemShape>\
+             <m:ItemIds>{list}</m:ItemIds></m:GetItem>",
+            extra
         ))?;
         for m in crate::ews::messages(&doc) {
             if m.attr("ResponseClass") == Some("Error") {
@@ -329,22 +375,47 @@ fn delete(c: &Client, id: &str) -> Result<()> {
     .map(drop)
 }
 
+/// The calendar folder: this mailbox's, or someone else's by their address.
+fn calendar_folder(owner: Option<&str>) -> String {
+    match owner {
+        Some(email) => format!(
+            "<t:DistinguishedFolderId Id=\"calendar\"><t:Mailbox><t:EmailAddress>{}</t:EmailAddress></t:Mailbox></t:DistinguishedFolderId>",
+            esc(email)
+        ),
+        None => "<t:DistinguishedFolderId Id=\"calendar\"/>".into(),
+    }
+}
+
+/// Whether this account may add and change items in a folder (its EffectiveRights).
+fn may_edit(c: &Client, folder: &str) -> bool {
+    let doc = c.call(&format!(
+        "<m:GetFolder><m:FolderShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>\
+         <t:FieldURI FieldURI=\"folder:EffectiveRights\"/></t:AdditionalProperties></m:FolderShape>\
+         <m:FolderIds>{folder}</m:FolderIds></m:GetFolder>"
+    ));
+    let Ok(doc) = doc else { return false };
+    let right = |name: &str| doc.find(name).is_some_and(|e| e.text.trim() == "true");
+    right("CreateContents") && right("Modify")
+}
+
 /// Send what changed here, then read the calendar and contacts again.
 pub fn sync(c: &Client, pim: &Pim, now: i64) -> Result<DavSync> {
     let mut out = DavSync { caldav_home: Some("ews".into()), carddav_home: Some("ews".into()), checked: now, ..Default::default() };
     for t in &pim.deleted {
-        match delete(c, t.href.trim_start_matches("contact:")) {
+        match delete(c, t.href.trim_start_matches("contact:").trim_start_matches("note:")) {
             Ok(()) | Err(NetError::No(_)) => out.deleted.push(t.href.clone()),
             Err(e) => out.errors.push(e.to_string()),
         }
     }
     for e in pim.events.iter().filter(|e| e.dirty) {
         let fields = event_fields(&e.event);
+        let owner = mailcraft_model::pim::shared_calendar_owner(&e.calendar);
         let r = if e.href.is_empty() {
             let body: String = fields.iter().map(|(_, x)| x.as_str()).collect();
             c.call_one(&format!(
-                "<m:CreateItem SendMeetingInvitations=\"SendToNone\"><m:SavedItemFolderId><t:DistinguishedFolderId Id=\"calendar\"/></m:SavedItemFolderId>\
-                 <m:Items><t:CalendarItem>{body}</t:CalendarItem></m:Items></m:CreateItem>"
+                "<m:CreateItem SendMeetingInvitations=\"SendToNone\"><m:SavedItemFolderId>{}</m:SavedItemFolderId>\
+                 <m:Items><t:CalendarItem>{body}</t:CalendarItem></m:Items></m:CreateItem>",
+                calendar_folder(owner)
             ))
             .map(|m| new_id(&m))
         } else {
@@ -369,7 +440,14 @@ pub fn sync(c: &Client, pim: &Pim, now: i64) -> Result<DavSync> {
             })
         };
         match r {
-            Ok((href, etag)) => out.pushed_events.push(StoredEvent { calendar: CALENDAR.into(), href, etag, event: e.event.clone(), dirty: false }),
+            // Someone else's event stays in their calendar.
+            Ok((href, etag)) => out.pushed_events.push(StoredEvent {
+                calendar: if owner.is_some() { e.calendar.clone() } else { CALENDAR.into() },
+                href,
+                etag,
+                event: e.event.clone(),
+                dirty: false,
+            }),
             Err(x) => out.errors.push(format!("{}: {x}", e.event.summary)),
         }
     }
@@ -404,8 +482,38 @@ pub fn sync(c: &Client, pim: &Pim, now: i64) -> Result<DavSync> {
             out.events.push(StoredEvent { calendar: CALENDAR.into(), href, etag, event, dirty: false });
         }
     }
-    out.calendars = Some(vec![CalendarInfo { id: CALENDAR.into(), name: "Calendar".into(), color: 0, read_only: false, ctag: String::new() }]);
+    let mut calendars = vec![CalendarInfo { id: CALENDAR.into(), name: "Calendar".into(), color: 0, read_only: false, ctag: String::new() }];
     out.synced_calendars.push(CALENDAR.into());
+    // Other people's calendars opened here: their mailbox's calendar folder (the delegate
+    // permissions they gave decide whether it can be read, and whether changed).
+    for (n, email) in pim.shared.iter().enumerate() {
+        let id = mailcraft_model::pim::shared_calendar_id(email);
+        let parent = calendar_folder(Some(email));
+        let can_edit = may_edit(c, &parent);
+        match items_in(c, &parent, "") {
+            Ok(list) => {
+                for it in list {
+                    if let Some(event) = event_of(&it) {
+                        let (href, etag) = it
+                            .child("ItemId")
+                            .map(|i| (i.attr("Id").unwrap_or("").to_string(), i.attr("ChangeKey").unwrap_or("").to_string()))
+                            .unwrap_or_default();
+                        out.events.push(StoredEvent { calendar: id.clone(), href, etag, event, dirty: false });
+                    }
+                }
+                out.synced_calendars.push(id.clone());
+            }
+            Err(e) => out.errors.push(format!("{email}'s calendar: {e}")),
+        }
+        calendars.push(CalendarInfo {
+            id,
+            name: email.clone(),
+            color: u8::try_from((n + 1) % 8).unwrap_or(0),
+            read_only: !can_edit,
+            ctag: String::new(),
+        });
+    }
+    out.calendars = Some(calendars);
     for it in items(c, "contacts")? {
         if let Some(card) = card_of(&it) {
             let etag = it.child("ItemId").and_then(|i| i.attr("ChangeKey")).unwrap_or("").to_string();
@@ -414,6 +522,32 @@ pub fn sync(c: &Client, pim: &Pim, now: i64) -> Result<DavSync> {
     }
     out.books = Some(vec![BookInfo { id: CONTACTS.into(), name: "Contacts".into(), read_only: false, ctag: String::new() }]);
     out.synced_books.push(CONTACTS.into());
+    // Notes (Outlook's sticky notes): what changed here goes up (made again, as contacts are),
+    // then the folder is read again. A mailbox without one keeps notes on this computer.
+    for n in pim.notes.iter().filter(|n| n.dirty) {
+        if let Some(old) = n.href.strip_prefix("note:")
+            && let Err(e) = delete(c, old)
+            && !matches!(e, NetError::No(_))
+        {
+            out.errors.push(format!("{}: {e}", n.note.title()));
+            continue;
+        }
+        let r = c.call_one(&format!(
+            "<m:CreateItem><m:SavedItemFolderId><t:DistinguishedFolderId Id=\"notes\"/></m:SavedItemFolderId><m:Items>{}</m:Items></m:CreateItem>",
+            note_xml(&n.note)
+        ));
+        match r {
+            Ok(m) => {
+                let (id, etag) = new_id(&m);
+                out.pushed_notes.push(StoredNote { href: format!("note:{id}"), etag, note: n.note.clone(), dirty: false });
+            }
+            Err(x) => out.errors.push(format!("{}: {x}", n.note.title())),
+        }
+    }
+    match items(c, "notes") {
+        Ok(list) => out.notes = Some(list.iter().filter_map(note_of).collect()),
+        Err(e) => log::info!("no Notes folder: {e}"),
+    }
     Ok(out)
 }
 

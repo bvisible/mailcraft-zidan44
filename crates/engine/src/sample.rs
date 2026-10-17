@@ -32,6 +32,120 @@ enum Attach {
     Pdf,
     /// An invitation (`METHOD:REQUEST`) to the sample event with this uid.
     Invite(&'static str),
+    /// A Word document and an Excel workbook, written here (an order confirmation).
+    Docx,
+    Xlsx,
+}
+
+/// A zip of these parts, stored uncompressed (APPNOTE 4.3), as an Office file's package.
+fn stored_zip(parts: &[(&str, String)]) -> Vec<u8> {
+    let (mut out, mut dir) = (Vec::new(), Vec::new());
+    let n16 = |n: usize| u16::try_from(n).unwrap_or(u16::MAX).to_le_bytes();
+    let n32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX).to_le_bytes();
+    for (name, body) in parts {
+        let (crc, at) = (crc32(body.as_bytes()).to_le_bytes(), n32(out.len()));
+        // Version 2.0, no flags, stored, 1980-01-01 00:00.
+        let common = [&[20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0][..], &crc, &n32(body.len()), &n32(body.len()), &n16(name.len())].concat();
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&common);
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(body.as_bytes());
+        dir.extend_from_slice(b"PK\x01\x02\x14\0");
+        dir.extend_from_slice(&common);
+        dir.extend_from_slice(&[0; 12]);
+        dir.extend_from_slice(&at);
+        dir.extend_from_slice(name.as_bytes());
+    }
+    let at = n32(out.len());
+    out.extend_from_slice(&dir);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    out.extend_from_slice(&n16(parts.len()));
+    out.extend_from_slice(&n16(parts.len()));
+    out.extend_from_slice(&n32(dir.len()));
+    out.extend_from_slice(&at);
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+const XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
+
+/// The sample's Word document: an order confirmation with a heading, bold text and a table.
+pub fn sample_docx() -> Vec<u8> {
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let p = |text: &str| format!("<w:p><w:r><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p>");
+    let cell = |text: &str, bold: bool| {
+        let rpr = if bold { "<w:rPr><w:b/></w:rPr>" } else { "" };
+        format!("<w:tc><w:tcPr><w:tcW w:w=\"3000\" w:type=\"dxa\"/></w:tcPr><w:p><w:r>{rpr}<w:t>{text}</w:t></w:r></w:p></w:tc>")
+    };
+    let row = |cells: [&str; 3], bold: bool| format!("<w:tr>{}</w:tr>", cells.iter().map(|c| cell(c, bold)).collect::<String>());
+    let borders = r#"<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>"#;
+    let body = [
+        r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>Order 4471: festival poster</w:t></w:r></w:p>"#.to_string(),
+        p("Thank you for your order. Here is what we will print once you approve the proof."),
+        r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Delivery: </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>Friday, to the studio front desk</w:t></w:r></w:p>"#.to_string(),
+        format!("<w:tbl><w:tblPr><w:tblW w:w=\"9000\" w:type=\"dxa\"/>{borders}</w:tblPr>{}{}{}</w:tbl>", row(["Item", "Size", "Copies"], true), row(["Poster, matte", "A2", "150"], false), row(["Poster, matte", "A3", "300"], false)),
+        p("Print Shop"),
+    ]
+    .concat();
+    stored_zip(&[
+        (
+            "[Content_Types].xml",
+            format!(
+                r#"{XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#
+            ),
+        ),
+        (
+            "_rels/.rels",
+            format!(
+                r#"{XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#
+            ),
+        ),
+        ("word/document.xml", format!(r#"{XML}<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>"#)),
+    ])
+}
+
+/// The sample's Excel workbook: the order's lines and a total.
+pub fn sample_xlsx() -> Vec<u8> {
+    let s = |r: &str, t: &str| format!(r#"<c r="{r}" t="inlineStr"><is><t>{t}</t></is></c>"#);
+    let n = |r: &str, v: &str| format!(r#"<c r="{r}"><v>{v}</v></c>"#);
+    let rows = [
+        format!(r#"<row r="1">{}{}{}{}</row>"#, s("A1", "Item"), s("B1", "Size"), s("C1", "Copies"), s("D1", "Price")),
+        format!(r#"<row r="2">{}{}{}{}</row>"#, s("A2", "Poster, matte"), s("B2", "A2"), n("C2", "150"), n("D2", "412.5")),
+        format!(r#"<row r="3">{}{}{}{}</row>"#, s("A3", "Poster, matte"), s("B3", "A3"), n("C3", "300"), n("D3", "390")),
+        format!(r#"<row r="4">{}{}</row>"#, s("A4", "Total"), r#"<c r="D4"><f>SUM(D2:D3)</f><v>802.5</v></c>"#),
+    ]
+    .concat();
+    stored_zip(&[
+        (
+            "[Content_Types].xml",
+            format!(
+                r#"{XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#
+            ),
+        ),
+        (
+            "_rels/.rels",
+            format!(
+                r#"{XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            format!(
+                r#"{XML}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Order 4471" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            format!(
+                r#"{XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+            ),
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            format!(r#"{XML}<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#),
+        ),
+    ])
 }
 
 /// A one-page PDF drawn in code (a poster proof: sky, sun, hills and a title), so the sample
@@ -96,14 +210,28 @@ const ME: (&str, &str) = ("Riley Moreno", "riley@studio.example");
 
 /// An 8×8 PNG drawn in code (a small checkerboard), so the sample carries a real image.
 pub fn sample_png() -> Vec<u8> {
+    png_of(8, 8, |x, y| if (x / 2 + y / 2) % 2 == 0 { [0x3B, 0x5B, 0xDB] } else { [0xF2, 0xF4, 0xFA] })
+}
+
+/// A wide banner drawn in code (deep teal into blue, with soft diagonal light), for a
+/// newsletter's heading to sit on.
+pub fn sample_banner_png() -> Vec<u8> {
+    png_of(96, 24, |x, y| {
+        let t = x as f32 / 95.0;
+        let glow = if (x + 2 * y) % 24 < 6 { 14.0 } else { 0.0 };
+        let mix = |a: f32, b: f32| (a + (b - a) * t + glow).clamp(0.0, 255.0) as u8;
+        [mix(31.0, 27.0), mix(110.0, 63.0), mix(94.0, 140.0)]
+    })
+}
+
+/// An RGB PNG of `w`×`h` from a colour per pixel (small: one uncompressed DEFLATE block).
+fn png_of(w: u32, h: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
     // Uncompressed DEFLATE (stored blocks) keeps this dependency-free.
-    let (w, h) = (8u32, 8u32);
     let mut raw = Vec::new();
     for y in 0..h {
         raw.push(0u8);
         for x in 0..w {
-            let on = (x / 2 + y / 2) % 2 == 0;
-            raw.extend_from_slice(if on { &[0x3B, 0x5B, 0xDB] } else { &[0xF2, 0xF4, 0xFA] });
+            raw.extend_from_slice(&pixel(x, y));
         }
     }
     let mut z = vec![0x78, 0x01, 0x01];
@@ -190,6 +318,8 @@ fn mails() -> Vec<Mail> {
             attachments: &[
                 ("proof-notes.txt", Attach::Text("Bleed: 3 mm\nColour profile: coated\nPaper: 170 gsm matte\n")),
                 ("festival-poster-proof.pdf", Attach::Pdf),
+                ("order-4471.docx", Attach::Docx),
+                ("order-4471.xlsx", Attach::Xlsx),
             ],
             reply_to_index: None,
             html: None,
@@ -224,7 +354,7 @@ fn mails() -> Vec<Mail> {
             html: Some(
                 "<div style=\"display:none\">Submissions close 30 November</div>\
                  <table width=\"600\" align=\"center\" cellpadding=\"0\" cellspacing=\"0\">\
-                 <tr><td align=\"center\" bgcolor=\"#2e7d6b\" style=\"color:#ffffff\">\
+                 <tr><td align=\"center\" bgcolor=\"#2e7d6b\" background=\"cid:banner@gallery.example\" style=\"color:#ffffff\">\
                  <h2>Winter group show: open call</h2></td></tr>\
                  <tr><td><table width=\"100%\"><tr>\
                  <td width=\"60%\" valign=\"top\">\
@@ -234,7 +364,8 @@ fn mails() -> Vec<Mail> {
                  <ul><li>Up to <b>three works</b> per artist</li><li>Opening night: the first Friday of December</li></ul>\
                  </td>\
                  <td width=\"40%\" valign=\"top\" align=\"center\">\
-                 <p><img src=\"cid:poster@gallery.example\" alt=\"Show poster\"></p>\
+                 <div style=\"position:relative;width:180px\"><img src=\"cid:poster@gallery.example\" alt=\"Show poster\">\
+                 <span style=\"position:absolute;top:6px;right:6px;background-color:#c62828;color:#ffffff\"><b>NEW</b></span></div>\
                  <p><span style=\"color:#c62828\">Deadline: 30 November</span> \
                  <span style=\"background-color:#fff176\">(no late entries)</span></p>\
                  </td></tr></table></td></tr>\
@@ -400,6 +531,16 @@ pub fn seed_if_empty_at(store: &Store, now: i64, offset: i64) -> Result<bool, St
                 Attach::Png => OutAttachment { name: (*name).into(), mime: "image/png".into(), data: sample_png() },
                 Attach::Text(t) => OutAttachment { name: (*name).into(), mime: "text/plain".into(), data: t.as_bytes().to_vec() },
                 Attach::Pdf => OutAttachment { name: (*name).into(), mime: "application/pdf".into(), data: sample_pdf() },
+                Attach::Docx => OutAttachment {
+                    name: (*name).into(),
+                    mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+                    data: sample_docx(),
+                },
+                Attach::Xlsx => OutAttachment {
+                    name: (*name).into(),
+                    mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+                    data: sample_xlsx(),
+                },
                 Attach::Invite(uid) => {
                     let events: Vec<_> = sample_pim(now, offset).events.into_iter().map(|e| e.event).filter(|e| e.uid == *uid).collect();
                     OutAttachment {
@@ -422,12 +563,20 @@ pub fn seed_if_empty_at(store: &Store, now: i64, offset: i64) -> Result<bool, St
             attachments,
             html: m.html.map(str::to_string),
             inline: if m.html.is_some_and(|h| h.contains("cid:poster@gallery.example")) {
-                vec![mime::InlinePicture {
-                    cid: "poster@gallery.example".into(),
-                    name: "poster.png".into(),
-                    mime: "image/png".into(),
-                    data: sample_png(),
-                }]
+                vec![
+                    mime::InlinePicture {
+                        cid: "poster@gallery.example".into(),
+                        name: "poster.png".into(),
+                        mime: "image/png".into(),
+                        data: sample_png(),
+                    },
+                    mime::InlinePicture {
+                        cid: "banner@gallery.example".into(),
+                        name: "banner.png".into(),
+                        mime: "image/png".into(),
+                        data: sample_banner_png(),
+                    },
+                ]
             } else {
                 Vec::new()
             },
@@ -530,6 +679,16 @@ pub fn sample_pim(now: i64, offset: i64) -> mailcraft_model::pim::Pim {
     p.ensure_defaults();
     p.events = events.into_iter().map(|event| StoredEvent { calendar: LOCAL.into(), event, ..Default::default() }).collect();
     p.cards = cards.into_iter().map(|card| StoredCard { book: LOCAL.into(), card, ..Default::default() }).collect();
+    // Notes (Outlook's Notes), kept on this computer.
+    let note = |uid: &str, text: &str, color: u8, ago: i64| mailcraft_model::pim::StoredNote {
+        note: mailcraft_model::pim::Note { uid: format!("{uid}@sample.mailcraft"), text: text.into(), color, modified: now - ago },
+        ..Default::default()
+    };
+    p.notes = vec![
+        note("note-poster", "Festival poster\nApprove the proof by Thursday; ask about 170 gsm paper.", 3, 3600),
+        note("note-mix", "Sound mix v3\nRain under the café scene: a little quieter.", 0, 86_400),
+        note("note-fox", "Fox turnarounds\nSide view: longer tail.", 1, 3 * 86_400),
+    ];
     p
 }
 

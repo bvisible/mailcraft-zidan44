@@ -51,6 +51,8 @@ pub struct Data {
     pub handshakes: usize,
     /// The EWS address, for Autodiscover's answer.
     pub url: String,
+    /// People whose calendars this account may change (delegates with editor rights).
+    pub editors: Vec<String>,
     next: u32,
 }
 
@@ -66,6 +68,7 @@ impl Default for Data {
             calls: Vec::new(),
             handshakes: 0,
             url: String::new(),
+            editors: Vec::new(),
             next: 0,
         };
         d.folders.push(Fo {
@@ -118,6 +121,12 @@ impl Data {
     fn folder_id(&self, el: &El) -> Option<String> {
         match el.name.as_str() {
             "FolderId" => el.attr("Id").map(str::to_string),
+            // Another mailbox's folder: its items are kept as `mailbox:<address>`.
+            "DistinguishedFolderId" if el.child("Mailbox").is_some() => {
+                let who = el.find("EmailAddress").map(|e| e.text.to_ascii_lowercase())?;
+                let id = format!("mailbox:{who}");
+                self.pim.iter().any(|(_, f, _)| *f == id).then_some(id)
+            }
             "DistinguishedFolderId" => {
                 let known = el.attr("Id")?;
                 self.folders.iter().find(|f| f.known.as_deref() == Some(known)).map(|f| f.id.clone())
@@ -175,9 +184,29 @@ impl Data {
         x
     }
 
+    /// The public folders root and everything under it.
+    fn public_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.folders.iter().filter(|f| f.known.as_deref() == Some("publicfoldersroot")).map(|f| f.id.clone()).collect();
+        let mut i = 0;
+        while let Some(id) = ids.get(i).cloned() {
+            ids.extend(self.folders.iter().filter(|f| f.parent == id).map(|f| f.id.clone()));
+            i += 1;
+        }
+        ids
+    }
+
+    /// Whether this account may change an item: anything of its own, and someone else's only where
+    /// they made it an editor.
+    fn may_change(&self, id: &str) -> bool {
+        match self.pim.iter().find(|(i, _, _)| i == id).and_then(|(_, f, _)| f.strip_prefix("mailbox:")) {
+            Some(who) => self.editors.iter().any(|e| e == who),
+            None => true,
+        }
+    }
+
     fn pim_folder(&self, f: Option<&El>) -> bool {
         let Some(id) = f.and_then(|f| self.folder_id(f)) else { return false };
-        self.folders.iter().any(|x| x.id == id && x.class != "IPF.Note")
+        id.starts_with("mailbox:") || self.folders.iter().any(|x| x.id == id && x.class != "IPF.Note")
     }
 
     /// Answer one operation: (response element name, response messages).
@@ -192,18 +221,44 @@ impl Data {
         match op.name.as_str() {
             "GetFolder" => {
                 for f in op.child("FolderIds").map(|f| f.kids.clone()).unwrap_or_default() {
+                    // Someone else's calendar: what this account may do there.
+                    if let Some(who) = self.folder_id(&f).and_then(|id| id.strip_prefix("mailbox:").map(str::to_string)) {
+                        let edit = self.editors.contains(&who);
+                        out.push(ok(format!(
+                            "<m:Folders><t:CalendarFolder><t:FolderId Id=\"mailbox:{who}\"/><t:EffectiveRights><t:CreateAssociated>false</t:CreateAssociated>\
+                             <t:CreateContents>{edit}</t:CreateContents><t:CreateHierarchy>false</t:CreateHierarchy><t:Delete>{edit}</t:Delete>\
+                             <t:Modify>{edit}</t:Modify><t:Read>true</t:Read></t:EffectiveRights></t:CalendarFolder></m:Folders>"
+                        )));
+                        continue;
+                    }
                     match self.folder_id(&f).and_then(|id| self.folders.iter().find(|x| x.id == id).cloned()) {
                         Some(fo) => out.push(ok(format!("<m:Folders>{}</m:Folders>", self.folder_xml(&fo)))),
                         None => out.push(err("ErrorFolderNotFound")),
                     }
                 }
             }
+            // Shallow (public folders): the folders right under the one asked for.
+            "FindFolder" if op.attr("Traversal") == Some("Shallow") => {
+                let parent = op.child("ParentFolderIds").and_then(|p| p.kids.first()).and_then(|f| self.folder_id(f)).unwrap_or_default();
+                let kids: Vec<String> = self
+                    .folders
+                    .iter()
+                    .filter(|f| f.parent == parent)
+                    .map(|f| {
+                        let n = self.folders.iter().filter(|x| x.parent == f.id).count();
+                        self.folder_xml(f)
+                            .replace("<t:ChildFolderCount>0</t:ChildFolderCount>", &format!("<t:ChildFolderCount>{n}</t:ChildFolderCount>"))
+                    })
+                    .collect();
+                out.push(ok(format!("<m:RootFolder IncludesLastItemInRange=\"true\"><t:Folders>{}</t:Folders></m:RootFolder>", kids.concat())));
+            }
             "FindFolder" => {
-                // Deep: everything under the root, in pages.
+                // Deep: everything under the root (the mailbox's, not the public folders), in pages.
                 let view = op.child("IndexedPageFolderView");
                 let offset: usize = view.and_then(|v| v.attr("Offset")).and_then(|o| o.parse().ok()).unwrap_or(0);
                 let max: usize = view.and_then(|v| v.attr("MaxEntriesReturned")).and_then(|o| o.parse().ok()).unwrap_or(1000).min(3);
-                let all: Vec<Fo> = self.folders.iter().filter(|f| f.id != "ROOT").cloned().collect();
+                let public = self.public_ids();
+                let all: Vec<Fo> = self.folders.iter().filter(|f| f.id != "ROOT" && !public.contains(&f.id)).cloned().collect();
                 let page: Vec<String> = all.iter().skip(offset).take(max).map(|f| self.folder_xml(f)).collect();
                 let last = offset + max >= all.len();
                 out.push(ok(format!(
@@ -219,7 +274,11 @@ impl Data {
                 out.push(ok(format!("<m:RootFolder IncludesLastItemInRange=\"true\"><t:Items>{items}</t:Items></m:RootFolder>")));
             }
             "FindItem" => {
-                let folder = op.child("ParentFolderIds").and_then(|p| p.kids.first()).and_then(|f| self.folder_id(f)).unwrap_or_default();
+                // A folder the mailbox hasn't (a Notes folder, say): as Exchange answers.
+                let Some(folder) = op.child("ParentFolderIds").and_then(|p| p.kids.first()).and_then(|f| self.folder_id(f)) else {
+                    out.push(err("ErrorFolderNotFound"));
+                    return ("FindItemResponse".into(), out);
+                };
                 let max: usize =
                     op.child("IndexedPageItemView").and_then(|v| v.attr("MaxEntriesReturned")).and_then(|o| o.parse().ok()).unwrap_or(1000);
                 let mut list: Vec<&It> = self.items.iter().filter(|i| i.folder == folder).collect();
@@ -271,7 +330,12 @@ impl Data {
                 let send = op.attr("MessageDisposition") == Some("SendAndSaveCopy");
                 let folder = op.child("SavedItemFolderId").and_then(|s| s.kids.first()).and_then(|f| self.folder_id(f)).unwrap_or_default();
                 for m in op.child("Items").map(|i| i.kids.clone()).unwrap_or_default() {
-                    if m.name == "CalendarItem" || m.name == "Contact" {
+                    let sticky = m.text_of("ItemClass").is_some_and(|c| c.starts_with("IPM.StickyNote"));
+                    if folder.strip_prefix("mailbox:").is_some_and(|who| !self.editors.iter().any(|e| e == who)) {
+                        out.push(err("ErrorAccessDenied"));
+                        continue;
+                    }
+                    if m.name == "CalendarItem" || m.name == "Contact" || sticky {
                         let id = self.id("P");
                         out.push(ok(format!("<m:Items><t:{0}><t:ItemId Id=\"{id}\" ChangeKey=\"ck\"/></t:{0}></m:Items>", m.name)));
                         self.pim.push((id, folder.clone(), m));
@@ -302,6 +366,10 @@ impl Data {
             "UpdateItem" => {
                 for ch in op.child("ItemChanges").map(|c| c.kids.clone()).unwrap_or_default() {
                     let id = ch.child("ItemId").and_then(|i| i.attr("Id")).unwrap_or_default().to_string();
+                    if !self.may_change(&id) {
+                        out.push(err("ErrorAccessDenied"));
+                        continue;
+                    }
                     if let Some((_, _, el)) = self.pim.iter_mut().find(|(i, _, _)| *i == id) {
                         for u in ch.child("Updates").map(|u| u.kids.clone()).unwrap_or_default() {
                             let field =
@@ -348,6 +416,10 @@ impl Data {
             }
             "DeleteItem" => {
                 for id in ids(op.child("ItemIds")) {
+                    if !self.may_change(&id) {
+                        out.push(err("ErrorAccessDenied"));
+                        continue;
+                    }
                     self.items.retain(|i| i.id != id);
                     self.pim.retain(|(i, _, _)| *i != id);
                     out.push(ok(String::new()));
@@ -796,7 +868,7 @@ mod tests {
             dirty: true,
             ..Default::default()
         });
-        pim.deleted.push(Tombstone { href: "OLD".into(), etag: String::new() });
+        pim.deleted.push(Tombstone { href: "OLD".into(), etag: String::new(), ..Default::default() });
         let sync = crate::ews_pim::sync(&c, &pim, 1_792_000_000).unwrap();
         assert!(sync.errors.is_empty(), "{:?}", sync.errors);
         assert_eq!(sync.deleted, ["OLD"]);
@@ -823,6 +895,170 @@ mod tests {
         let sync = crate::ews_pim::sync(&c, &changed, 1_792_000_000).unwrap();
         let moved = sync.events.iter().find(|e| e.href == standup.href).unwrap();
         assert_eq!((moved.event.summary.as_str(), moved.event.rrule.as_deref()), ("Stand-up (moved)", None));
+        // No Notes folder on this server: notes stay on this computer.
+        assert!(sync.notes.is_none());
+    }
+
+    #[test]
+    fn sticky_notes_sync_with_the_notes_folder() {
+        use mailcraft_model::pim::{Note, Pim, StoredNote};
+        let mut d = Data::default();
+        d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.folder("Calendar", None, Some("calendar"), "IPF.Appointment");
+        d.folder("Contacts", None, Some("contacts"), "IPF.Contact");
+        let notes = d.folder("Notes", None, Some("notes"), "IPF.StickyNote");
+        let old = parse(
+            "<t:Message><t:ItemClass>IPM.StickyNote</t:ItemClass><t:Subject>Call Ana</t:Subject><t:Body BodyType=\"Text\">Call Ana\r\nabout the mix</t:Body>\
+             <t:ExtendedProperty><t:ExtendedFieldURI PropertySetId=\"0006200E-0000-0000-C000-000000000046\" PropertyId=\"35584\" PropertyType=\"Integer\"/><t:Value>2</t:Value></t:ExtendedProperty></t:Message>",
+        );
+        d.pim.push(("N1".into(), notes, old.kids[0].clone()));
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        let mut pim = Pim::default();
+        pim.notes.push(StoredNote {
+            note: Note { uid: "n-local".into(), text: "Buy paper\n170 gsm".into(), color: 1, modified: 5 },
+            dirty: true,
+            ..Default::default()
+        });
+        let sync = crate::ews_pim::sync(&c, &pim, 1_792_000_000).unwrap();
+        assert!(sync.errors.is_empty(), "{:?}", sync.errors);
+        let list = sync.notes.unwrap();
+        let ana = list.iter().find(|n| n.href == "note:N1").unwrap();
+        assert_eq!((ana.note.text.as_str(), ana.note.color), ("Call Ana\nabout the mix", 2));
+        assert!(list.iter().any(|n| n.note.text == "Buy paper\n170 gsm" && n.note.color == 1), "made in the Notes folder, its colour kept");
+        assert_eq!(sync.pushed_notes.len(), 1);
+        assert!(sync.pushed_notes[0].href.starts_with("note:"));
+    }
+
+    #[test]
+    fn someone_elses_calendar_opens_read_only() {
+        use mailcraft_model::pim::{Pim, shared_calendar_id};
+        let mut d = Data::default();
+        d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.folder("Calendar", None, Some("calendar"), "IPF.Appointment");
+        d.folder("Contacts", None, Some("contacts"), "IPF.Contact");
+        let review = parse(
+            "<t:CalendarItem><t:Subject>Budget review</t:Subject><t:Start>2026-10-06T13:00:00Z</t:Start><t:End>2026-10-06T14:00:00Z</t:End>\
+             <t:IsAllDayEvent>false</t:IsAllDayEvent><t:UID>budget-1</t:UID></t:CalendarItem>",
+        );
+        d.pim.push(("S1".into(), "mailbox:ana@contoso.example".into(), review.kids[0].clone()));
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        let pim = Pim { shared: vec!["ana@contoso.example".into(), "nobody@contoso.example".into()], ..Default::default() };
+        let sync = crate::ews_pim::sync(&c, &pim, 1_792_000_000).unwrap();
+        let id = shared_calendar_id("ana@contoso.example");
+        let cals = sync.calendars.clone().unwrap();
+        assert!(cals.iter().any(|x| x.id == id && x.read_only && x.name == "ana@contoso.example"));
+        assert!(sync.events.iter().any(|e| e.calendar == id && e.event.summary == "Budget review"));
+        assert!(sync.synced_calendars.contains(&id));
+        // One that can't be read says so, and the rest still syncs.
+        assert!(sync.errors.iter().any(|e| e.starts_with("nobody@contoso.example's calendar")), "{:?}", sync.errors);
+        assert!(!sync.synced_calendars.contains(&shared_calendar_id("nobody@contoso.example")));
+    }
+
+    /// Someone who made this account an editor of their calendar: events go in, change and go
+    /// there; someone who didn't keeps theirs read-only.
+    #[test]
+    fn someone_elses_calendar_can_be_changed_by_an_editor() {
+        use mailcraft_model::ical::CalEvent;
+        use mailcraft_model::pim::{Pim, StoredEvent, Tombstone, shared_calendar_id};
+        let mut d = Data { editors: vec!["ana@contoso.example".into()], ..Default::default() };
+        d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.folder("Calendar", None, Some("calendar"), "IPF.Appointment");
+        d.folder("Contacts", None, Some("contacts"), "IPF.Contact");
+        let item = |subject: &str, uid: &str| {
+            parse(&format!(
+                "<t:CalendarItem><t:Subject>{subject}</t:Subject><t:Start>2026-10-06T13:00:00Z</t:Start><t:End>2026-10-06T14:00:00Z</t:End>\
+                 <t:IsAllDayEvent>false</t:IsAllDayEvent><t:UID>{uid}</t:UID></t:CalendarItem>"
+            ))
+            .kids[0]
+                .clone()
+        };
+        d.pim.push(("S1".into(), "mailbox:ana@contoso.example".into(), item("Budget review", "budget-1")));
+        d.pim.push(("S2".into(), "mailbox:ana@contoso.example".into(), item("Team lunch", "lunch-1")));
+        d.pim.push(("B1".into(), "mailbox:ben@contoso.example".into(), item("Ben's call", "call-1")));
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        let (ana, ben) = (shared_calendar_id("ana@contoso.example"), shared_calendar_id("ben@contoso.example"));
+        let mut pim = Pim { shared: vec!["ana@contoso.example".into(), "ben@contoso.example".into()], ..Default::default() };
+        let first = crate::ews_pim::sync(&c, &pim, 1_792_000_000).unwrap();
+        let cals = first.calendars.clone().unwrap();
+        let ro = |id: &str| cals.iter().find(|x| x.id == id).map(|x| x.read_only);
+        assert_eq!((ro(&ana), ro(&ben)), (Some(false), Some(true)));
+        let mut review = first.events.iter().find(|e| e.event.summary == "Budget review").cloned().unwrap();
+        let lunch = first.events.iter().find(|e| e.event.summary == "Team lunch").cloned().unwrap();
+        review.event.summary = "Budget review (moved)".into();
+        review.dirty = true;
+        pim.events = vec![
+            review,
+            StoredEvent {
+                calendar: ana.clone(),
+                event: CalEvent {
+                    uid: "new-1".into(),
+                    summary: "Poster check".into(),
+                    start: 1_792_000_000,
+                    end: 1_792_003_600,
+                    ..Default::default()
+                },
+                dirty: true,
+                ..Default::default()
+            },
+        ];
+        pim.deleted = vec![Tombstone { href: lunch.href.clone(), etag: String::new(), calendar: ana.clone() }];
+        let second = crate::ews_pim::sync(&c, &pim, 1_792_000_100).unwrap();
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert!(second.pushed_events.iter().all(|e| e.calendar == ana), "they stay in Ana's calendar");
+        let d = server.data.lock().unwrap();
+        let in_ana: Vec<String> = d
+            .pim
+            .iter()
+            .filter(|(_, f, _)| f == "mailbox:ana@contoso.example")
+            .filter_map(|(_, _, el)| el.text_of("Subject").map(str::to_string))
+            .collect();
+        assert!(in_ana.contains(&"Budget review (moved)".to_string()) && in_ana.contains(&"Poster check".to_string()), "{in_ana:?}");
+        assert!(!in_ana.contains(&"Team lunch".to_string()), "deleted");
+        assert!(!d.pim.iter().any(|(_, f, el)| !f.starts_with("mailbox:") && el.text_of("Subject") == Some("Poster check")), "not in this mailbox");
+    }
+
+    #[test]
+    fn public_folders_list_under_their_own_folder_and_sync() {
+        let mut d = Data::default();
+        d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        let root = d.folder("IPM_SUBTREE", None, Some("publicfoldersroot"), "IPF.Note");
+        let team = d.folder("Team", Some(&root), None, "IPF.Note");
+        let news = d.folder("Announcements", Some(&team), None, "IPF.Note");
+        d.folder("Rooms", Some(&root), None, "IPF.Appointment");
+        d.deliver(
+            &news,
+            b"From: hr@contoso.example\r\nSubject: Holiday hours\r\nMessage-ID: <h@x>\r\n\r\nClosed Friday.\r\n",
+            false,
+            "2026-10-14T09:00:00Z",
+        );
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        let boxes = c.mailboxes().unwrap();
+        let names: Vec<&str> = boxes.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Inbox", "Public Folders", "Team", "Announcements"], "the room calendar isn't mail");
+        let pf = boxes.iter().find(|m| m.name == "Public Folders").unwrap();
+        let team_box = boxes.iter().find(|m| m.name == "Team").unwrap();
+        assert_eq!((pf.parent.as_deref(), team_box.parent.as_deref()), (None, Some(pf.id.as_str())));
+        assert_eq!(boxes.iter().find(|m| m.name == "Announcements").unwrap().parent.as_deref(), Some(team_box.id.as_str()));
+        // Their mail syncs as any folder's.
+        let store = crate::fake::tests_store("public-folders");
+        let mut st = crate::jmap::State::default();
+        let folders = crate::ews::list_folders(&c, &mut st, "a1").unwrap();
+        let news_path = folders.iter().find(|f| f.path.ends_with("Announcements")).map(|f| f.path.clone()).unwrap();
+        crate::ews::sync_folder(&c, &mut st, &store, "a1", &news_path, &crate::sync::SyncOptions::default()).unwrap();
+        let fs = store.load_folder("a1", &news_path).unwrap();
+        assert_eq!(fs.messages.len(), 1);
+        assert_eq!(fs.messages[0].subject, "Holiday hours");
+        let _ = std::fs::remove_dir_all(store.root());
+        // A server without public folders lists the mailbox's alone.
+        let mut d = Data::default();
+        d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        assert_eq!(c.mailboxes().unwrap().len(), 1);
     }
 
     #[test]

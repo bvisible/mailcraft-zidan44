@@ -712,6 +712,50 @@
 	Clear formatting	Cancella formattazione
 	Insert link	Inserisci collegamento
 	The selected text	Il testo selezionato
+	Outlook.com, Hotmail and Live addresses only connect with Sign in with Microsoft: Microsoft no longer accepts passwords from mail apps. This copy of MailCraft wasn't built with Microsoft sign-in, so it can't add this account.	Gli indirizzi Outlook.com, Hotmail e Live si collegano solo con Accedi con Microsoft: Microsoft non accetta più password dalle app di posta. Questa copia di MailCraft non è stata compilata con l'accesso Microsoft, quindi non può aggiungere questo account.
+	Back to message	Torna al messaggio
+	Esc	Esc
+	Open it in its app, or save it.	Aprilo nella sua app o salvalo.
+	Page {n}	Pagina {n}
+	Slide {n}	Diapositiva {n}
+	The document is empty.	Il documento è vuoto.
+	The first {shown} of {total} pages: open it to read the rest.	Le prime {shown} di {total} pagine: aprilo per leggere il resto.
+	The sheet is empty.	Il foglio è vuoto.
+	There's no preview for this file.	Nessuna anteprima per questo file.
+	{n} people	{n} persone
+	Cards	Biglietti
+	Phone list	Elenco telefonico
+	Full name	Nome completo
+	Search notes	Cerca nelle note
+	{n} notes	{n} note
+	No notes yet: New note starts one.	Ancora nessuna nota: Nuova nota ne inizia una.
+	No note matches.	Nessuna nota corrisponde.
+	Write your note…	Scrivi la tua nota…
+	Blue	Blu
+	Green	Verde
+	Pink	Rosa
+	Yellow	Giallo
+	White	Bianco
+	Color	Colore
+	New note	Nuova nota
+	Open a shared calendar	Apri un calendario condiviso
+	Open shared calendar…	Apri calendario condiviso…
+	Remove this calendar	Rimuovi questo calendario
+	Shared with you, opened from {account}	Condiviso con te, aperto da {account}
+	Whose calendar? It opens read-only beside yours, when they've shared it with you in Exchange.	Di chi è il calendario? Si apre in sola lettura accanto al tuo, se è stato condiviso con te in Exchange.
+	read-only	sola lettura
+	Public Folders	Cartelle pubbliche
+	Copy the whole message	Copia l'intero messaggio
+	Existing data file (optional)	File di dati esistente (facoltativo)
+	Mail from an old .pst or .mailcraft file comes in first	La posta di un vecchio file .pst o .mailcraft viene importata per prima
+	Open a data file	Apri un file di dati
+	Bring in an Outlook data file (.pst) or a MailCraft one (.mailcraft). It opens as a mailbox of its own, with its folders, kept on this computer.	Importa un file di dati di Outlook (.pst) o di MailCraft (.mailcraft). Si apre come una cassetta postale a sé, con le sue cartelle, conservata su questo computer.
+	Move up	Sposta su
+	Move down	Sposta giù
+	Updating…	Aggiornamento…
+	All folders are up to date	Tutte le cartelle sono aggiornate
+	{n} accounts disconnected	{n} account disconnessi
+	{account}: {status}	{account}: {status}
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archivio

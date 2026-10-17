@@ -713,6 +713,50 @@
 	Clear formatting	Formatierung löschen
 	Insert link	Link einfügen
 	The selected text	Der markierte Text
+	Outlook.com, Hotmail and Live addresses only connect with Sign in with Microsoft: Microsoft no longer accepts passwords from mail apps. This copy of MailCraft wasn't built with Microsoft sign-in, so it can't add this account.	Outlook.com-, Hotmail- und Live-Adressen verbinden sich nur über „Mit Microsoft anmelden“: Microsoft akzeptiert keine Kennwörter von Mail-Apps mehr. Diese MailCraft-Kopie wurde ohne Microsoft-Anmeldung erstellt und kann dieses Konto daher nicht hinzufügen.
+	Back to message	Zurück zur Nachricht
+	Esc	Esc
+	Open it in its app, or save it.	Öffnen Sie sie in ihrer App oder speichern Sie sie.
+	Page {n}	Seite {n}
+	Slide {n}	Folie {n}
+	The document is empty.	Das Dokument ist leer.
+	The first {shown} of {total} pages: open it to read the rest.	Die ersten {shown} von {total} Seiten: Öffnen Sie die Datei, um den Rest zu lesen.
+	The sheet is empty.	Das Blatt ist leer.
+	There's no preview for this file.	Für diese Datei gibt es keine Vorschau.
+	{n} people	{n} Personen
+	Cards	Karten
+	Phone list	Telefonliste
+	Full name	Vollständiger Name
+	Search notes	Notizen durchsuchen
+	{n} notes	{n} Notizen
+	No notes yet: New note starts one.	Noch keine Notizen: „Neue Notiz“ beginnt eine.
+	No note matches.	Keine Notiz passt.
+	Write your note…	Notiz schreiben…
+	Blue	Blau
+	Green	Grün
+	Pink	Rosa
+	Yellow	Gelb
+	White	Weiß
+	Color	Farbe
+	New note	Neue Notiz
+	Open a shared calendar	Freigegebenen Kalender öffnen
+	Open shared calendar…	Freigegebenen Kalender öffnen…
+	Remove this calendar	Diesen Kalender entfernen
+	Shared with you, opened from {account}	Für Sie freigegeben, geöffnet über {account}
+	Whose calendar? It opens read-only beside yours, when they've shared it with you in Exchange.	Wessen Kalender? Er öffnet sich schreibgeschützt neben Ihrem, wenn er in Exchange für Sie freigegeben wurde.
+	read-only	schreibgeschützt
+	Public Folders	Öffentliche Ordner
+	Copy the whole message	Ganze Nachricht kopieren
+	Existing data file (optional)	Vorhandene Datendatei (optional)
+	Mail from an old .pst or .mailcraft file comes in first	E-Mails aus einer alten .pst- oder .mailcraft-Datei werden zuerst übernommen
+	Open a data file	Datendatei öffnen
+	Bring in an Outlook data file (.pst) or a MailCraft one (.mailcraft). It opens as a mailbox of its own, with its folders, kept on this computer.	Übernehmen Sie eine Outlook-Datendatei (.pst) oder eine MailCraft-Datei (.mailcraft). Sie wird als eigenes Postfach mit ihren Ordnern geöffnet und auf diesem Computer gespeichert.
+	Move up	Nach oben
+	Move down	Nach unten
+	Updating…	Wird aktualisiert…
+	All folders are up to date	Alle Ordner sind auf dem neuesten Stand
+	{n} accounts disconnected	{n} Konten getrennt
+	{account}: {status}	{account}: {status}
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archiv

@@ -237,7 +237,12 @@ impl Services for Desktop {
         rfd::FileDialog::new().set_title("Save attachments to").pick_folder()
     }
     fn pick_data_file(&mut self) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title("Open Outlook data file").add_filter("Outlook data files", &["pst"]).pick_file()
+        rfd::FileDialog::new()
+            .set_title("Open data file")
+            .add_filter("Data files", &["pst", "mailcraft"])
+            .add_filter("Outlook data files", &["pst"])
+            .add_filter("MailCraft data files", &["mailcraft"])
+            .pick_file()
     }
     fn pick_pictures(&mut self) -> Vec<PathBuf> {
         rfd::FileDialog::new()
@@ -255,6 +260,17 @@ impl Services for Desktop {
         Some(png)
     }
     fn open_url(&mut self, url: &str) -> Result<(), String> {
+        // Web addresses go to Windows' URL handler: ShellExec_RunDLL (right for files) started
+        // and quietly showed nothing, so sign-in pages never reached the browser.
+        #[cfg(windows)]
+        if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:") {
+            return std::process::Command::new("rundll32.exe")
+                .arg("url.dll,FileProtocolHandler")
+                .arg(url)
+                .spawn()
+                .map(drop)
+                .map_err(|e| e.to_string());
+        }
         shell_open(std::ffi::OsStr::new(url))
     }
     fn notify(&mut self, title: &str, body: &str) {

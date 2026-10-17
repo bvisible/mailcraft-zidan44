@@ -20,6 +20,7 @@ pub(crate) fn interface_strings() -> BTreeSet<String> {
         include_str!("../pim_dialogs.rs"),
         // //// Neoffice — Nora's interface (nora.rs), translated in neoffice.rs.
         include_str!("../nora.rs"),
+        include_str!("../notes.rs"),
     ];
     // (prefix, which string literals after it are interface text)
     let prefixes: [(&str, &[usize]); 20] = [
@@ -222,6 +223,19 @@ pub(crate) fn interface_strings() -> BTreeSet<String> {
         "Report junk",
         "Unpin",
         "Pin",
+        "Public Folders",
+        "Blue",
+        "Green",
+        "Pink",
+        "Yellow",
+        "White",
+        "Cards",
+        "Phone list",
+        "Full name",
+        "Company",
+        "Job title",
+        "Email",
+        "Phone",
         "Cut",
         "Copy",
         "Paste",

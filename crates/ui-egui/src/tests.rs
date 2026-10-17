@@ -37,6 +37,83 @@ fn renders_every_state_without_panicking() {
     tour();
 }
 
+/// A newsletter with a picture behind its heading and a label placed over its poster draws in
+/// both themes and in a narrow reading pane (where its columns stack).
+#[test]
+fn a_banner_and_a_placed_label_draw() {
+    let (mut a, dir) = app("banner");
+    let ctx = egui::Context::default();
+    let k = a.session.list.iter().find(|m| m.subject.contains("winter group show")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    let p = a.session.reading.as_ref().and_then(|r| r.parsed.clone()).unwrap();
+    assert!(p.images.iter().any(|i| i == "cid:banner@gallery.example"), "the banner is one of its pictures: {:?}", p.images);
+    for dark in [Some(false), Some(true)] {
+        a.ui.dark = dark;
+        for pane in [ReadingPane::Right, ReadingPane::Bottom] {
+            a.session.prefs.reading_pane = pane;
+            for _ in 0..3 {
+                frame(&ctx, &mut a, vec![]);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
+/// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
+#[test]
+fn people_keep_the_pane_its_width() {
+    let (mut a, dir) = app("pane-width");
+    let ctx = egui::Context::default();
+    let width = |ctx: &egui::Context| egui::containers::panel::PanelState::load(ctx, egui::Id::new("nav")).map_or(0.0, |p| p.size().x);
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    let before = width(&ctx);
+    a.run("view.people", json!({}));
+    for _ in 0..60 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    a.run("view.mail", json!({}));
+    frame(&ctx, &mut a, vec![]);
+    let after = width(&ctx);
+    assert!(before > 0.0 && after <= before + 1.0, "the pane went from {before} to {after}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Dialogs kept the size of the last big one (their buttons' row took all the room left): Add
+/// account stayed tall after Server settings closed, Remove account opened as tall as Options.
+#[test]
+fn dialogs_fit_what_they_show() {
+    let (mut a, dir) = app("dialog-size");
+    let ctx = egui::Context::default();
+    let height = |ctx: &egui::Context, d: &Dialog| {
+        // Its own window (or, before, the one all dialogs shared).
+        let ids = [egui::Id::new(("dialog", std::mem::discriminant(d))), egui::Id::new("dialog")];
+        ids.iter().find_map(|id| ctx.memory(|m| m.area_rect(*id))).map_or(0.0, |r| r.height())
+    };
+    let shown = |a: &mut MailApp, d: Dialog| {
+        a.ui.dialog = Some(d);
+        for _ in 0..4 {
+            frame(&ctx, a, vec![]);
+        }
+        a.ui.dialog.clone().unwrap()
+    };
+    let mut d = Dialog::add_account_with("zoe@gmail.com", true);
+    let open = height(&ctx, &shown(&mut a, d.clone()));
+    if let Dialog::AddAccount(f) = &mut d {
+        f.advanced = false;
+    }
+    let closed = height(&ctx, &shown(&mut a, d));
+    assert!(open > 0.0 && closed < open - 60.0, "Server settings closed: {closed} (open: {open})");
+    let edit = Dialog::edit_account(&a.session.accounts[0].config);
+    shown(&mut a, edit);
+    let remove = Dialog::RemoveAccount { account: "sample".into(), email: "x".into() };
+    let small = height(&ctx, &shown(&mut a, remove));
+    assert!(small > 0.0 && small < 220.0, "Remove account: {small}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Every pane layout, state and dialog, in light and dark (also run in the pseudo-language by
 /// the translation tests).
 pub(crate) fn tour() {
@@ -98,6 +175,7 @@ pub(crate) fn tour() {
                 unread: 3,
                 size: 20_480,
             },
+            Dialog::OpenSharedCalendar { email: "ana@contoso.example".into(), error: Some("no access".into()) },
             Dialog::RemoveAccount { account: "sample".into(), email: "x".into() },
             Dialog::Signature { account: "sample".into(), text: "sig".into() },
             Dialog::Password { account: "sample".into(), email: "x".into(), password: String::new() },
@@ -966,5 +1044,76 @@ fn delay_delivery_and_replies_to_draw_while_writing() {
     assert_eq!(super::reading::parse_local("2026-10-16", "08:30"), Some((20_742, 510)));
     assert_eq!(super::reading::parse_local("2026-02-30", "08:30"), None);
     assert_eq!(super::reading::parse_local("2026-10-16", "24:00"), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn every_kind_of_attachment_previews_in_the_reading_pane() {
+    let (mut a, dir) = app("attachment-preview");
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    let k = a.session.list.iter().find(|m| m.subject.starts_with("Your proof")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    frame(&ctx, &mut a, vec![]);
+    let n = a.session.reading.as_ref().and_then(|r| r.parsed.as_ref()).map_or(0, |p| p.attachments.len());
+    assert_eq!(n, 4, "notes, a PDF, a document and a workbook");
+    for i in 0..n {
+        a.ui.attachment_view = Some((k.clone(), i));
+        // A PDF draws a page a frame.
+        for _ in 0..3 {
+            frame(&ctx, &mut a, vec![]);
+        }
+        assert_eq!(a.ui.attachment_view, Some((k.clone(), i)));
+    }
+    // Escape: back to the message.
+    frame(&ctx, &mut a, vec![key(Key::Escape, Modifiers::NONE)]);
+    assert!(a.ui.attachment_view.is_none());
+    // One that isn't there any more (another message's index) is just the message.
+    a.ui.attachment_view = Some((k.clone(), 99));
+    frame(&ctx, &mut a, vec![]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn people_lay_out_as_a_list_cards_or_a_phone_list() {
+    let (mut a, dir) = app("people-views");
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    a.run("view.module", json!({"name": "people"}));
+    for v in crate::people::PeopleView::ALL {
+        a.ui.people_view = v;
+        frame(&ctx, &mut a, vec![]);
+        frame(&ctx, &mut a, vec![]);
+    }
+    // The layout is remembered with the window's other settings.
+    let saved = a.saved_state();
+    assert_eq!(saved["peopleView"], "phone");
+    a.ui.people_view = crate::people::PeopleView::People;
+    a.restore_state(&saved);
+    assert_eq!(a.ui.people_view, crate::people::PeopleView::Phone);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn notes_are_written_on_and_kept() {
+    let (mut a, dir) = app("notes-ui");
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    a.run("view.module", json!({"name": "notes"}));
+    frame(&ctx, &mut a, vec![]);
+    // New note: made, and written on at once.
+    a.act(crate::Action::NewNote);
+    let uid = a.ui.note_edit.as_ref().map(|(u, _)| u.clone()).unwrap();
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![Event::Text("Water the plants".into())]);
+    assert_eq!(a.ui.note_edit.as_ref().map(|(_, t)| t.as_str()), Some("Water the plants"));
+    // Escape leaves it: the text is kept.
+    frame(&ctx, &mut a, vec![key(Key::Escape, Modifiers::NONE)]);
+    frame(&ctx, &mut a, vec![]);
+    assert!(a.ui.note_edit.is_none());
+    assert!(a.session.notes("").iter().any(|n| n.note.uid == uid && n.note.text == "Water the plants"));
+    // Ctrl+1 goes back to Mail.
+    frame(&ctx, &mut a, vec![key(Key::Num1, Modifiers::COMMAND)]);
+    assert_eq!(a.session.module, mailcraft_engine::Module::Mail);
     let _ = std::fs::remove_dir_all(dir);
 }
