@@ -18,6 +18,8 @@
 //! the headers of the ones not cached yet. Mail that falls out of the window leaves the cache.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+// //// Neoffice — address books over JMAP (RFC 9610), for the browser build, which has no CardDAV (maintenance#1630).
+pub mod contacts;
 pub mod sse;
 pub mod url;
 
@@ -137,6 +139,8 @@ pub struct Client<H> {
     quota: bool,
     vacation: bool,
     max_get: usize,
+    // //// Neoffice — the account that holds the address books (contacts.rs), when the session offers them.
+    contacts: Option<String>,
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
@@ -201,6 +205,10 @@ impl<H: Http> Client<H> {
             Ok(u.full())
         };
         let max_get = caps.get(CORE).and_then(|c| c.get("maxObjectsInGet")).and_then(Value::as_u64).unwrap_or(500);
+        // //// Neoffice — the address books' account: its own, else the mail's (contacts.rs).
+        let contacts = caps
+            .get(contacts::CONTACTS)
+            .map(|_| v.get("primaryAccounts").and_then(|p| p.get(contacts::CONTACTS)).and_then(Value::as_str).unwrap_or(account).to_string());
         Ok(Client {
             api: resolve("apiUrl")?,
             // Templates keep their braces: resolve only the part before them.
@@ -212,6 +220,8 @@ impl<H: Http> Client<H> {
             quota: caps.get(QUOTA).is_some(),
             vacation: caps.get(VACATION).is_some(),
             max_get: usize::try_from(max_get).unwrap_or(500).clamp(1, 1000),
+            // //// Neoffice — the address books' account (contacts.rs).
+            contacts,
             auth,
             http,
         })
@@ -1033,6 +1043,15 @@ mod tests {
         assert_eq!(c.api, "https://jmap.example.com/api/");
         assert_eq!(c.authorization(), "Basic bWU6cHc=");
         assert_eq!(c.events_url(), None);
+        // //// Neoffice — no address books unless the session offers them; then in its account, else the mail's.
+        assert!(!c.offers_contacts());
+        let mut with_books = session.clone();
+        with_books["capabilities"][contacts::CONTACTS] = json!({});
+        let c = block_on(Client::connect(Canned(vec![ok(&with_books)].into()), "jmap.example.com", "me", "pw", false)).unwrap();
+        assert_eq!(c.contacts.as_deref(), Some("A1"));
+        with_books["primaryAccounts"][contacts::CONTACTS] = json!("B7");
+        let c = block_on(Client::connect(Canned(vec![ok(&with_books)].into()), "jmap.example.com", "me", "pw", false)).unwrap();
+        assert_eq!(c.contacts.as_deref(), Some("B7"));
         let refused = block_on(Client::connect(Canned(vec![Response { status: 401, body: Vec::new() }].into()), "h", "me", "x", false));
         assert!(matches!(refused, Err(Error::Auth(_))));
         let no_mail = json!({"capabilities": {}, "apiUrl": "/a"});

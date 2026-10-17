@@ -49,7 +49,13 @@ struct Account {
     pushing: bool,
     // //// Neoffice — a new token was asked of the hosting page after a refusal: once, until a sign-in works (renew).
     renewing: bool,
+    // //// Neoffice — when the address books were last read (contacts), so a sync of the mail reads them at most every
+    // CONTACTS_EVERY seconds.
+    contacts_at: Option<i64>,
 }
+
+// //// Neoffice — the address books are read again with the mail, at most this often (seconds).
+const CONTACTS_EVERY: i64 = 600;
 
 struct Shared {
     store: Store,
@@ -307,7 +313,32 @@ async fn sync_all(sh: &Rcs, id: &str) {
         if let Ok(Some((used, limit))) = c.quota().await {
             emit(sh, Event::Quota { account: id.to_string(), used, limit });
         }
+        // //// Neoffice — the address books with the mail, when the server offers them (contacts).
+        let due = sh.borrow().accounts.get(id).is_some_and(|a| a.contacts_at.is_none_or(|at| now() - at >= CONTACTS_EVERY));
+        if due {
+            contacts(sh, id).await;
+        }
         status(sh, id, SyncStatus::Online { at: now() });
+    }
+}
+
+// //// Neoffice — read the account's address books (JMAP for Contacts) and hand them to the engine to merge, as a
+// CardDAV sync's result. A server that offers none is not asked again; a failure is said, and tried at the next sync.
+async fn contacts(sh: &Rcs, id: &str) {
+    let Some(c) = client(sh, id) else { return };
+    if !c.offers_contacts() {
+        return;
+    }
+    let at = now();
+    match c.sync_contacts(at).await {
+        Ok(Some(sync)) => {
+            if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+                a.contacts_at = Some(at);
+            }
+            emit(sh, Event::DavSynced { account: id.to_string(), sync: Box::new(sync) });
+        }
+        Ok(None) => {}
+        Err(e) => log::warn!("{id}: the address books were not read: {e}"),
     }
 }
 
@@ -471,7 +502,9 @@ async fn job(sh: &Rcs, id: &str, j: Job) {
             emit(sh, Event::Vacation { account: id.to_string(), vacation, error });
         }
         // Nothing to do in the browser: no Outbox (sending needs the server), no CalDAV.
-        Job::FlushOutbox { .. } | Job::SyncDav { .. } => {}
+        // //// Neoffice — but address books over JMAP, read again when the engine asks (contacts).
+        Job::SyncDav { .. } => contacts(sh, id).await,
+        Job::FlushOutbox { .. } => {}
         Job::Start { .. }
         | Job::Remove { .. }
         | Job::FetchUrl { .. }
@@ -628,6 +661,7 @@ impl Backend for WebBackend {
                             generation,
                             // //// Neoffice — see `renew`.
                             renewing: false,
+                            contacts_at: None,
                             pushing: false,
                         },
                     );
