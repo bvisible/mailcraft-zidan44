@@ -2,17 +2,22 @@
 
 //! Nora, the assistant of the Neoffice server, in MailCraft: « Reply with Nora » writes the answer
 //! to the open message, « Translate » shows it in French, German or English, and the band of the
-//! message being written corrects, improves or translates the person's own text.
+//! message being written corrects, improves or translates the person's own text, and learns the
+//! writing style of the mailbox it goes from (« My style »).
 //!
 //! Nora lives on the server. The app reaches her only when a Neoffice page hosts it (the browser
 //! build opened with `?nora`), which [`crate::Services::nora_available`] says. A call names a method
 //! of the server and its arguments; the host sends it and hands the answer back a frame or more
 //! later ([`crate::Services::nora_answers`]).
 //!
-//! The open message is untrusted: the server runs its injection guard on it before any model reads
-//! it (`generate_email` and its `reply_context`, `translate`). Nothing is sent: a draft goes into the
-//! reply being written, above the signature and the quoted message, as one step Undo takes back; a
-//! translation is shown in place of the message, with the way back to the original.
+//! A message of a mailbox the page handed over is named to Nora by its key on the server
+//! ([`crate::Services::nora_message`]): she reads it there (`quick_reply`, `translate`), as the
+//! webmail's « Reply with Nora » does, and no text of it goes from here. The sample mailbox's messages, which the
+//! server can't read, go as text. Either way the open message is untrusted: the server runs its
+//! injection guard on it before any model reads it (`quick_reply`, `generate_email` and its
+//! `reply_context`, `translate`). Nothing is sent: a draft goes into the reply being written, above
+//! the signature and the quoted message, as one step Undo takes back; a translation is shown in
+//! place of the message, with the way back to the original.
 
 use egui::{RichText, Ui};
 use mailcraft_engine::mime::Parsed;
@@ -23,8 +28,16 @@ use crate::icons::Icon;
 use crate::theme::{self, Tokens};
 use crate::{Action, MailApp, UiState, widgets};
 
-/// The server method that writes an email body from an instruction and the email it answers.
+/// The server method that drafts the reply to a message of a mailbox of the server, which it reads
+/// itself by the message's key (the webmail's « Reply with Nora »).
+const QUICK_REPLY_METHOD: &str = "nora.api.nora_webmail.quick_reply";
+
+/// The server method that writes an email body from an instruction and the email it answers (the
+/// sample mailbox, which the server can't read).
 const REPLY_METHOD: &str = "nora.api.nora_webmail.generate_email";
+
+/// The server method that learns a mailbox's writing style from its sent mail, in the background.
+const STYLE_METHOD: &str = "nora.api.nora_webmail.scan_style";
 
 /// The server method that translates an email (French, German, English).
 const TRANSLATE_METHOD: &str = "nora.api.nora_webmail.translate";
@@ -76,6 +89,8 @@ pub enum Ask {
     Improve,
     /// Translate the text being written into this language.
     TranslateDraft(&'static str),
+    /// Learn the writing style of the mailbox the message is written from, from its sent mail.
+    LearnStyle,
 }
 
 /// What an answer is for.
@@ -88,6 +103,8 @@ enum Waiting {
     /// A new version of the person's own text in a message being written: the compose id, the
     /// text sent (the answer goes in only over that same text) and the field the answer carries.
     Rewrite { compose: u64, sent: String, field: &'static str },
+    /// The start of a mailbox's style analysis.
+    Style,
 }
 
 /// What the interface knows of Nora.
@@ -100,6 +117,9 @@ pub(crate) struct NoraState {
     waiting: Vec<(u64, Waiting)>,
     /// A message as Nora translated it: its key, the language and the text.
     translation: Option<(MessageKey, &'static str, String)>,
+    /// The mailbox of the server the message being written goes from, whose style Nora can learn;
+    /// empty for any other account, or when nothing is being written.
+    pub(crate) writing_from: String,
 }
 
 impl NoraState {
@@ -141,11 +161,13 @@ pub(crate) fn act(app: &mut MailApp, ask: Ask) {
         Ask::Correct => rewrite(app, CORRECT, None),
         Ask::Improve => rewrite(app, IMPROVE, None),
         Ask::TranslateDraft(lang) => rewrite(app, (TRANSLATE_METHOD, "translated_text"), Some(lang)),
+        Ask::LearnStyle => learn_style(app),
     }
 }
 
-/// The band of the message being written: Nora corrects, improves or translates the person's text.
-pub(crate) fn compose_band(ui: &mut Ui, t: &Tokens, acts: &mut Vec<Action>) {
+/// The band of the message being written: Nora corrects, improves or translates the person's text,
+/// and learns the style of the mailbox it goes from when that is a mailbox of the server (`style`).
+pub(crate) fn compose_band(ui: &mut Ui, t: &Tokens, acts: &mut Vec<Action>, style: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new(tl!("Nora")).color(t.dim).small());
@@ -163,7 +185,25 @@ pub(crate) fn compose_band(ui: &mut Ui, t: &Tokens, acts: &mut Vec<Action>) {
                 }
             }
         });
+        if style && ui.small_button(tl!("My style")).on_hover_text(tl!("Learn my writing style from my sent emails")).clicked() {
+            acts.push(Action::Nora(Ask::LearnStyle));
+        }
     });
+}
+
+/// Ask Nora to learn the writing style of the mailbox the message is written from, from its sent
+/// mail: she reads it on the server, in the background (a minute or so), and writes in it from then on.
+fn learn_style(app: &mut MailApp) {
+    if app.ui.nora.asked(|w| matches!(w, Waiting::Style)) {
+        return;
+    }
+    let Some(account) = app.session.compose.as_ref().map(|c| c.account.clone()) else { return };
+    let mailbox = mailbox(app, &account);
+    if mailbox.is_empty() {
+        return;
+    }
+    send(app, STYLE_METHOD, json!({"account_name": mailbox}), Waiting::Style);
+    app.session.notice(tl!("Starting style analysis…").to_string(), false);
 }
 
 /// Ask Nora for a new version of the person's own text (above the signature and the quoted
@@ -215,17 +255,27 @@ fn reply(app: &mut MailApp, all: bool) {
         app.session.notice(tl!("Nora is already writing a reply.").to_string(), false);
         return;
     }
-    let Some((account, context)) = app.session.reading.as_ref().and_then(|r| Some((r.key.account.clone(), reply_context(r.parsed.as_ref()?)))) else {
+    let Some((key, context)) = app.session.reading.as_ref().and_then(|r| Some((r.key.clone(), reply_context(r.parsed.as_ref()?)))) else {
         return;
     };
+    // A message of a mailbox of the server: Nora reads it there, by its key. Without the key, its text
+    // isn't sent instead.
+    let mailbox = mailbox(app, &key.account);
+    let server_id = if mailbox.is_empty() { None } else { app.services.nora_message(&key) };
+    if !mailbox.is_empty() && server_id.is_none() {
+        app.session.notice(tl!("Nora couldn't find this message on the server: refresh the list and try again.").to_string(), true);
+        return;
+    }
     let before = app.session.compose.as_ref().map(|c| c.id);
     app.run(if all { "mail.replyAll" } else { "mail.reply" }, json!({}));
     // The reply didn't open (the message is still downloading, say): nothing to write into.
     let Some(compose) = app.session.compose.as_ref().map(|c| c.id).filter(|id| Some(*id) != before) else {
         return;
     };
-    let mailbox = mailbox(app, &account);
-    send(app, REPLY_METHOD, json!({"prompt": INSTRUCTION, "account_name": mailbox, "reply_context": context}), Waiting::Reply(compose));
+    match server_id {
+        Some(id) => send(app, QUICK_REPLY_METHOD, json!({"account_name": mailbox, "email_id": id}), Waiting::Reply(compose)),
+        None => send(app, REPLY_METHOD, json!({"prompt": INSTRUCTION, "account_name": mailbox, "reply_context": context}), Waiting::Reply(compose)),
+    }
     app.session.notice(tl!("Nora is writing the reply…").to_string(), false);
 }
 
@@ -249,11 +299,22 @@ fn translate(app: &mut MailApp, lang: &'static str) {
         app.session.notice(tl!("Nora is already translating a message.").to_string(), false);
         return;
     }
-    let Some((key, text)) = app.session.reading.as_ref().and_then(|r| Some((r.key.clone(), r.parsed.as_ref()?.text.clone()))) else {
-        return;
+    let Some(key) = app.session.reading.as_ref().map(|r| r.key.clone()) else { return };
+    // A message of a mailbox of the server: Nora reads it there, by its key, as for a reply. The
+    // sample mailbox's goes as text.
+    let mailbox = mailbox(app, &key.account);
+    let args = if mailbox.is_empty() {
+        let Some(text) = app.session.reading.as_ref().and_then(|r| Some(r.parsed.as_ref()?.text.clone())) else { return };
+        let html = as_html(&text.chars().take(CONTEXT_MAX).collect::<String>());
+        json!({"html_content": html, "target_language": lang, "account_name": ""})
+    } else {
+        let Some(id) = app.services.nora_message(&key) else {
+            app.session.notice(tl!("Nora couldn't find this message on the server: refresh the list and try again.").to_string(), true);
+            return;
+        };
+        json!({"target_language": lang, "account_name": mailbox, "email_id": id})
     };
-    let html = as_html(&text.chars().take(CONTEXT_MAX).collect::<String>());
-    send(app, TRANSLATE_METHOD, json!({"html_content": html, "target_language": lang, "account_name": ""}), Waiting::Translation(key, lang));
+    send(app, TRANSLATE_METHOD, args, Waiting::Translation(key, lang));
     app.session.notice(tl!("Nora is translating the message…").to_string(), false);
 }
 
@@ -269,8 +330,11 @@ fn as_html(text: &str) -> String {
 }
 
 /// The answers that came back: a draft goes into the reply that waits for it, a translation is
-/// shown in place of its message.
+/// shown in place of its message. And which mailbox of the server the message being written goes
+/// from, for the band's « My style ».
 pub(crate) fn pump(app: &mut MailApp) {
+    let writing = app.session.compose.as_ref().map(|c| c.account.clone());
+    app.ui.nora.writing_from = writing.map(|account| mailbox(app, &account)).unwrap_or_default();
     for answer in app.services.nora_answers() {
         let Some(at) = app.ui.nora.waiting.iter().position(|(id, _)| *id == answer.id) else { continue };
         let (_, waiting) = app.ui.nora.waiting.remove(at);
@@ -289,7 +353,28 @@ pub(crate) fn pump(app: &mut MailApp) {
                 Ok(None) => app.session.notice(tf!("The message is already in {language}.", language = tl!(language(lang))), false),
                 Err(why) => app.session.notice(why, true),
             },
+            Waiting::Style => match style_started(&answer) {
+                Ok(true) => app.session.notice(tl!("Nora is already learning your writing style.").to_string(), false),
+                Ok(false) => {
+                    app.session.notice(tl!("Nora is learning your writing style from your sent emails. This takes a minute.").to_string(), false);
+                }
+                Err(why) => app.session.notice(why, true),
+            },
         }
+    }
+}
+
+/// Whether the style analysis the answer speaks of was already running (`Ok(true)`) or has just
+/// started, or what to tell the person.
+fn style_started(answer: &NoraAnswer) -> Result<bool, String> {
+    if answer.status == 0 {
+        return Err(tf!("Nora couldn't be reached: {reason}", reason = answer.body.trim()));
+    }
+    let body: Value = serde_json::from_str(&answer.body).unwrap_or(Value::Null);
+    let message = body.get("message").filter(|_| answer.status == 200);
+    match message.and_then(|m| m.get("success")).and_then(Value::as_bool) {
+        Some(true) => Ok(message.and_then(|m| m.get("already_running")).and_then(Value::as_bool).unwrap_or(false)),
+        _ => Err(tf!("Nora couldn't learn your style: {reason}", reason = reason(&body, answer.status))),
     }
 }
 
@@ -479,6 +564,8 @@ mod tests {
         inbox: Rc<RefCell<Vec<NoraAnswer>>>,
         /// A mailbox of the server, as a hosting page hands one over.
         mailbox: Option<String>,
+        /// The server's id of the open message, as a hosting page's mailbox has one.
+        server_id: Option<String>,
     }
 
     impl Services for Host {
@@ -506,6 +593,29 @@ mod tests {
         fn nora_mailbox(&self, email: &str) -> bool {
             self.mailbox.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(email))
         }
+        fn nora_message(&self, _key: &MessageKey) -> Option<String> {
+            self.server_id.clone()
+        }
+    }
+
+    /// The text one frame draws, a line per piece.
+    fn drawn(ctx: &egui::Context, app: &mut MailApp) -> String {
+        fn collect(shape: &egui::Shape, text: &mut String) {
+            match shape {
+                egui::Shape::Text(t) => {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, text)),
+                _ => {}
+            }
+        }
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        let mut text = String::new();
+        out.shapes.iter().for_each(|clipped| collect(&clipped.shape, &mut text));
+        text
     }
 
     fn frame(ctx: &egui::Context, app: &mut MailApp) {
@@ -516,9 +626,13 @@ mod tests {
 
     /// The sample mailbox in a page that reaches Nora, with the print shop's message open.
     fn hosted() -> (MailApp, Host, egui::Context) {
+        hosted_by(Host::default())
+    }
+
+    /// The same, the page being `host`.
+    fn hosted_by(host: Host) -> (MailApp, Host, egui::Context) {
         let store = Store::memory();
         sample::seed_if_empty(&store, NOW).unwrap();
-        let host = Host::default();
         let mut app = MailApp::new(Session::open(Some(store), Clock::new(NOW, 0)), Box::new(NullBackend), Box::new(host.clone()));
         let ctx = egui::Context::default();
         frame(&ctx, &mut app);
@@ -740,16 +854,111 @@ mod tests {
         app.act(Action::Nora(Ask::Reply { all: false }));
         assert_eq!(host.sent.borrow().last().map(|c| c.args["account_name"].clone()), Some(json!("")), "the sample mailbox");
 
-        let store = Store::memory();
-        sample::seed_if_empty(&store, NOW).unwrap();
-        let host = Host { mailbox: Some("Riley@Studio.example".into()), ..Host::default() };
-        let mut app = MailApp::new(Session::open(Some(store), Clock::new(NOW, 0)), Box::new(NullBackend), Box::new(host.clone()));
-        let ctx = egui::Context::default();
-        frame(&ctx, &mut app);
-        let key = app.session.list.iter().find(|m| m.subject.starts_with("Your proof")).map(|m| m.key.clone()).unwrap();
-        app.session.open_message(&key);
-        frame(&ctx, &mut app);
+        let (mut app, host, _ctx) = hosted_by(server_mailbox(Some("E1V5ZSU5CT1g")));
         app.act(Action::Nora(Ask::Reply { all: false }));
         assert_eq!(host.sent.borrow().last().map(|c| c.args["account_name"].clone()), Some(json!("riley@studio.example")));
+    }
+
+    /// A page that hands over the mailbox the sample's messages are in, its messages having `server_id`.
+    fn server_mailbox(server_id: Option<&str>) -> Host {
+        Host { mailbox: Some("Riley@Studio.example".into()), server_id: server_id.map(str::to_string), ..Host::default() }
+    }
+
+    #[test]
+    fn a_message_of_the_server_goes_by_its_key_never_its_text() {
+        let (mut app, host, ctx) = hosted_by(server_mailbox(Some("E1V5ZSU5CT1g")));
+        app.act(Action::Nora(Ask::Reply { all: true }));
+        let call = host.sent.borrow().last().cloned().unwrap();
+        assert_eq!(call.method, "nora.api.nora_webmail.quick_reply");
+        assert_eq!(call.args, json!({"account_name": "riley@studio.example", "email_id": "E1V5ZSU5CT1g"}), "the key, nothing of the text");
+        let before = app.session.compose.as_ref().map(|c| c.body.clone()).unwrap();
+        answers(&host, call.id, 200, json!({"message": {"success": true, "draft_text": "Bonjour,\n\nC'est approuvé.", "language": "fr"}}));
+        frame(&ctx, &mut app);
+        assert_eq!(app.session.compose.as_ref().map(|c| c.body.clone()), Some(format!("Bonjour,\n\nC'est approuvé.{before}")));
+    }
+
+    #[test]
+    fn without_its_key_a_message_of_the_server_is_not_sent_as_text() {
+        let (mut app, host, _ctx) = hosted_by(server_mailbox(None));
+        app.act(Action::Nora(Ask::Reply { all: false }));
+        assert!(host.sent.borrow().is_empty(), "no call, and no text instead of the key");
+        assert!(app.session.compose.is_none(), "no reply opened for a draft that won't come");
+        let last = app.session.notices.last().map(|n| (n.text.clone(), n.error)).unwrap();
+        assert_eq!(last, ("Nora couldn't find this message on the server: refresh the list and try again.".to_string(), true));
+    }
+
+    #[test]
+    fn a_message_of_the_server_is_translated_by_its_key_never_its_text() {
+        let (mut app, host, ctx) = hosted_by(server_mailbox(Some("E1V5ZSU5CT1g")));
+        let key = app.session.reading.as_ref().map(|r| r.key.clone()).unwrap();
+        app.act(Action::Nora(Ask::Translate("fr")));
+        let call = host.sent.borrow().last().cloned().unwrap();
+        assert_eq!(call.method, "nora.api.nora_webmail.translate");
+        assert_eq!(
+            call.args,
+            json!({"target_language": "fr", "account_name": "riley@studio.example", "email_id": "E1V5ZSU5CT1g"}),
+            "the key, nothing of the text"
+        );
+        answers(&host, call.id, 200, json!({"message": {"translated_text": "Bonjour", "source_language": "en", "has_changes": true}}));
+        frame(&ctx, &mut app);
+        assert_eq!(app.ui.nora.translation, Some((key, "fr", "Bonjour".to_string())));
+
+        let (mut app, host, _ctx) = hosted_by(server_mailbox(None));
+        app.act(Action::Nora(Ask::Translate("de")));
+        assert!(host.sent.borrow().is_empty(), "no call, and no text instead of the key");
+        assert_eq!(
+            app.session.notices.last().map(|n| (n.text.as_str(), n.error)),
+            Some(("Nora couldn't find this message on the server: refresh the list and try again.", true))
+        );
+    }
+
+    #[test]
+    fn my_style_is_offered_for_a_mailbox_of_the_server_only() {
+        let (mut app, host, ctx) = hosted();
+        app.run("mail.reply", json!({}));
+        frame(&ctx, &mut app);
+        assert_eq!(app.ui.nora.writing_from, "", "the sample mailbox has no style on the server");
+        let shown = drawn(&ctx, &mut app);
+        assert!(shown.contains("Improve") && !shown.contains("My style"), "the band, without My style");
+        app.act(Action::Nora(Ask::LearnStyle));
+        assert!(host.sent.borrow().is_empty(), "nothing asked for the sample mailbox");
+
+        let (mut app, host, ctx) = hosted_by(server_mailbox(Some("E1V5ZSU5CT1g")));
+        assert_eq!(app.ui.nora.writing_from, "", "nothing is being written");
+        app.run("mail.reply", json!({}));
+        frame(&ctx, &mut app);
+        assert_eq!(app.ui.nora.writing_from, "riley@studio.example");
+        assert!(drawn(&ctx, &mut app).contains("My style"));
+        app.run("compose.discard", json!({}));
+        frame(&ctx, &mut app);
+        assert_eq!(app.ui.nora.writing_from, "");
+        assert!(host.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn my_style_starts_the_analysis_and_says_how_it_went() {
+        let (mut app, host, ctx) = hosted_by(server_mailbox(Some("E1V5ZSU5CT1g")));
+        app.run("mail.reply", json!({}));
+        frame(&ctx, &mut app);
+        let ask = |app: &mut MailApp, status: u16, body: Value| {
+            app.act(Action::Nora(Ask::LearnStyle));
+            let call = host.sent.borrow().last().cloned().unwrap();
+            assert_eq!((call.method, call.args.clone()), ("nora.api.nora_webmail.scan_style", json!({"account_name": "riley@studio.example"})));
+            // A second click while the server answers asks nothing more.
+            let count = host.sent.borrow().len();
+            app.act(Action::Nora(Ask::LearnStyle));
+            assert_eq!(host.sent.borrow().len(), count);
+            answers(&host, call.id, status, body);
+            frame(&ctx, app);
+            app.session.notices.last().map(|n| (n.text.clone(), n.error)).unwrap()
+        };
+        let started = ask(&mut app, 200, json!({"message": {"success": true, "status": "Scanning"}}));
+        assert_eq!(started, ("Nora is learning your writing style from your sent emails. This takes a minute.".to_string(), false));
+        let running = ask(&mut app, 200, json!({"message": {"success": true, "status": "Scanning", "already_running": true}}));
+        assert_eq!(running, ("Nora is already learning your writing style.".to_string(), false));
+        let shown = json!({"message": "Access denied"}).to_string();
+        let refused = ask(&mut app, 417, json!({"_server_messages": json!([shown]).to_string()}));
+        assert_eq!(refused, ("Nora couldn't learn your style: Access denied".to_string(), true));
+        assert_eq!(host.sent.borrow().len(), 3);
     }
 }

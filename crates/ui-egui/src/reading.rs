@@ -1507,11 +1507,12 @@ fn compose(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                 ui.add_space(76.0);
                 ui.vertical(|ui| field(ui, &t, "Subject", &mut c.subject, "Add a subject", false, false));
             });
-            // //// Neoffice — Nora's band: correct, improve or translate the person's own text (nora.rs).
+            // //// Neoffice — Nora's band: correct, improve or translate the person's own text, learn the style of the
+            // server's mailbox it goes from (nora.rs).
             if st.nora.available {
                 ui.horizontal(|ui| {
                     ui.add_space(76.0 + LABEL_W);
-                    crate::nora::compose_band(ui, &t, acts);
+                    crate::nora::compose_band(ui, &t, acts, !st.nora.writing_from.is_empty());
                 });
             }
             if !c.attachments.is_empty() {

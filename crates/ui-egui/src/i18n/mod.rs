@@ -198,10 +198,26 @@ pub fn lang_from_tag(tag: &str) -> Option<Lang> {
     Lang::from_code(primary)
 }
 
+// //// Neoffice — the language of the page that hosts MailCraft (the Neoffice desk's, maintenance#1630): a person's
+// browser is often not in their desk's language. Set before the first frame; a language chosen in Settings still wins.
+static HOST_LANG: OnceLock<Lang> = OnceLock::new();
+
+/// Prefer the hosting page's language (a tag such as `fr` or `de-CH`) to the system's for « Automatic »; a tag
+/// without a catalog changes nothing.
+pub fn prefer_host_language(tag: &str) {
+    if let Some(l) = lang_from_tag(tag) {
+        let _ = HOST_LANG.set(l);
+    }
+}
+
 /// The system's language when there's a catalog for it; English otherwise (and in tests).
 pub fn system_lang() -> Lang {
     if cfg!(test) {
         return Lang::EN;
+    }
+    // //// Neoffice — the hosting page's language first (prefer_host_language).
+    if let Some(l) = HOST_LANG.get() {
+        return *l;
     }
     static SYSTEM: OnceLock<Lang> = OnceLock::new();
     *SYSTEM.get_or_init(|| {

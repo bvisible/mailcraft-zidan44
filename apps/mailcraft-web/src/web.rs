@@ -34,6 +34,10 @@ pub fn start() {
             return;
         };
         let sample = query().contains("sample");
+        // //// Neoffice — the desk's language for « Automatic » when a Neoffice page hosts MailCraft (host.rs).
+        if let Some(tag) = crate::host::language() {
+            mailcraft_ui_egui::i18n::prefer_host_language(&tag);
+        }
         // //// Neoffice — the mailboxes a hosting page hands over (host.rs): opened at once, nothing kept.
         let host = if sample || param("open").is_some() { Vec::new() } else { crate::host::accounts() };
         let hosted = !host.is_empty();
@@ -103,7 +107,7 @@ pub fn start() {
                     // //// Neoffice — Nora, when the page asked for her (`?nora`).
                     let nora = crate::nora::requested(&query()).map(|origin| crate::nora::Nora::new(origin, cc.egui_ctx.clone()));
                     let hosted_mail = host.iter().map(|a| a.email.to_lowercase()).collect();
-                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora, hosted: hosted_mail };
+                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora, hosted: hosted_mail, store: store.clone() };
                     let mut app = MailApp::new(session, Box::new(backend), Box::new(services));
                     if sample {
                         app.ui.title_base = "MailCraft – Sample mailbox".into();
@@ -211,9 +215,10 @@ struct WebServices {
     picked: Picked,
     ctx: egui::Context,
     // //// Neoffice — the connection to Nora, when the page that hosts MailCraft asked for her; the addresses of
-    // the mailboxes it handed over (lower case).
+    // the mailboxes it handed over (lower case); the store, where the JMAP ids behind MailCraft's numbers are kept.
     nora: Option<crate::nora::Nora>,
     hosted: std::collections::HashSet<String>,
+    store: Store,
 }
 
 impl Services for WebServices {
@@ -297,6 +302,14 @@ impl Services for WebServices {
     }
     fn nora_mailbox(&self, email: &str) -> bool {
         self.hosted.contains(&email.to_lowercase())
+    }
+    fn nora_message(&self, key: &mailcraft_engine::model::MessageKey) -> Option<String> {
+        // For a mailbox the page handed over only: the JMAP id the backend gave this message's number.
+        let account = self.store.load_accounts().ok()?.into_iter().find(|a| a.id == key.account)?;
+        if !self.hosted.contains(&account.email.to_lowercase()) {
+            return None;
+        }
+        mailcraft_jmap::email_id_of(&self.store, key)
     }
 }
 

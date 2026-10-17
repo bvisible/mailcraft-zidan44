@@ -925,9 +925,33 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
+// //// Neoffice — the server's id behind one of MailCraft's message keys, for a host that names a message to its
+// server: Neoffice's Nora reads it there by this id, and no text of it leaves the page (maintenance#1630).
+/// The JMAP email id behind `key`, when this account's state gave the key out; `None` otherwise.
+pub fn email_id_of(store: &Store, key: &MessageKey) -> Option<String> {
+    if key.validity != VALIDITY {
+        return None;
+    }
+    State::load(store, &key.account).id(key.uid).map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // //// Neoffice — the server's id behind a message key (email_id_of, maintenance#1630).
+    #[test]
+    fn a_key_gives_back_the_server_id_it_stands_for() {
+        let store = Store::memory();
+        let mut st = State::default();
+        let n = st.number("E7V42ZQXJjaGl2ZQ");
+        st.save(&store, "a1").unwrap();
+        let key = |account: &str, validity, uid| MessageKey { account: account.into(), folder: "INBOX".into(), validity, uid };
+        assert_eq!(email_id_of(&store, &key("a1", VALIDITY, n)), Some("E7V42ZQXJjaGl2ZQ".to_string()));
+        assert_eq!(email_id_of(&store, &key("a2", VALIDITY, n)), None, "another account's numbers are its own");
+        assert_eq!(email_id_of(&store, &key("a1", VALIDITY + 1, n)), None, "an IMAP key is no JMAP one");
+        assert_eq!(email_id_of(&store, &key("a1", VALIDITY, n + 1)), None, "a number never given out");
+    }
 
     #[test]
     fn session_urls_dates_and_keywords() {

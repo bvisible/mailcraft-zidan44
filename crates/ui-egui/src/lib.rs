@@ -196,6 +196,11 @@ pub trait Services {
     fn nora_mailbox(&self, _email: &str) -> bool {
         false
     }
+    /// The Neoffice server's own id of a message of a mailbox the hosting page handed over (its JMAP email id): Nora
+    /// reads the message there by this key, and no text of it goes from here. `None` for any other message.
+    fn nora_message(&self, _key: &MessageKey) -> Option<String> {
+        None
+    }
 }
 
 /// Services for tests: a fixed clock, no dialogs.

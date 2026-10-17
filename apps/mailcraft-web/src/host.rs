@@ -12,7 +12,7 @@
 //!   username: "jane@example.com",
 //!   secret: "<token>",           // kept in this tab's memory only, never stored
 //!   scheme: "bearer"             // or "basic"
-//! }] };
+//! }], language: "fr" };          // the person's language: MailCraft draws in it for « Automatic »
 //! ```
 //!
 //! It is read on this page, or on the page that frames it when that one is of the same origin (reading another
@@ -79,6 +79,12 @@ pub fn accounts() -> Vec<HostAccount> {
         }
     }
     out
+}
+
+/// The language of the person the page is for (a tag such as `fr` or `de-CH`), if it says one.
+pub fn language() -> Option<String> {
+    let host = windows().iter().find_map(|w| get(w, "mailcraftJmap").filter(JsValue::is_object))?;
+    Some(text(&host, "language")).filter(|tag| !tag.is_empty() && tag.len() <= 35)
 }
 
 /// A store in memory holding these mailboxes' accounts (`a1`, `a2`…), before the session opens it, so each starts once.
