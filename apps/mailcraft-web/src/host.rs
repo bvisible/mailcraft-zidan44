@@ -2,7 +2,8 @@
 
 //! The mailboxes a hosting page hands MailCraft, so that it opens them without a form or a password.
 //!
-//! The page (Neoffice's `/mailcraft`, which frames the browser build) sets, before MailCraft starts:
+//! The page (Neoffice's `/neomail` in the desk, or Neodesk's window, which frame the browser build) sets, before
+//! MailCraft starts:
 //!
 //! ```js
 //! window.mailcraftJmap = { accounts: [{
@@ -15,6 +16,10 @@
 //! }], language: "fr",           // the person's language: MailCraft draws in it for « Automatic »
 //!   product: "NeoMail" };        // the name the person reads, shown wherever MailCraft names itself
 //! ```
+//!
+//! When the server refuses a token (it expired, or died with the session that asked for it), MailCraft calls
+//! `window.mailcraftJmapRenew()` if the page has it: a promise of `{ accounts: [...] }` with new secrets, as above; the
+//! mailbox then signs in again, once.
 //!
 //! It is read on this page, or on the page that frames it when that one is of the same origin (reading another
 //! origin's window throws, which reads as nothing). Nothing secret travels in the address. With host accounts,
@@ -63,7 +68,26 @@ fn windows() -> Vec<JsValue> {
 /// The mailboxes handed over, the incomplete ones left out (at most 20).
 pub fn accounts() -> Vec<HostAccount> {
     let Some(host) = windows().iter().find_map(|w| get(w, "mailcraftJmap").filter(JsValue::is_object)) else { return Vec::new() };
-    let Some(list) = get(&host, "accounts").filter(js_sys::Array::is_array) else { return Vec::new() };
+    parse(&host)
+}
+
+/// New tokens for the mailboxes, from the hosting page's `window.mailcraftJmapRenew()` (a promise of
+/// `{ accounts: [...] }`, the same as `mailcraftJmap`'s), when the server refused the ones it had given; `None` when the
+/// page offers no such function, or it gives nothing.
+pub async fn renew() -> Option<Vec<HostAccount>> {
+    let (window, renew) = windows().into_iter().find_map(|w| {
+        let f = get(&w, "mailcraftJmapRenew").filter(JsValue::is_function)?;
+        Some((w, f))
+    })?;
+    let promise = js_sys::Function::from(renew).call0(&window).ok()?;
+    let answer = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&promise)).await.ok()?;
+    let accounts = if answer.is_object() { parse(&answer) } else { Vec::new() };
+    (!accounts.is_empty()).then_some(accounts)
+}
+
+/// The complete mailboxes of `{ accounts: [...] }` (at most 20).
+fn parse(host: &JsValue) -> Vec<HostAccount> {
+    let Some(list) = get(host, "accounts").filter(js_sys::Array::is_array) else { return Vec::new() };
     let mut out: Vec<HostAccount> = Vec::new();
     for item in js_sys::Array::from(&list).iter().take(20) {
         let account = HostAccount {

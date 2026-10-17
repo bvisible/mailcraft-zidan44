@@ -47,6 +47,8 @@ struct Account {
     generation: u32,
     /// The push stream is open: the Inbox needn't be polled.
     pushing: bool,
+    // //// Neoffice — a new token was asked of the hosting page after a refusal: once, until a sign-in works (renew).
+    renewing: bool,
 }
 
 struct Shared {
@@ -58,6 +60,9 @@ struct Shared {
     // //// Neoffice — what the mailboxes a hosting page handed over sign in with: address (lower case) →
     // (secret, Bearer); in memory only (host.rs).
     host: HashMap<String, (String, bool)>,
+    // //// Neoffice — the accounts waiting for new tokens while one request to the hosting page is on its way (renew):
+    // several mailboxes refused at once ask the page once.
+    renewal: Option<Vec<String>>,
 }
 
 type Rcs = Rc<RefCell<Shared>>;
@@ -70,7 +75,7 @@ impl WebBackend {
     // //// Neoffice — `host`: the secrets of the mailboxes a hosting page handed over (host.rs).
     pub fn new(store: Store, ctx: egui::Context, host: HashMap<String, (String, bool)>) -> WebBackend {
         let opts = SyncOptions { window: 300, prefetch: 20, ..SyncOptions::default() };
-        WebBackend { shared: Rc::new(RefCell::new(Shared { store, events: Vec::new(), accounts: HashMap::new(), ctx, opts, host })) }
+        WebBackend { shared: Rc::new(RefCell::new(Shared { store, events: Vec::new(), accounts: HashMap::new(), ctx, opts, host, renewal: None })) }
     }
 }
 
@@ -157,9 +162,32 @@ fn failed(sh: &Rcs, id: &str, e: Error) {
     log::warn!("{id}: {e}");
     match e {
         Error::Auth(m) => {
+            // //// Neoffice — a mailbox the hosting page handed over: its token was refused (it expired, or died with the
+            // desk session or the server's cache). The page gives a new one, and the account signs in again, once.
+            let hosted = {
+                let s = sh.borrow();
+                s.accounts.get(id).is_some_and(|a| !a.renewing && s.host.contains_key(&a.config.email.to_lowercase()))
+            };
             if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
                 a.client = None;
                 a.password = None;
+                // //// Neoffice — asked once per sign-in (renew), so a token refused again stops here.
+                a.renewing |= hosted;
+            }
+            // //// Neoffice — one request to the page at a time: the others refused meanwhile wait for its answer.
+            if hosted {
+                status(sh, id, SyncStatus::Connecting);
+                let first = {
+                    let mut s = sh.borrow_mut();
+                    let waiting = s.renewal.get_or_insert_with(Vec::new);
+                    waiting.push(id.to_string());
+                    waiting.len() == 1
+                };
+                if first {
+                    let sh = sh.clone();
+                    wasm_bindgen_futures::spawn_local(async move { renew(&sh).await });
+                }
+                return;
             }
             status(sh, id, SyncStatus::NeedsPassword { error: m });
         }
@@ -170,6 +198,35 @@ fn failed(sh: &Rcs, id: &str, e: Error) {
             status(sh, id, SyncStatus::Error { error: e.to_string() });
         }
         e => notice(sh, id, e.to_string()),
+    }
+}
+
+// //// Neoffice — new tokens from the hosting page (host.rs) for the accounts waiting for them, which then sign in
+// again. They replace what the page handed over before: a mailbox it no longer gives, or no answer, means reloading.
+async fn renew(sh: &Rcs) {
+    let fresh = crate::host::renew().await;
+    let waiting = {
+        let mut s = sh.borrow_mut();
+        if let Some(accounts) = &fresh {
+            s.host = crate::host::secrets(accounts);
+        }
+        s.renewal.take().unwrap_or_default()
+    };
+    for id in waiting {
+        let secret = {
+            let s = sh.borrow();
+            let given = s.accounts.get(&id).and_then(|a| s.host.get(&a.config.email.to_lowercase()));
+            given.filter(|_| fresh.is_some()).map(|(secret, _)| secret.clone())
+        };
+        match secret {
+            Some(secret) => {
+                if let Some(a) = sh.borrow_mut().accounts.get_mut(&id) {
+                    a.password = Some(secret);
+                }
+                enqueue(sh, &id, Task::Connect);
+            }
+            None => status(sh, &id, SyncStatus::NeedsPassword { error: "the page gave no new access to this mailbox: reload it".into() }),
+        }
     }
 }
 
@@ -191,6 +248,8 @@ async fn connect(sh: &Rcs, id: &str) {
                 let mut s = sh.borrow_mut();
                 let Some(a) = s.accounts.get_mut(id) else { return };
                 a.client = Some(Rc::new(c));
+                // //// Neoffice — signed in: a later refusal may ask the hosting page again (renew).
+                a.renewing = false;
                 std::mem::take(&mut a.ops)
             };
             for op in ops {
@@ -567,6 +626,8 @@ impl Backend for WebBackend {
                             queue: VecDeque::new(),
                             running: false,
                             generation,
+                            // //// Neoffice — see `renew`.
+                            renewing: false,
                             pushing: false,
                         },
                     );
