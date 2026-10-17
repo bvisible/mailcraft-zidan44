@@ -1451,15 +1451,31 @@ fn card_from(v: &Value, mut c: mailcraft_model::vcard::Card) -> Result<mailcraft
         }
     };
     if let Some(n) = p::str(v, "name") {
-        c.name = n.trim().chars().take(300).collect();
-        c.given.clear();
-        c.family.clear();
+        let n: String = n.trim().chars().take(300).collect();
+        // //// Neoffice — the name shown, unchanged (the form shows it whole): the card keeps it, and its given name and
+        // surname, rather than losing them at every save.
+        if n != c.display() {
+            c.name = n;
+            c.given.clear();
+            c.family.clear();
+        }
     }
+    // //// Neoffice — an address or a number already on the card keeps its kind (work, home, mobile); only new ones have
+    // none.
+    let kind_of = |old: &[mailcraft_model::vcard::Typed], value: &str, same: fn(&str, &str) -> bool| {
+        old.iter().find(|o| same(&o.value, value)).map(|o| o.kind.clone()).unwrap_or_default()
+    };
     if let Some(e) = list("emails") {
-        c.emails = e.into_iter().take(20).map(|value| mailcraft_model::vcard::Typed { value, kind: String::new() }).collect();
+        // //// Neoffice — see `kind_of` above: an address, whatever its case.
+        let old = std::mem::take(&mut c.emails);
+        let same: fn(&str, &str) -> bool = |a, b| a.trim().eq_ignore_ascii_case(b.trim());
+        c.emails = e.into_iter().take(20).map(|value| mailcraft_model::vcard::Typed { kind: kind_of(&old, &value, same), value }).collect();
     }
     if let Some(ph) = list("phones") {
-        c.phones = ph.into_iter().take(20).map(|value| mailcraft_model::vcard::Typed { value, kind: String::new() }).collect();
+        // //// Neoffice — see `kind_of` above: a number, however it is spaced.
+        let old = std::mem::take(&mut c.phones);
+        let same: fn(&str, &str) -> bool = |a, b| a.split_whitespace().collect::<String>() == b.split_whitespace().collect::<String>();
+        c.phones = ph.into_iter().take(20).map(|value| mailcraft_model::vcard::Typed { kind: kind_of(&old, &value, same), value }).collect();
     }
     for (k, field) in [("org", &mut c.org), ("title", &mut c.title), ("note", &mut c.note)] {
         if let Some(x) = p::str(v, k) {

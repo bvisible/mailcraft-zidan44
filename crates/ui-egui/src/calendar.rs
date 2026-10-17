@@ -65,7 +65,11 @@ pub fn title(s: &Session) -> String {
 pub fn nav(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
     let t = st.tokens;
     egui::ScrollArea::vertical().auto_shrink(false).id_salt("calendar-nav").show(ui, |ui| {
-        if widgets::accent_button(ui, Icon::Plus, "New event", &t, !s.accounts.is_empty()).clicked() {
+        // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
+        let nowhere = crate::read_only::no_new_events(s);
+        if crate::read_only::why(widgets::accent_button(ui, Icon::Plus, "New event", &t, !s.accounts.is_empty() && nowhere.is_none()), nowhere)
+            .clicked()
+        {
             acts.push(Action::Dialog(Dialog::new_event(s, None)));
         }
         ui.add_space(10.0);
@@ -74,7 +78,8 @@ pub fn nav(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
         ui.label(RichText::new(tl!("Calendars")).font(theme::bold(12.0)).color(t.faint));
         for a in &s.accounts {
             let Some(p) = s.pim.get(&a.config.id) else { continue };
-            for c in &p.calendars {
+            // //// Neoffice — not the calendar here, empty, where nothing can be put (read_only.rs).
+            for c in p.calendars.iter().filter(|c| crate::read_only::listed(s, p, c)) {
                 let shared = c.id.strip_prefix("shared:").map(str::to_string);
                 let row = ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
@@ -314,7 +319,8 @@ fn month(s: &Session, t: &Tokens, ui: &mut Ui, items: &[AgendaItem], d0: i64, ac
                     acts.push(Action::Run("calendar.goto", json!({"date": format!("{y:04}-{mm:02}-{ddd:02}")})));
                 }
             }
-            if bg.double_clicked() {
+            // //// Neoffice — not where there is nowhere to add one (read_only.rs).
+            if bg.double_clicked() && s.can_add_events() {
                 acts.push(Action::Dialog(Dialog::new_event(s, Some(s.local_midnight(d) + 9 * 3600))));
             }
         }
@@ -414,7 +420,9 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
                 let slot = Rect::from_min_size(pos2(col.min.x, grid.min.y + half * HOUR / 2.0), vec2(cw, HOUR / 2.0)).shrink(1.0);
                 ui.painter().rect_filled(slot, 2.0, t.hover_row);
             }
+            // //// Neoffice — not where there is nowhere to add one (read_only.rs).
             if r.clicked()
+                && s.can_add_events()
                 && let Some(p) = r.interact_pointer_pos()
             {
                 let half = ((p.y - grid.min.y) / (HOUR / 2.0)).floor().clamp(0.0, 47.0) as i64;

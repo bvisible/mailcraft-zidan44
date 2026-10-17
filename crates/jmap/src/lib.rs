@@ -141,10 +141,16 @@ pub struct Client<H> {
     quota: bool,
     vacation: bool,
     max_get: usize,
+    // //// Neoffice — the most objects one /set may change (`maxObjectsInSet`): cards made or changed here go back in
+    // batches of this size (contacts.rs).
+    max_set: usize,
     // //// Neoffice — the account that holds the address books (contacts.rs), when the session offers them.
     contacts: Option<String>,
     // //// Neoffice — the account that holds the calendars (calendars.rs), when the session offers them.
     calendars: Option<String>,
+    // //// Neoffice — the longest span the server expands repeating events over (JMAP Calendars'
+    // `maxExpandedQueryDuration`), in seconds, when it says one: the window read around today fits in it (calendars.rs).
+    calendars_span: Option<i64>,
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
@@ -209,6 +215,8 @@ impl<H: Http> Client<H> {
             Ok(u.full())
         };
         let max_get = caps.get(CORE).and_then(|c| c.get("maxObjectsInGet")).and_then(Value::as_u64).unwrap_or(500);
+        // //// Neoffice — and the most a /set takes (contacts.rs), read the same way.
+        let max_set = caps.get(CORE).and_then(|c| c.get("maxObjectsInSet")).and_then(Value::as_u64).unwrap_or(500);
         // //// Neoffice — the address books' account: its own, else the mail's (contacts.rs).
         let contacts = caps
             .get(contacts::CONTACTS)
@@ -217,6 +225,16 @@ impl<H: Http> Client<H> {
         let calendars = caps
             .get(calendars::CALENDARS)
             .map(|_| v.get("primaryAccounts").and_then(|p| p.get(calendars::CALENDARS)).and_then(Value::as_str).unwrap_or(account).to_string());
+        // //// Neoffice — and how long a span it expands, in that account's capabilities, else the session's.
+        let calendars_span = calendars
+            .as_deref()
+            .and_then(|a| v.get("accounts").and_then(|all| all.get(a)).and_then(|a| a.get("accountCapabilities")))
+            .and_then(|c| c.get(calendars::CALENDARS))
+            .and_then(|c| c.get("maxExpandedQueryDuration"))
+            .or_else(|| caps.get(calendars::CALENDARS).and_then(|c| c.get("maxExpandedQueryDuration")))
+            .and_then(Value::as_str)
+            .and_then(mailcraft_model::ical::duration)
+            .filter(|span| *span > 0);
         Ok(Client {
             api: resolve("apiUrl")?,
             // Templates keep their braces: resolve only the part before them.
@@ -228,9 +246,12 @@ impl<H: Http> Client<H> {
             quota: caps.get(QUOTA).is_some(),
             vacation: caps.get(VACATION).is_some(),
             max_get: usize::try_from(max_get).unwrap_or(500).clamp(1, 1000),
-            // //// Neoffice — the address books' and the calendars' accounts (contacts.rs, calendars.rs).
+            // //// Neoffice — see `max_set` above.
+            max_set: usize::try_from(max_set).unwrap_or(500).clamp(1, 1000),
+            // //// Neoffice — the address books' and the calendars' accounts (contacts.rs, calendars.rs), and the span.
             contacts,
             calendars,
+            calendars_span,
             auth,
             http,
         })
@@ -280,6 +301,67 @@ impl<H: Http> Client<H> {
             out.push(args);
         }
         Ok(out)
+    }
+
+    // //// Neoffice — a /query read whole, page after page (RFC 8620 §5.5), for the address books and the calendars
+    // (contacts.rs, calendars.rs): their first page is not all of them, and the engine replaces what it is handed.
+    /// The ids of a query whose first page is `first` (asked with [`query_page`] at position 0), read on from where each
+    /// page ends until the total is reached or a page comes back empty, at most `cap` of them, asking no more than a
+    /// smaller `limit` the server gave; and whether that is all of them (`false`: the cap, or [`MAX_QUERY_PAGES`], came
+    /// first).
+    async fn query_rest(&self, using: &[&str], method: &str, args: &Value, first: Value, cap: usize) -> Result<(Vec<String>, bool)> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let (mut answer, mut asked_at, mut limit) = (first, 0u64, cap.max(1));
+        // The total a page gave: an empty page before it is reached isn't the end of them all.
+        let mut said: Option<u64> = None;
+        for page in 1..=MAX_QUERY_PAGES {
+            let got: Vec<&str> = list(Some(&answer), "ids").iter().filter_map(Value::as_str).collect();
+            let total = answer.get("total").and_then(Value::as_u64).or(said);
+            said = total;
+            if got.is_empty() {
+                let whole = total.is_none_or(|t| ids.len() as u64 >= t);
+                return Ok((ids, whole));
+            }
+            let end = answer.get("position").and_then(Value::as_u64).unwrap_or(asked_at).saturating_add(got.len() as u64);
+            let before = ids.len();
+            for id in got {
+                if seen.contains(id) {
+                    continue;
+                }
+                if ids.len() >= cap {
+                    // More than the cap: not all of them.
+                    return Ok((ids, false));
+                }
+                seen.insert(id.to_string());
+                ids.push(id.to_string());
+            }
+            // At the end, the ids read are all of them unless the pages overlapped as the list changed meanwhile.
+            if let Some(t) = total.filter(|t| end >= *t) {
+                let whole = ids.len() as u64 >= t;
+                return Ok((ids, whole));
+            }
+            // A page with nothing new: the server says the same again, so this is all it gives.
+            if ids.len() == before {
+                let whole = total.is_none_or(|t| ids.len() as u64 >= t);
+                return Ok((ids, whole));
+            }
+            if ids.len() >= cap {
+                return Ok((ids, false));
+            }
+            // The server may use a smaller limit than the one asked (§5.5): the next pages ask for that.
+            if let Some(l) = answer.get("limit").and_then(Value::as_u64) {
+                limit = limit.min(usize::try_from(l).unwrap_or(usize::MAX)).max(1);
+            }
+            // No page asked that would not be read.
+            if page == MAX_QUERY_PAGES {
+                break;
+            }
+            asked_at = end;
+            let r = self.call(using, vec![(method, query_page(args, end, limit.min(cap - ids.len())))]).await?;
+            answer = r.into_iter().next().unwrap_or(Value::Null);
+        }
+        Ok((ids, false))
     }
 
     async fn mail(&self, calls: Vec<(&str, Value)>) -> Result<Vec<Value>> {
@@ -501,6 +583,21 @@ fn template_url(base: &Url, t: &str) -> Result<String> {
 
 fn list<'a>(v: Option<&'a Value>, key: &str) -> &'a [Value] {
     v.and_then(|v| v.get(key)).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+}
+
+// //// Neoffice — the pages of a /query (Client::query_rest): at most this many asked in one read, so that a server
+// that pages by fewer than 50 ids is not followed through 5000.
+const MAX_QUERY_PAGES: usize = 100;
+
+// //// Neoffice — one page of a /query (RFC 8620 §5.5): `args` asking `limit` ids from `position`, and their total.
+fn query_page(args: &Value, position: u64, limit: usize) -> Value {
+    let mut page = args.clone();
+    if let Some(m) = page.as_object_mut() {
+        m.insert("position".into(), json!(position));
+        m.insert("limit".into(), json!(limit));
+        m.insert("calculateTotal".into(), json!(true));
+    }
+    page
 }
 
 fn count(v: &Value, key: &str) -> u32 {

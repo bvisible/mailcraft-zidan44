@@ -35,4 +35,6 @@ web-sys = { version = "0.3", features = [
     "ReadableStream", "ReadableStreamDefaultReader", "AbortController", "AbortSignal",
     "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbTransaction", "IdbTransactionMode", "IdbObjectStore",
     "DomStringList", "Event",
+    # //// Neoffice — the hosting page's `?author=`, read as the document editors read it (host.rs).
+    "UrlSearchParams",
 ] }

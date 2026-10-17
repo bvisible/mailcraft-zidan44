@@ -2,17 +2,17 @@
 // client as the mail.
 //
 // A server that offers `urn:ietf:params:jmap:calendars` (Neoffice's mail facade does, for the person's calendars) gives
-// its calendars and the events of a window around today, each occurrence of a repeating event apart, with its start
-// and end in UTC (`utcStart`, `utcEnd`, which the server works out): MailCraft has no time-zone database, and the
-// browser build has no CalDAV. They come back as a [`DavSync`], which the engine merges as a CalDAV sync's, so the
-// calendar, the day's agenda and the meeting answers read them unchanged. Read only for now.
+// its calendars and the events of a window around today, page after page, each occurrence of a repeating event apart,
+// with its start and end in UTC (`utcStart`, `utcEnd`, which the server works out): MailCraft has no time-zone
+// database, and the browser build has no CalDAV. They come back as a [`DavSync`], which the engine merges as a CalDAV
+// sync's, so the calendar, the day's agenda and the meeting answers read them unchanged. Read only for now.
 
 use mailcraft_model::dates::civil_from_days;
 use mailcraft_model::ical::{CalEvent, duration};
 use mailcraft_model::pim::{CalendarInfo, DavSync, StoredEvent};
 use serde_json::{Value, json};
 
-use crate::{CORE, Client, Http, Result, list, utc_date};
+use crate::{CORE, Client, Http, Result, list, query_page, utc_date};
 
 /// The capability, and the type of the account that holds the calendars.
 pub const CALENDARS: &str = "urn:ietf:params:jmap:calendars";
@@ -50,18 +50,18 @@ impl<H: Http> Client<H> {
     /// the session offers none).
     pub async fn sync_calendars(&self, now: i64) -> Result<Option<DavSync>> {
         let Some(account) = self.calendars.as_deref() else { return Ok(None) };
-        let window = json!({"after": utc_string(now - DAYS_BACK * 86_400), "before": utc_string(now + DAYS_AHEAD * 86_400)});
+        let (from, to) = window(now, self.calendars_span);
+        let window = json!({"after": utc_string(from), "before": utc_string(to)});
+        let query = json!({"accountId": account, "filter": window, "expandRecurrences": true});
         let r = self
             .call(
                 &[CORE, CALENDARS],
-                vec![
-                    ("Calendar/get", json!({"accountId": account, "ids": null})),
-                    ("CalendarEvent/query", json!({"accountId": account, "filter": window, "expandRecurrences": true, "limit": MAX_EVENTS})),
-                ],
+                vec![("Calendar/get", json!({"accountId": account, "ids": null})), ("CalendarEvent/query", query_page(&query, 0, MAX_EVENTS))],
             )
             .await?;
         let calendars = list(r.first(), "list").to_vec();
-        let ids: Vec<&str> = list(r.get(1), "ids").iter().filter_map(Value::as_str).take(MAX_EVENTS).collect();
+        let first = r.get(1).cloned().unwrap_or(Value::Null);
+        let (ids, whole) = self.query_rest(&[CORE, CALENDARS], "CalendarEvent/query", &query, first, MAX_EVENTS).await?;
         let mut events = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(self.max_get.max(1)) {
             let got = self
@@ -69,7 +69,28 @@ impl<H: Http> Client<H> {
                 .await?;
             events.extend(list(got.first(), "list").iter().cloned());
         }
-        Ok(Some(calendars_sync(&calendars, &events, now)))
+        let mut sync = calendars_sync(&calendars, &events, now);
+        sync.window = Some((from, to));
+        if !whole {
+            // One query covers every calendar: none was read whole, so each is handed over as read in part, and the
+            // engine adds and updates the occurrences read without losing those past the cap.
+            log::warn!("the calendars were not read whole (more than {MAX_EVENTS} occurrences, or too many pages): merged without removing any");
+            sync.partial_calendars = std::mem::take(&mut sync.synced_calendars);
+        }
+        Ok(Some(sync))
+    }
+}
+
+/// The span read around `now`: [`DAYS_BACK`] days back and [`DAYS_AHEAD`] ahead, or as much of them as a server that
+/// expands repeating events over a shorter span (`span`, seconds) allows, back and ahead in the same proportion.
+pub fn window(now: i64, span: Option<i64>) -> (i64, i64) {
+    let (back, ahead) = (DAYS_BACK * 86_400, DAYS_AHEAD * 86_400);
+    match span.filter(|s| *s < back + ahead) {
+        Some(span) => {
+            let back = span.saturating_mul(DAYS_BACK) / (DAYS_BACK + DAYS_AHEAD);
+            (now - back, now - back + span)
+        }
+        None => (now - back, now + ahead),
     }
 }
 
@@ -94,17 +115,11 @@ pub fn calendars_sync(calendars: &[Value], events: &[Value], now: i64) -> DavSyn
     let mut stored = Vec::new();
     for v in events {
         let (Some(id), Some(event)) = (v.get("id").and_then(Value::as_str), event_of(v)) else { continue };
-        for calendar in v.get("calendarIds").and_then(Value::as_object).into_iter().flat_map(|m| m.keys()) {
-            if calendars.iter().any(|c| &c.id == calendar) {
-                stored.push(StoredEvent {
-                    calendar: calendar.clone(),
-                    href: format!("{HREF_PREFIX}{id}"),
-                    etag: String::new(),
-                    event: event.clone(),
-                    dirty: false,
-                });
-            }
-        }
+        // Once, as the engine keeps an occurrence (by its uid and start), in the first of its calendars the server lists
+        // that the person may write, else the first.
+        let holds = |c: &&CalendarInfo| v.get("calendarIds").and_then(|m| m.get(&c.id)).is_some_and(|on| on.as_bool() != Some(false));
+        let Some(calendar) = calendars.iter().filter(holds).find(|c| !c.read_only).or_else(|| calendars.iter().find(holds)) else { continue };
+        stored.push(StoredEvent { calendar: calendar.id.clone(), href: format!("{HREF_PREFIX}{id}"), etag: String::new(), event, dirty: false });
     }
     DavSync {
         caldav_home: Some("jmap".into()),
@@ -152,23 +167,41 @@ pub fn event_of(v: &Value) -> Option<CalEvent> {
 }
 
 /// One sync of what the server offers: its contacts and its calendars together, so that neither of the two homes of
-/// the account is said to be gone when only the other was read.
-pub fn pim_sync(contacts: Option<DavSync>, calendars: Option<DavSync>, now: i64) -> Option<DavSync> {
+/// the account is said to be gone when only the other was read (`offered`: whether the session offers contacts, and
+/// calendars). What each part stored, let go of and could not send comes along.
+pub fn pim_sync(contacts: Option<DavSync>, calendars: Option<DavSync>, offered: (bool, bool), now: i64) -> Option<DavSync> {
     if contacts.is_none() && calendars.is_none() {
         return None;
     }
     let mut out = DavSync { checked: now, ..Default::default() };
+    // A part offered but not read this time (it failed) keeps its home, and its collections stay as they are.
+    if offered.0 {
+        out.carddav_home = Some("jmap".into());
+    }
+    if offered.1 {
+        out.caldav_home = Some("jmap".into());
+    }
     if let Some(c) = contacts {
         out.carddav_home = c.carddav_home;
         out.books = c.books;
         out.cards = c.cards;
         out.synced_books = c.synced_books;
+        out.partial_books = c.partial_books;
+        out.no_delete_books = c.no_delete_books;
+        out.pushed_cards = c.pushed_cards;
+        out.deleted.extend(c.deleted);
+        out.errors.extend(c.errors);
     }
     if let Some(c) = calendars {
         out.caldav_home = c.caldav_home;
         out.calendars = c.calendars;
         out.events = c.events;
         out.synced_calendars = c.synced_calendars;
+        out.partial_calendars = c.partial_calendars;
+        out.window = c.window;
+        out.pushed_events = c.pushed_events;
+        out.deleted.extend(c.deleted);
+        out.errors.extend(c.errors);
     }
     Some(out)
 }
@@ -218,12 +251,19 @@ mod tests {
         let mut elsewhere = meeting();
         elsewhere["id"] = json!("E9");
         elsewhere["calendarIds"] = json!({"K9": true});
-        let sync = calendars_sync(&calendars, &[meeting(), elsewhere], 5);
+        let mut in_two = meeting();
+        in_two["id"] = json!("E5");
+        in_two["calendarIds"] = json!({"K2": true, "K1": true});
+        let sync = calendars_sync(&calendars, &[meeting(), elsewhere, in_two], 5);
         let listed: Vec<(&str, &str, bool)> = sync.calendars.iter().flatten().map(|c| (c.id.as_str(), c.name.as_str(), c.read_only)).collect();
         assert_eq!(listed, vec![("K1", "Agenda", true), ("K2", "Calendar", true)]);
         assert_eq!(sync.synced_calendars, vec!["K1", "K2"]);
         let placed: Vec<(&str, &str)> = sync.events.iter().map(|e| (e.calendar.as_str(), e.href.as_str())).collect();
-        assert_eq!(placed, vec![("K1", "jmap:E1")], "an event of an unknown calendar is left out");
+        assert_eq!(
+            placed,
+            vec![("K1", "jmap:E1"), ("K1", "jmap:E5")],
+            "an event of an unknown calendar is left out; one in two calendars is placed once, in the first the server lists"
+        );
         assert_eq!((sync.caldav_home.as_deref(), sync.carddav_home.as_deref()), (Some("jmap"), None));
         assert_eq!(utc_string(utc_date("2026-10-17T09:30:05Z").unwrap()), "2026-10-17T09:30:05Z");
     }
@@ -232,11 +272,130 @@ mod tests {
     fn contacts_and_calendars_make_one_sync() {
         let contacts = DavSync { carddav_home: Some("jmap".into()), books: Some(Vec::new()), ..Default::default() };
         let calendars = DavSync { caldav_home: Some("jmap".into()), calendars: Some(Vec::new()), ..Default::default() };
-        let both = pim_sync(Some(contacts.clone()), Some(calendars), 3).unwrap();
+        let both = pim_sync(Some(contacts.clone()), Some(calendars.clone()), (true, true), 3).unwrap();
         assert_eq!((both.carddav_home.as_deref(), both.caldav_home.as_deref(), both.checked), (Some("jmap"), Some("jmap"), 3));
         assert!(both.books.is_some() && both.calendars.is_some());
-        let only = pim_sync(Some(contacts), None, 3).unwrap();
+        let only = pim_sync(Some(contacts.clone()), None, (true, true), 3).unwrap();
         assert!(only.calendars.is_none(), "calendars not read are left as they are");
-        assert_eq!(pim_sync(None, None, 3), None);
+        assert_eq!(only.caldav_home.as_deref(), Some("jmap"), "offered, only not read this time: still there");
+        assert_eq!(pim_sync(Some(contacts.clone()), None, (true, false), 3).unwrap().caldav_home, None, "not offered: none");
+        let unread = pim_sync(None, Some(calendars), (true, true), 3).unwrap();
+        assert_eq!((unread.carddav_home.as_deref(), unread.books.is_none(), unread.synced_books.is_empty()), (Some("jmap"), true, true));
+        assert_eq!(pim_sync(None, None, (true, true), 3), None);
+        // What the contacts' part stored, let go of and could not send comes along.
+        let pushed = mailcraft_model::pim::StoredCard { book: "B1".into(), href: "jmap:N1".into(), ..Default::default() };
+        let written = DavSync {
+            pushed_cards: vec![pushed],
+            deleted: vec!["jmap:C9".into()],
+            errors: vec!["Jeanne: refused".into()],
+            partial_books: vec!["B1".into()],
+            no_delete_books: vec!["B1".into()],
+            ..contacts
+        };
+        let merged = pim_sync(Some(written), None, (true, false), 3).unwrap();
+        assert_eq!(merged.partial_books, vec!["B1"], "a book read in part stays so");
+        assert_eq!(merged.no_delete_books, vec!["B1"], "and whose cards may not be deleted");
+        let read = DavSync { caldav_home: Some("jmap".into()), calendars: Some(Vec::new()), window: Some((1, 2)), ..Default::default() };
+        assert_eq!(pim_sync(None, Some(read), (false, true), 3).unwrap().window, Some((1, 2)), "the span the calendars were read for");
+        assert_eq!(
+            (merged.pushed_cards.len(), merged.deleted.as_slice(), merged.errors.as_slice()),
+            (1, &["jmap:C9".to_string()][..], &["Jeanne: refused".to_string()][..])
+        );
+    }
+
+    /// A canned server: answers in order, and keeps what was asked.
+    struct Canned(std::cell::RefCell<Vec<Value>>, std::cell::RefCell<Vec<Value>>);
+
+    impl crate::Http for Canned {
+        async fn send(&self, req: crate::Request) -> crate::Result<crate::Response> {
+            if let Ok(asked) = serde_json::from_slice::<Value>(&req.body) {
+                self.1.borrow_mut().push(asked);
+            }
+            let mut answers = self.0.borrow_mut();
+            if answers.is_empty() {
+                return Err(crate::Error::Io("no more answers".into()));
+            }
+            Ok(crate::Response { status: 200, body: answers.remove(0).to_string().into_bytes() })
+        }
+    }
+
+    fn session() -> Value {
+        json!({
+            "capabilities": {"urn:ietf:params:jmap:core": {"maxObjectsInGet": 1000}, "urn:ietf:params:jmap:mail": {}, CALENDARS: {}},
+            "primaryAccounts": {"urn:ietf:params:jmap:mail": "A1"},
+            "apiUrl": "/api/", "downloadUrl": "/d/{accountId}/{blobId}", "uploadUrl": "/u/{accountId}/",
+        })
+    }
+
+    fn client(answers: Vec<Value>) -> Client<Canned> {
+        crate::block_on(Client::connect(Canned(answers.into(), Vec::new().into()), "jmap.example.com", "me", "pw", true)).unwrap()
+    }
+
+    #[test]
+    fn the_events_are_read_page_after_page() {
+        let mut next = meeting();
+        next["id"] = json!("E2");
+        next["recurrenceId"] = json!("2026-10-26T09:00:00");
+        next["utcStart"] = json!("2026-10-26T08:00:00Z");
+        next["utcEnd"] = json!("2026-10-26T09:30:00Z");
+        let c = client(vec![
+            session(),
+            json!({"methodResponses": [
+                ["Calendar/get", {"list": [{"id": "K1", "name": "Agenda"}]}, "c0"],
+                ["CalendarEvent/query", {"ids": ["E1"], "position": 0, "limit": 1, "total": 2}, "c1"]
+            ]}),
+            json!({"methodResponses": [["CalendarEvent/query", {"ids": ["E2"], "position": 1, "total": 2}, "c0"]]}),
+            json!({"methodResponses": [["CalendarEvent/get", {"list": [meeting(), next]}, "c0"]]}),
+        ]);
+        let sync = crate::block_on(c.sync_calendars(utc_date("2026-10-17T09:00:00Z").unwrap())).unwrap().unwrap();
+        assert_eq!(sync.events.len(), 2, "both pages' occurrences");
+        assert_eq!(sync.synced_calendars, vec!["K1"]);
+        let asked = c.http.1.borrow();
+        let first = &asked[0]["methodCalls"][1][1];
+        assert_eq!((&first["position"], &first["limit"], &first["calculateTotal"]), (&json!(0), &json!(MAX_EVENTS), &json!(true)));
+        let page = &asked[1]["methodCalls"][0][1];
+        assert_eq!((&page["position"], &page["limit"]), (&json!(1), &json!(1)), "on from the first page, by the server's limit");
+        assert_eq!((&page["filter"], &page["expandRecurrences"]), (&first["filter"], &json!(true)), "the same window, each occurrence apart");
+    }
+
+    #[test]
+    fn calendars_not_read_whole_are_handed_over_as_read_in_part() {
+        // More occurrences than one sync reads (a server that gives more than it was asked for): the calendars stay
+        // listed, as read in part, which the engine merges without removing anything.
+        let many: Vec<String> = (0..=MAX_EVENTS).map(|n| format!("E{n}")).collect();
+        let mut answers = vec![
+            session(),
+            json!({"methodResponses": [["Calendar/get", {"list": [{"id": "K1", "name": "Agenda"}]}, "c0"], ["CalendarEvent/query", {"ids": many}, "c1"]]}),
+        ];
+        answers.extend((0..MAX_EVENTS / 1000).map(|_| json!({"methodResponses": [["CalendarEvent/get", {"list": []}, "c0"]]})));
+        let c = client(answers);
+        let sync = crate::block_on(c.sync_calendars(utc_date("2026-10-17T09:00:00Z").unwrap())).unwrap().unwrap();
+        assert!(sync.synced_calendars.is_empty());
+        assert_eq!(sync.partial_calendars, vec!["K1"]);
+        assert_eq!(sync.calendars.as_ref().map(Vec::len), Some(1));
+        assert_eq!(c.http.0.borrow().len(), 0, "the cap's occurrences read, no more");
+    }
+
+    #[test]
+    fn the_window_fits_the_span_the_server_expands() {
+        let now = utc_date("2026-10-17T09:00:00Z").unwrap();
+        assert_eq!(window(now, None), (now - DAYS_BACK * 86_400, now + DAYS_AHEAD * 86_400));
+        assert_eq!(window(now, Some(500 * 86_400)), window(now, None), "a server that allows more: the usual window");
+        let (from, to) = window(now, Some(100 * 86_400));
+        assert_eq!(to - from, 100 * 86_400, "within what the server expands");
+        assert!(from < now && to > now && now - from < to - now, "more of it ahead than back, as usual");
+        // Read from the calendars' account capabilities.
+        let mut narrow = session();
+        narrow["accounts"] = json!({"A1": {"accountCapabilities": {CALENDARS: {"maxExpandedQueryDuration": "P100D"}}}});
+        let c = client(vec![
+            narrow,
+            json!({"methodResponses": [["Calendar/get", {"list": [{"id": "K1", "name": "Agenda"}]}, "c0"], ["CalendarEvent/query", {"ids": [], "total": 0}, "c1"]]}),
+        ]);
+        let sync = crate::block_on(c.sync_calendars(now)).unwrap().unwrap();
+        let asked = c.http.1.borrow();
+        let filter = &asked[0]["methodCalls"][1][1]["filter"];
+        let span = utc_date(filter["before"].as_str().unwrap()).unwrap() - utc_date(filter["after"].as_str().unwrap()).unwrap();
+        assert_eq!(span, 100 * 86_400);
+        assert_eq!(sync.window, Some(window(now, Some(100 * 86_400))), "handed over with the sync");
     }
 }

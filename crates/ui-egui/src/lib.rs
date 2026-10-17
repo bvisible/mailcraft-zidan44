@@ -21,6 +21,8 @@ macro_rules! tf {
     };
 }
 
+// //// Neoffice — the account button of the person signed in to the hosting page (Neodesk's `?author=`); upstream has none.
+mod account;
 pub mod backstage;
 pub mod bidi;
 mod calendar;
@@ -29,6 +31,8 @@ mod dialogs;
 pub mod i18n;
 pub mod icons;
 mod list;
+// //// Neoffice — the engine's and the network layers' messages in the interface language (toasts, statuses).
+mod messages;
 mod nav;
 // //// Neoffice — Nora, the assistant of the Neoffice server (« Reply with Nora »); upstream has no assistant.
 mod nora;
@@ -36,6 +40,8 @@ mod notes;
 mod organize;
 mod people;
 mod pim_dialogs;
+// //// Neoffice — what isn't offered on read-only cards, or with nowhere to add a contact or an event, and why.
+mod read_only;
 mod reading;
 mod rich_edit;
 pub mod theme;
@@ -430,6 +436,9 @@ pub struct UiState {
     pub(crate) can_drag_out: bool,
     // //// Neoffice — whether Nora can be asked, and the reply she is writing (nora.rs).
     pub(crate) nora: nora::NoraState,
+    // //// Neoffice — the name of the person signed in to the hosting page (`?author=`), shown as an account button at the
+    // right end of the top bar (account.rs); `None` outside such a page.
+    pub signed_in: Option<String>,
 }
 
 pub struct MailApp {
@@ -508,8 +517,9 @@ impl MailApp {
                 invite: None,
                 drag_out: None,
                 can_drag_out: false,
-                // //// Neoffice — Nora's state (nora.rs).
+                // //// Neoffice — Nora's state (nora.rs); the hosting page's signed-in person (account.rs).
                 nora: nora::NoraState::default(),
+                signed_in: None,
             },
         };
         app.ui.craft_apps = craft_apps;
@@ -1518,6 +1528,12 @@ impl MailApp {
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // //// Neoffice — the person signed in to the hosting page, at the right end, as the document editors show
+                // them (account.rs).
+                if let Some(name) = &self.ui.signed_in {
+                    account::button(ui, name, &t);
+                    ui.add_space(4.0);
+                }
                 let dark = t.dark;
                 let (icon, tip) = if dark { (Icon::Sun, tl!("Switch to light mode")) } else { (Icon::Moon, tl!("Switch to dark mode")) };
                 if widgets::bar_icon_button(ui, icon, tip).clicked() {
@@ -1573,7 +1589,14 @@ impl MailApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if s.module == Module::Calendar {
-                    if widgets::accent_button(ui, Icon::Calendar, "New event", &t, !s.accounts.is_empty()).clicked() {
+                    // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
+                    let nowhere = read_only::no_new_events(s);
+                    if read_only::why(
+                        widgets::accent_button(ui, Icon::Calendar, "New event", &t, !s.accounts.is_empty() && nowhere.is_none()),
+                        nowhere,
+                    )
+                    .clicked()
+                    {
                         acts.push(Action::Dialog(Dialog::new_event(s, None)));
                     }
                     widgets::group_sep(ui, &t);
@@ -1612,17 +1635,30 @@ impl MailApp {
                         }
                     });
                 } else {
-                    if widgets::accent_button(ui, Icon::Person, "New contact", &t, !s.accounts.is_empty()).clicked() {
+                    // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
+                    let nowhere = read_only::no_new_cards(s);
+                    if read_only::why(
+                        widgets::accent_button(ui, Icon::Person, "New contact", &t, !s.accounts.is_empty() && nowhere.is_none()),
+                        nowhere,
+                    )
+                    .clicked()
+                    {
                         acts.push(Action::Dialog(Dialog::new_contact()));
                     }
                     widgets::group_sep(ui, &t);
                     let picked = self.ui.person.as_deref().and_then(|u| s.find_person(u));
-                    if widgets::tool_button(ui, Icon::Drafts, "Edit", &t, picked.is_some()).clicked()
+                    // //// Neoffice — Edit and Delete greyed on a card of a read-only book, with why (read_only.rs).
+                    let locked = picked.as_ref().and_then(|p| read_only::locked(s, p));
+                    let can = picked.is_some() && locked.is_none();
+                    if read_only::why(widgets::tool_button(ui, Icon::Drafts, "Edit", &t, can), locked).clicked()
                         && let Some(p) = &picked
                     {
                         acts.push(Action::Dialog(Dialog::edit_contact(&p.card)));
                     }
-                    if widgets::tool_button(ui, Icon::Delete, "Delete", &t, picked.is_some()).clicked()
+                    // //// Neoffice — the same for Delete, also greyed on a Neoffice contact in a hosting page (read_only.rs).
+                    let undeletable = picked.as_ref().and_then(|p| read_only::no_delete(s, p));
+                    if read_only::why(widgets::tool_button(ui, Icon::Delete, "Delete", &t, picked.is_some() && undeletable.is_none()), undeletable)
+                        .clicked()
                         && let Some(p) = &picked
                     {
                         acts.push(Action::Run("contact.delete", json!({"uid": p.card.uid})));
@@ -1659,11 +1695,14 @@ impl MailApp {
                                 acts.push(Action::Run("mail.new", json!({})));
                                 ui.close();
                             }
-                            if ui.button(tl!("Event")).clicked() {
+                            // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
+                            let (no_event, no_card) = (read_only::no_new_events(s), read_only::no_new_cards(s));
+                            if read_only::why_disabled(ui.add_enabled(no_event.is_none(), egui::Button::new(tl!("Event"))), no_event).clicked() {
                                 acts.push(Action::Dialog(Dialog::new_event(s, None)));
                                 ui.close();
                             }
-                            if ui.button(tl!("Contact")).clicked() {
+                            // //// Neoffice — the same for a contact.
+                            if read_only::why_disabled(ui.add_enabled(no_card.is_none(), egui::Button::new(tl!("Contact"))), no_card).clicked() {
                                 acts.push(Action::Dialog(Dialog::new_contact()));
                                 ui.close();
                             }
@@ -1996,7 +2035,8 @@ impl MailApp {
                     .show(ui, |ui| {
                         ui.set_max_width(420.0);
                         // Notices from the engine are English; the ones with a fixed text have a translation.
-                        ui.label(RichText::new(tl!(&text)).color(if error { Color32::WHITE } else { t.surface }));
+                        // //// Neoffice — and the known shapes of the others, their values put back (messages.rs).
+                        ui.label(RichText::new(messages::translate(&text)).color(if error { Color32::WHITE } else { t.surface }));
                     });
             },
         );
@@ -2051,7 +2091,8 @@ fn account_status(s: &Session, t: &Tokens, a: &mailcraft_engine::AccountState) -
         // An account that signs in in the browser has no password to ask for.
         SyncStatus::NeedsPassword { .. } if a.config.oauth.is_some() => (t.danger, tl!("Sign in again").to_string()),
         SyncStatus::NeedsPassword { .. } => (t.danger, tl!("Password needed").to_string()),
-        SyncStatus::Error { error } => (t.warn, tf!("Disconnected: {error}", error = widgets::shorten(error, 60))),
+        // //// Neoffice — the reason in the interface language as far as its shape is known (messages.rs).
+        SyncStatus::Error { error } => (t.warn, tf!("Disconnected: {error}", error = widgets::shorten(&messages::translate(error), 60))),
     }
 }
 

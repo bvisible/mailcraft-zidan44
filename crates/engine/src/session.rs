@@ -536,6 +536,10 @@ pub struct Session {
     pub oauth_available: Vec<String>,
     /// Only JMAP accounts can be added (the browser, which can't open IMAP or SMTP connections).
     pub jmap_only: bool,
+    // //// Neoffice — the calendar and address book on this computer are kept between starts. Not in the browser build
+    // with a hosting page's mailboxes, which keeps nothing: new events and contacts then go to a server's collection
+    // only (« New contact », « Add sender to contacts », « New event »), never to ones lost at the next reload.
+    pub keeps_local_pim: bool,
     /// The fonts PDFs embed (regular, bold): the system's, set by the app.
     pub print_fonts: Option<(Vec<u8>, Option<Vec<u8>>)>,
     /// Pages to show in the browser (OAuth sign-in), oldest first.
@@ -594,6 +598,8 @@ impl Session {
             held: HashMap::new(),
             oauth_available: Vec::new(),
             jmap_only: false,
+            // //// Neoffice — see `keeps_local_pim`.
+            keeps_local_pim: true,
             print_fonts: None,
             open_urls: Vec::new(),
             pim: HashMap::new(),

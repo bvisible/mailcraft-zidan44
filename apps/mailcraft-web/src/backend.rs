@@ -55,12 +55,19 @@ struct Account {
     // //// Neoffice — how many times in a row the hosting page had nothing new for this mailbox (renew): it is asked again
     // a little later, RENEW_TRIES times, before the mailbox asks for a reload.
     renew_tries: u8,
+    // //// Neoffice — new tokens are asked of the hosting page for this mailbox, or will be again shortly (renew): it is
+    // connecting, and has no password for the person to type.
+    renew_waits: bool,
+    // //// Neoffice — what a sync of the address books did on the server that the engine hasn't taken in yet (the cards it
+    // stored, the deletions it is done with): the next sync, which may come before the engine has, neither makes those
+    // cards again nor sends those deletions again (pim).
+    sent: mailcraft_jmap::contacts::Sent,
 }
 
-// //// Neoffice — after a sleep the page's own credential may be stale for a few minutes (Neodesk refreshes it every five):
-// a renewal that got nothing is tried again this long after, this many times.
+// //// Neoffice — after a sleep the page's own credential may be stale for a while, and the person may need minutes to
+// sign in again (Neodesk): a renewal that got no answer is tried again this long after, this many times (an hour).
 const RENEW_AGAIN_MS: i32 = 60_000;
-const RENEW_TRIES: u8 = 6;
+const RENEW_TRIES: u8 = 60;
 
 // //// Neoffice — the address books and calendars are read again with the mail, at most this often (seconds).
 const CONTACTS_EVERY: i64 = 600;
@@ -74,9 +81,9 @@ struct Shared {
     // //// Neoffice — what the mailboxes a hosting page handed over sign in with: address (lower case) →
     // (secret, Bearer); in memory only (host.rs).
     host: HashMap<String, (String, bool)>,
-    // //// Neoffice — the accounts waiting for new tokens while one request to the hosting page is on its way (renew):
-    // several mailboxes refused at once ask the page once.
-    renewal: Option<Vec<String>>,
+    // //// Neoffice — the accounts waiting for new tokens while one request to the hosting page is on its way (renew), each
+    // with the start that asked: several mailboxes refused at once ask the page once.
+    renewal: Option<Vec<(String, u32)>>,
 }
 
 type Rcs = Rc<RefCell<Shared>>;
@@ -141,7 +148,12 @@ fn enqueue(sh: &Rcs, id: &str, task: Task) {
     let start = {
         let mut s = sh.borrow_mut();
         let Some(a) = s.accounts.get_mut(id) else { return };
-        a.queue.push_back(task);
+        // //// Neoffice — one read of the address books and calendars waiting at a time: asked again meanwhile, it is the
+        // same one (it reads the engine's copy when it starts), so a change is never sent by two reads in a row.
+        let pim = |t: &Task| matches!(t, Task::Job(Job::SyncDav { .. }));
+        if !(pim(&task) && a.queue.iter().any(pim)) {
+            a.queue.push_back(task);
+        }
         !std::mem::replace(&mut a.running, true)
     };
     if start {
@@ -210,11 +222,14 @@ fn failed(sh: &Rcs, id: &str, e: Error) {
 fn ask_renewal(sh: &Rcs, id: &str) {
     let first = {
         let mut s = sh.borrow_mut();
-        let waiting = s.renewal.get_or_insert_with(Vec::new);
-        if !waiting.iter().any(|w| w == id) {
-            waiting.push(id.to_string());
+        // No request on its way yet (this mailbox may already wait for the one that is: asked once all the same).
+        let first = s.renewal.is_none();
+        let generation = s.accounts.get(id).map_or(0, |a| a.generation);
+        crate::renewal::wait(s.renewal.get_or_insert_with(Vec::new), id, generation);
+        if let Some(a) = s.accounts.get_mut(id) {
+            a.renew_waits = true;
         }
-        waiting.len() == 1
+        first
     };
     if first {
         let sh = sh.clone();
@@ -223,32 +238,36 @@ fn ask_renewal(sh: &Rcs, id: &str) {
 }
 
 // //// Neoffice — new tokens from the hosting page (host.rs) for the accounts waiting for them, which then sign in
-// again. They replace what the page handed over before: a mailbox it no longer gives means reloading; no answer at all
-// (the page's own credential stale after a sleep) is asked again a little later, a few times, before that.
+// again (renewal.rs says what each does). The mailboxes the answer gives in full replace what the page handed over for
+// them, the others keep theirs; a mailbox the answer leaves out (an empty answer leaves out every one) means reloading;
+// no answer at all (the page's own credential stale after a sleep, the person signing in again), or one that names the
+// mailbox without a secret yet, is asked again a minute later, for an hour, before that. A mailbox started again since it
+// asked sees to itself.
 async fn renew(sh: &Rcs) {
-    let fresh = crate::host::renew().await;
+    let answer = crate::host::renew().await.map(|r| crate::renewal::Answer { given: crate::host::secrets(&r.accounts), named: r.named });
     let waiting = {
         let mut s = sh.borrow_mut();
-        if let Some(accounts) = &fresh {
-            s.host = crate::host::secrets(accounts);
+        if let Some(a) = &answer {
+            crate::renewal::merge(&mut s.host, a);
         }
         s.renewal.take().unwrap_or_default()
     };
-    for id in waiting {
-        let secret = {
+    for (id, asked) in waiting {
+        let (email, tries, now) = {
             let s = sh.borrow();
-            let given = s.accounts.get(&id).and_then(|a| s.host.get(&a.config.email.to_lowercase()));
-            given.filter(|_| fresh.is_some()).map(|(secret, _)| secret.clone())
+            let a = s.accounts.get(&id);
+            (a.map(|a| a.config.email.to_lowercase()).unwrap_or_default(), a.map_or(0, |a| a.renew_tries), a.map(|a| a.generation))
         };
-        let again = fresh.is_none() && sh.borrow().accounts.get(&id).is_some_and(|a| a.renew_tries < RENEW_TRIES);
-        match secret {
-            Some(secret) => {
+        match crate::renewal::next(answer.as_ref(), &email, asked, now, tries, RENEW_TRIES) {
+            crate::renewal::Next::Skip => {}
+            crate::renewal::Next::SignIn(secret) => {
                 if let Some(a) = sh.borrow_mut().accounts.get_mut(&id) {
                     a.password = Some(secret);
+                    a.renew_waits = false;
                 }
                 enqueue(sh, &id, Task::Connect);
             }
-            None if again => {
+            crate::renewal::Next::AskLater => {
                 if let Some(a) = sh.borrow_mut().accounts.get_mut(&id) {
                     a.renew_tries += 1;
                 }
@@ -256,20 +275,37 @@ async fn renew(sh: &Rcs) {
                 let (sh, id) = (sh.clone(), id.clone());
                 wasm_bindgen_futures::spawn_local(async move {
                     sleep(RENEW_AGAIN_MS).await;
-                    ask_renewal(&sh, &id);
+                    // Only for the same start of the mailbox, still signed out and waiting: not one removed, started
+                    // again or signed in meanwhile.
+                    let still = sh.borrow().accounts.get(&id).is_some_and(|a| a.generation == asked && a.client.is_none() && a.renew_waits);
+                    if still {
+                        ask_renewal(&sh, &id);
+                    }
                 });
             }
-            None => status(sh, &id, SyncStatus::NeedsPassword { error: "the page gave no new access to this mailbox: reload it".into() }),
+            crate::renewal::Next::Reload => {
+                if let Some(a) = sh.borrow_mut().accounts.get_mut(&id) {
+                    a.renew_waits = false;
+                }
+                status(sh, &id, SyncStatus::NeedsPassword { error: "the page gave no new access to this mailbox: reload it".into() });
+            }
         }
     }
 }
 
 async fn connect(sh: &Rcs, id: &str) {
-    let Some((config, password)) = sh.borrow().accounts.get(id).map(|a| (a.config.clone(), a.password.clone())) else { return };
+    // //// Neoffice — and whether new tokens are on their way from the hosting page (renew).
+    let Some((config, password, renewal)) = sh.borrow().accounts.get(id).map(|a| (a.config.clone(), a.password.clone(), a.renew_waits)) else {
+        return;
+    };
     let Some(url) = config.jmap.clone() else {
         return status(sh, id, SyncStatus::Error { error: "only JMAP accounts work in the browser; use the desktop app for this one".into() });
     };
     let Some(password) = password else {
+        // //// Neoffice — a hosted mailbox waiting for them is connecting: there is no password for the person to type.
+        if renewal {
+            return status(sh, id, SyncStatus::Connecting);
+        }
         return status(sh, id, SyncStatus::NeedsPassword { error: "enter the password: the browser doesn't keep it".into() });
     };
     status(sh, id, SyncStatus::Connecting);
@@ -285,6 +321,7 @@ async fn connect(sh: &Rcs, id: &str) {
                 // //// Neoffice — signed in: a later refusal may ask the hosting page again (renew).
                 a.renewing = false;
                 a.renew_tries = 0;
+                a.renew_waits = false;
                 std::mem::take(&mut a.ops)
             };
             for op in ops {
@@ -360,18 +397,36 @@ async fn pim(sh: &Rcs, id: &str) {
         return;
     }
     let at = now();
-    let contacts = c.sync_contacts(at).await.unwrap_or_else(|e| {
+    // //// Neoffice — the account's address books as the engine keeps them: what was made, changed or deleted here goes
+    // first, but not twice what an earlier sync did that the engine hasn't taken in yet (`sent`).
+    let mut pim: mailcraft_engine::model::pim::Pim = store(sh).load_account_doc(id, mailcraft_engine::model::pim::PIM_DOC).unwrap_or_default();
+    if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+        a.sent.resume(&mut pim);
+    }
+    // //// Neoffice — a hosted mailbox's server (Neoffice's) keeps no notes on its contacts: none is sent there.
+    let notes = !hosted(sh, id);
+    let contacts = c.sync_contacts(&pim, notes, at).await.unwrap_or_else(|e| {
         log::warn!("{id}: the address books were not read: {e}");
         None
     });
+    // //// Neoffice — see `sent` (Account).
+    if let Some(sync) = &contacts
+        && let Some(a) = sh.borrow_mut().accounts.get_mut(id)
+    {
+        a.sent.record(sync);
+    }
     let calendars = c.sync_calendars(at).await.unwrap_or_else(|e| {
         log::warn!("{id}: the calendars were not read: {e}");
         None
     });
-    if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+    // //// Neoffice — read: not again for a while; with neither part read, again at the next sync of the mail (address books
+    // not read come back without their list, what was sent before them only).
+    let read = contacts.as_ref().is_some_and(|s| s.books.is_some()) || calendars.is_some();
+    if read && let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
         a.contacts_at = Some(at);
     }
-    if let Some(sync) = mailcraft_jmap::calendars::pim_sync(contacts, calendars, at) {
+    // //// Neoffice — what the session offers: a part it offers that failed this time keeps its home.
+    if let Some(sync) = mailcraft_jmap::calendars::pim_sync(contacts, calendars, (c.offers_contacts(), c.offers_calendars()), at) {
         emit(sh, Event::DavSynced { account: id.to_string(), sync: Box::new(sync) });
     }
 }
@@ -437,8 +492,22 @@ async fn remote(sh: &Rcs, id: &str, op: Op) {
                 sync_one(sh, id, &f).await;
             }
         }
+        // //// Neoffice — a mailbox the hosting page handed over, whose token was refused: the change waits for the new
+        // token the page gives (failed, then connect replays the changes kept), rather than failing in a notice.
+        Err(e @ Error::Auth(_)) if hosted(sh, id) => {
+            if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+                a.ops.push(op);
+            }
+            failed(sh, id, e);
+        }
         Err(e) => emit(sh, Event::OpFailed { account: id.to_string(), op, error: e.to_string() }),
     }
+}
+
+// //// Neoffice — whether the hosting page handed this mailbox over (its token comes from the page).
+fn hosted(sh: &Rcs, id: &str) -> bool {
+    let s = sh.borrow();
+    s.accounts.get(id).is_some_and(|a| s.host.contains_key(&a.config.email.to_lowercase()))
 }
 
 fn sent_folder(sh: &Rcs, id: &str, given: Option<String>) -> Option<String> {
@@ -631,6 +700,15 @@ async fn push(sh: Rcs, id: String, generation: u32) {
 
 /// Download a picture a message links to (once the user asked to see pictures).
 async fn fetch_url(sh: Rcs, url: String) {
+    // //// Neoffice — through the hosting page when it fetches for MailCraft (host.rs): its window may not reach other
+    // sites itself (Neodesk).
+    if let Some(r) = crate::host::fetch_url(&url, MAX_PICTURE).await {
+        let e = match r {
+            Ok(data) => Event::Fetched { url, data: Some(data), error: None },
+            Err(error) => Event::Fetched { url, data: None, error: Some(error) },
+        };
+        return emit(&sh, e);
+    }
     use mailcraft_jmap::Http as _;
     let r = Fetch.send(mailcraft_jmap::Request::get(&url, MAX_PICTURE)).await;
     let e = match r {
@@ -697,6 +775,8 @@ impl Backend for WebBackend {
                             renewing: false,
                             contacts_at: None,
                             renew_tries: 0,
+                            renew_waits: false,
+                            sent: Default::default(),
                             pushing: false,
                         },
                     );

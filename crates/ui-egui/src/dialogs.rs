@@ -1886,7 +1886,11 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             close_row(ui)
         }
         Dialog::Event(f) => crate::pim_dialogs::event(ui, f, t, acts),
-        Dialog::Contact(f) => crate::pim_dialogs::contact(ui, f, t, acts),
+        // //// Neoffice — and whether its book keeps notes (read_only.rs).
+        Dialog::Contact(f) => {
+            let notes = crate::read_only::no_notes(s, f.uid.as_deref());
+            crate::pim_dialogs::contact(ui, f, t, acts, notes)
+        }
         Dialog::Vacation(f) => vacation(ui, f, t, acts),
         Dialog::ConfirmEmpty { account, folder, name, for_good } => {
             ui.set_width(400.0);

@@ -132,8 +132,15 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                             }
                             let known =
                                 s.people(&p.from.email).iter().any(|x| x.card.emails.iter().any(|e| e.value.eq_ignore_ascii_case(&p.from.email)));
-                            if !known && !p.from.email.is_empty() && widgets::tiny_icon_button(ui, Icon::Person, "Add to contacts", &t).clicked() {
-                                acts.push(Action::Run("contact.fromMessage", json!({})));
+                            // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
+                            let nowhere = crate::read_only::no_new_cards(s);
+                            if !known && !p.from.email.is_empty() {
+                                let r = ui
+                                    .add_enabled_ui(nowhere.is_none(), |ui| widgets::tiny_icon_button(ui, Icon::Person, "Add to contacts", &t))
+                                    .inner;
+                                if crate::read_only::why_disabled(r, nowhere).clicked() {
+                                    acts.push(Action::Run("contact.fromMessage", json!({})));
+                                }
                             }
                         });
                         if !p.to.is_empty() {
@@ -241,7 +248,10 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                         // More, as Outlook's ⋯ beside Forward.
                         let more = widgets::more_pill(ui, "More actions", &t);
                         egui::Popup::menu(&more).show(|ui| {
-                            if ui.button(tl!("Reply with meeting")).clicked() {
+                            // //// Neoffice — greyed, with why, when there is nowhere to add an event (read_only.rs).
+                            let nowhere = crate::read_only::no_new_events(s);
+                            let meeting = ui.add_enabled(nowhere.is_none(), egui::Button::new(tl!("Reply with meeting")));
+                            if crate::read_only::why_disabled(meeting, nowhere).clicked() {
                                 acts.push(Action::Dialog(crate::Dialog::meeting_from(s, p)));
                                 ui.close();
                             }

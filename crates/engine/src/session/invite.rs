@@ -94,11 +94,26 @@ impl Session {
             set_answer(e, &self.my_addresses(), &me, stat);
         }
         // Into the calendar, replacing an earlier copy (an updated invitation); out if declined.
+        // //// Neoffice — with no copy yet, into a calendar new events can go to: not the one on this computer where it
+        // isn't kept (the browser build in a hosting page).
+        let target = self.new_event_calendar(&account);
         let p = self.pim_mut(&account);
-        let existing: Vec<StoredEvent> = p.events.iter().filter(|e| e.event.uid == uid).cloned().collect();
-        let calendar =
-            existing.first().map(|e| e.calendar.clone()).or_else(|| p.default_calendar().map(|c| c.id.clone())).unwrap_or_else(|| LOCAL.into());
-        p.events.retain(|e| e.event.uid != uid);
+        // //// Neoffice — the copies in calendars that can be changed: one in a calendar that can't (a server's read-only
+        // one, a colleague's shared one) stays as the server has it. With only such copies, or nowhere to keep one, only
+        // the answer goes, by mail.
+        let locked: Vec<String> = p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect();
+        let existing: Vec<StoredEvent> = p.events.iter().filter(|e| e.event.uid == uid && !locked.contains(&e.calendar)).cloned().collect();
+        let read_only = existing.is_empty() && p.events.iter().any(|e| e.event.uid == uid);
+        if read_only || (existing.is_empty() && target.is_none()) {
+            if let Some(master) = events.first().cloned() {
+                self.send_reply(&account, &master, stat)?;
+            }
+            return Ok(serde_json::json!({"answer": stat, "uid": uid, "readOnly": read_only, "inCalendar": read_only}));
+        }
+        // //// Neoffice — `target` rather than the first writable calendar (the same where the one here is kept).
+        let calendar = existing.first().map(|e| e.calendar.clone()).or(target).unwrap_or_else(|| LOCAL.into());
+        // //// Neoffice — see `locked` above.
+        p.events.retain(|e| e.event.uid != uid || locked.contains(&e.calendar));
         let mut remote = false;
         if stat == "DECLINED" {
             for g in existing.iter().filter(|g| !g.href.is_empty()) {
@@ -133,8 +148,21 @@ impl Session {
         let mine = self.my_addresses();
         let mut master = None;
         let p = self.pim_mut(&account);
+        // //// Neoffice — its copies in calendars that can be changed take the answer; one in a calendar that can't (a
+        // server's read-only one, a colleague's shared one) stays as the server has it. With only such copies, only the
+        // answer goes, by mail.
+        let locked: Vec<String> = p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect();
+        if !p.events.iter().any(|e| e.event.uid == uid && !locked.contains(&e.calendar)) {
+            let first = p.events.iter().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none()).map(|e| e.event.clone());
+            if let Some(mut m) = first {
+                set_answer(&mut m, &mine, &me, stat);
+                self.send_reply(&account, &m, stat)?;
+            }
+            return Ok(serde_json::json!({"answer": stat, "uid": uid, "readOnly": true}));
+        }
         let mut remote = false;
-        for e in p.events.iter_mut().filter(|e| e.event.uid == uid) {
+        // //// Neoffice — see `locked` above.
+        for e in p.events.iter_mut().filter(|e| e.event.uid == uid && !locked.contains(&e.calendar)) {
             set_answer(&mut e.event, &mine, &me, stat);
             remote |= e.calendar != LOCAL;
             e.dirty |= e.calendar != LOCAL;
@@ -153,6 +181,23 @@ impl Session {
     pub fn apply_invite(&mut self) -> CmdResult {
         let inv = self.invite().ok_or_else(|| CmdError::Disabled("this message has no invitation".into()))?;
         let uid = inv.event.uid.clone();
+        // //// Neoffice — into its copies in calendars that can be changed only: one in a calendar that can't (a server's
+        // read-only one, a colleague's shared one) stays as the server has it; with only such copies, refused.
+        let (account, locked) = match self.find_event(&uid).map(|(a, _)| a.to_string()) {
+            Some(a) => {
+                let locked: Vec<String> =
+                    self.pim.get(&a).map(|p| p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect()).unwrap_or_default();
+                (Some(a), locked)
+            }
+            None => (None, Vec::new()),
+        };
+        let writable = account
+            .as_ref()
+            .and_then(|a| self.pim.get(a))
+            .is_some_and(|p| p.events.iter().any(|e| e.event.uid == uid && !locked.contains(&e.calendar)));
+        if account.is_some() && !writable && matches!(inv.method.as_str(), "CANCEL" | "REPLY") {
+            return Err(CmdError::Params("this calendar can't be changed".into()));
+        }
         match inv.method.as_str() {
             "CANCEL" => {
                 if self.find_event(&uid).is_none() {
@@ -164,19 +209,24 @@ impl Session {
                 let mut remote = false;
                 let cancelled_one = inv.event.recurrence_id;
                 match cancelled_one {
+                    // //// Neoffice — see `locked` above (both cases).
                     Some(at) => {
-                        if let Some(m) = p.events.iter_mut().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none()) {
+                        if let Some(m) =
+                            p.events.iter_mut().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none() && !locked.contains(&e.calendar))
+                        {
                             m.event.exdates.push(at);
                             remote = m.calendar != LOCAL;
                             m.dirty |= remote;
                         }
                     }
                     None => {
-                        for g in p.events.iter().filter(|e| e.event.uid == uid && !e.href.is_empty()) {
+                        // //// Neoffice — see `locked` above.
+                        for g in p.events.iter().filter(|e| e.event.uid == uid && !e.href.is_empty() && !locked.contains(&e.calendar)) {
                             p.deleted.push(Tombstone { href: g.href.clone(), etag: g.etag.clone(), calendar: g.calendar.clone() });
                             remote = true;
                         }
-                        p.events.retain(|e| e.event.uid != uid);
+                        // //// Neoffice — see `locked` above.
+                        p.events.retain(|e| e.event.uid != uid || locked.contains(&e.calendar));
                     }
                 }
                 self.after_pim_change(&account, remote);
@@ -188,7 +238,12 @@ impl Session {
                     self.find_event(&uid).map(|(a, _)| a.to_string()).ok_or_else(|| CmdError::Disabled("the event isn't in your calendar".into()))?;
                 let p = self.pim_mut(&account);
                 let mut remote = false;
-                for e in p.events.iter_mut().filter(|e| e.event.uid == uid && e.event.recurrence_id == inv.event.recurrence_id) {
+                // //// Neoffice — see `locked` above.
+                for e in p
+                    .events
+                    .iter_mut()
+                    .filter(|e| e.event.uid == uid && e.event.recurrence_id == inv.event.recurrence_id && !locked.contains(&e.calendar))
+                {
                     match e.event.attendees.iter_mut().find(|a| a.email.eq_ignore_ascii_case(&who.email)) {
                         Some(a) => a.partstat = who.partstat.clone(),
                         None => e.event.attendees.push(Attendee { rsvp: false, ..who.clone() }),

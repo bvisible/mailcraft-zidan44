@@ -1831,3 +1831,524 @@ fn collapsing_in_the_folder_pane_is_kept() {
     assert_eq!(back.collapsed, s.prefs.collapsed);
     assert!(s.run("view.collapse", &json!({"key": ""})).is_err());
 }
+
+// //// Neoffice — calendars and address books a server keeps read-only (a JMAP server's, as NeoMail's): the ones on this
+// computer stay for what is added here, the default ones are writable, and the engine changes nothing of the server's.
+#[test]
+fn read_only_calendars_and_books_keep_the_ones_here_and_stay_as_the_server_has_them() {
+    use mailcraft_model::ical::CalEvent;
+    use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, LOCAL, Pim, StoredCard, StoredEvent};
+    use mailcraft_model::vcard::{Card, Typed};
+    let mut s = Session::open(Some(temp("read-only-pim")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id =
+        s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let read = DavSync {
+        caldav_home: Some("jmap".into()),
+        carddav_home: Some("jmap".into()),
+        checked: NOW,
+        calendars: Some(vec![CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: true, ..Default::default() }]),
+        synced_calendars: vec!["K1".into()],
+        events: vec![StoredEvent {
+            calendar: "K1".into(),
+            href: "jmap:E1".into(),
+            event: CalEvent { uid: "e1".into(), summary: "Site meeting".into(), start: NOW + 3600, end: NOW + 7200, ..Default::default() },
+            ..Default::default()
+        }],
+        books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: true, ctag: String::new() }]),
+        synced_books: vec!["B1".into()],
+        cards: vec![StoredCard {
+            book: "B1".into(),
+            href: "jmap:C1".into(),
+            card: Card {
+                uid: "c1".into(),
+                name: "Jeanne Muster".into(),
+                emails: vec![Typed { value: "jeanne@example.ch".into(), kind: String::new() }],
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read.clone()) });
+    let ids = |s: &Session| {
+        let p = &s.pim[&id];
+        (p.calendars.iter().map(|c| c.id.clone()).collect::<Vec<_>>(), p.books.iter().map(|b| b.id.clone()).collect::<Vec<_>>())
+    };
+    let here = (vec!["K1".to_string(), LOCAL.into()], vec!["B1".to_string(), LOCAL.into()]);
+    assert_eq!(ids(&s), here, "the ones on this computer stay while the server's can't be added to");
+
+    // What is added goes there.
+    s.take_jobs();
+    let paul = s.run("contact.create", &json!({"name": "Paul Exemple", "emails": "paul@example.ch"})).unwrap()["uid"].as_str().unwrap().to_string();
+    assert_eq!(s.find_person(&paul).unwrap().book, LOCAL);
+    let visit = s.run("event.create", &json!({"summary": "Visit", "start": "2026-10-20T10:00"})).unwrap()["uid"].as_str().unwrap().to_string();
+    assert_eq!(s.find_event(&visit).unwrap().1.calendar, LOCAL);
+    assert!(!s.take_jobs().iter().any(|j| matches!(j, Job::SyncDav { .. })), "nothing for the server to learn");
+
+    // The server's stay as they are.
+    for (cmd, params) in [
+        ("contact.update", json!({"uid": "c1", "title": "Head of site"})),
+        ("contact.delete", json!({"uid": "c1"})),
+        ("event.update", json!({"uid": "e1", "summary": "Moved"})),
+        ("event.delete", json!({"uid": "e1"})),
+    ] {
+        assert!(s.run(cmd, &params).is_err(), "{cmd} in a read-only collection");
+    }
+    assert!(s.run("event.create", &json!({"summary": "x", "start": "2026-10-20", "calendar": "K1"})).is_err());
+    let p = &s.pim[&id];
+    assert!(p.deleted.is_empty() && p.cards.iter().all(|c| !c.dirty) && p.events.iter().all(|e| !e.dirty), "nothing to send");
+    assert_eq!(p.cards.iter().find(|c| c.card.uid == "c1").map(|c| c.card.title.as_str()), Some(""));
+
+    // The next sync keeps them, with what was added.
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read.clone()) });
+    assert_eq!(ids(&s), here);
+    assert!(s.find_person(&paul).is_some() && s.find_event(&visit).is_some());
+
+    // Address books dropped by an earlier sync: one here comes back to add to.
+    let mut lost = Pim {
+        calendars: vec![CalendarInfo { id: "K1".into(), read_only: true, ..Default::default() }],
+        books: vec![BookInfo { id: "B1".into(), read_only: true, ..Default::default() }],
+        ..Default::default()
+    };
+    lost.ensure_defaults();
+    assert_eq!((lost.default_calendar().map(|c| c.id.as_str()), lost.default_book().map(|b| b.id.as_str())), (Some(LOCAL), Some(LOCAL)));
+
+    // A server book the person may write: new contacts go there, to be sent; the one here gives way while empty.
+    let mut s2 = Session::open(Some(temp("writable-pim")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id2 =
+        s2.run("account.add", &json!({"email": "ann@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let mut writable = read.clone();
+    writable.books = Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() }]);
+    s2.apply(Event::DavSynced { account: id2.clone(), sync: Box::new(writable) });
+    assert_eq!(s2.pim[&id2].books.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["B1"]);
+    s2.take_jobs();
+    let mira = s2.run("contact.create", &json!({"name": "Mira Chen", "emails": "mira@example.ch"})).unwrap()["uid"].as_str().unwrap().to_string();
+    let stored = s2.pim[&id2].cards.iter().find(|c| c.card.uid == mira).cloned().unwrap();
+    assert!(stored.book == "B1" && stored.dirty && stored.href.is_empty());
+    assert!(s2.take_jobs().iter().any(|j| matches!(j, Job::SyncDav { .. })), "a sync is asked for, to send it");
+    s2.run("contact.update", &json!({"uid": "c1", "title": "Head of site"})).unwrap();
+    assert!(s2.pim[&id2].cards.iter().any(|c| c.card.uid == "c1" && c.dirty), "a card of a writable book changes, to be sent");
+    done(s);
+    done(s2);
+}
+
+// //// Neoffice — an invitation whose event a server keeps in a read-only calendar: the answer goes by mail, the
+// calendar's copy stays as the server has it, and a guest's answer isn't taken into it.
+#[test]
+fn answers_to_an_invitation_in_a_read_only_calendar_go_by_mail_only() {
+    use mailcraft_model::pim::CalendarInfo;
+    let mut s = sample_session("invites-read-only");
+    let uid = "mix@sample.mailcraft";
+    let p = s.pim_mut("sample");
+    p.calendars.push(CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: true, ..Default::default() });
+    for e in p.events.iter_mut().filter(|e| e.event.uid == uid) {
+        e.calendar = "K1".into();
+    }
+    let before = s.find_event(uid).unwrap().1.clone();
+    let k = s.list.iter().find(|m| m.subject == "Sound mix, version 3").map(|m| m.key.clone()).unwrap();
+    s.run("list.open", &json!({"key": k.to_id()})).unwrap();
+    let r = s.run("invite.respond", &json!({"answer": "accepted"})).unwrap();
+    assert_eq!((r["answer"].as_str(), r["readOnly"].as_bool()), (Some("ACCEPTED"), Some(true)));
+    assert_eq!(s.find_event(uid).unwrap().1, &before, "the calendar's copy is as it was");
+    assert_eq!(sent_calendar(&s, "Sent", "Accepted: Sound mix playback").0, "REPLY", "the answer went");
+    s.run("invite.respond", &json!({"answer": "declined"})).unwrap();
+    assert_eq!(s.find_event(uid).unwrap().1, &before, "nor taken out of it");
+    assert_eq!(sent_calendar(&s, "Sent", "Declined: Sound mix playback").0, "REPLY");
+    s.run("event.respond", &json!({"uid": uid, "answer": "tentative"})).unwrap();
+    assert_eq!(s.find_event(uid).unwrap().1, &before);
+    let (_, raw) = sent_calendar(&s, "Sent", "Tentative: Sound mix playback");
+    assert!(raw.contains("PARTSTAT=TENTATIVE"), "{raw}");
+
+    // A guest's answer to it isn't taken into the calendar.
+    let mut reply = before.event.clone();
+    reply.attendees =
+        vec![mailcraft_model::ical::Attendee { email: "ana@soundlab.example".into(), partstat: "ACCEPTED".into(), ..Default::default() }];
+    let ics = mailcraft_model::ical::write(&[reply], Some("REPLY"), NOW);
+    let d = mailcraft_mime::Draft {
+        to: vec![mailcraft_model::EmailAddress::new("Riley", "riley@studio.example")],
+        subject: "Accepted: Sound mix playback".into(),
+        body: "Ana accepted.".into(),
+        attachments: vec![mailcraft_mime::OutAttachment {
+            name: "invite.ics".into(),
+            mime: "text/calendar; method=REPLY".into(),
+            data: ics.into_bytes(),
+        }],
+        ..Default::default()
+    };
+    let raw = mailcraft_mime::build(&d, &mailcraft_model::EmailAddress::new("Ana Lima", "ana@soundlab.example"), NOW, "<r2@x>").unwrap();
+    let store = s.store.clone().unwrap();
+    let mut inbox = store.load_folder("sample", "INBOX").unwrap();
+    let key = mailcraft_model::MessageKey { account: "sample".into(), folder: "INBOX".into(), validity: inbox.validity, uid: 998 };
+    inbox.messages.insert(0, mailcraft_mime::summary_from_full(&raw, key.clone(), mailcraft_model::Flags::default(), 0, NOW));
+    store.save_folder("sample", "INBOX", &inbox).unwrap();
+    store.write_body(&key, &raw).unwrap();
+    s.apply(Event::FolderChanged { account: "sample".into(), folder: "INBOX".into() });
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    s.run("list.open", &json!({"key": key.to_id()})).unwrap();
+    assert_eq!(s.invite().map(|i| i.method), Some("REPLY".to_string()));
+    assert!(s.run("invite.apply", &json!({})).is_err(), "refused: the calendar can't be changed");
+    assert_eq!(s.find_event(uid).unwrap().1, &before);
+    assert!(s.run("event.delete", &json!({"uid": uid})).is_err());
+    done(s);
+}
+
+// //// Neoffice — a book or calendar read only in part (past the cap of one sync, a JMAP server's) is merged without
+// removing anything; one read in full replaces what the engine had of it, as before.
+#[test]
+fn collections_read_in_part_merge_without_removing_and_whole_ones_replace() {
+    use mailcraft_model::ical::CalEvent;
+    use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, StoredCard, StoredEvent};
+    use mailcraft_model::vcard::Card;
+    let mut s = Session::open(Some(temp("partial-pim")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id =
+        s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let card = |uid: &str, name: &str| StoredCard {
+        book: "B1".into(),
+        href: format!("jmap:{uid}"),
+        card: Card { uid: uid.into(), name: name.into(), ..Default::default() },
+        ..Default::default()
+    };
+    let event = |uid: &str, summary: &str| StoredEvent {
+        calendar: "K1".into(),
+        href: format!("jmap:{uid}"),
+        event: CalEvent { uid: uid.into(), summary: summary.into(), start: NOW + 3600, end: NOW + 7200, ..Default::default() },
+        ..Default::default()
+    };
+    let whole = |cards: Vec<StoredCard>, events: Vec<StoredEvent>| DavSync {
+        caldav_home: Some("jmap".into()),
+        carddav_home: Some("jmap".into()),
+        checked: NOW,
+        books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() }]),
+        calendars: Some(vec![CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: true, ..Default::default() }]),
+        synced_books: vec!["B1".into()],
+        synced_calendars: vec!["K1".into()],
+        cards,
+        events,
+        ..Default::default()
+    };
+    let in_part = |cards: Vec<StoredCard>, events: Vec<StoredEvent>| {
+        let mut sync = whole(cards, events);
+        sync.partial_books = std::mem::take(&mut sync.synced_books);
+        sync.partial_calendars = std::mem::take(&mut sync.synced_calendars);
+        sync
+    };
+    let names = |s: &Session| {
+        let mut v: Vec<String> = s.pim[&id].cards.iter().map(|c| c.card.display()).collect();
+        v.sort();
+        v
+    };
+    let summaries = |s: &Session| {
+        let mut v: Vec<String> = s.pim[&id].events.iter().map(|e| e.event.summary.clone()).collect();
+        v.sort();
+        v
+    };
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(whole(vec![card("c1", "Ann"), card("c2", "Ben")], vec![event("e1", "Review"), event("e2", "Lunch")])),
+    });
+    assert_eq!((names(&s), summaries(&s)), (vec!["Ann".to_string(), "Ben".into()], vec!["Lunch".to_string(), "Review".into()]));
+
+    // Read in part: what was read is added or updated, nothing goes.
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(in_part(vec![card("c1", "Ann Lee"), card("c3", "Cyd")], vec![event("e1", "Review (moved)"), event("e3", "Visit")])),
+    });
+    assert_eq!(names(&s), ["Ann Lee", "Ben", "Cyd"], "updated, kept and added");
+    assert_eq!(summaries(&s), ["Lunch", "Review (moved)", "Visit"]);
+
+    // A card made here and stored on the server comes back once, under the server's uid; one changed here meanwhile
+    // stays to be sent.
+    let dee = s.run("contact.create", &json!({"name": "Dee", "emails": "dee@example.org"})).unwrap()["uid"].as_str().unwrap().to_string();
+    s.run("contact.update", &json!({"uid": "c2", "title": "Head of site"})).unwrap();
+    let mut stored = s.pim[&id].cards.iter().find(|c| c.card.uid == dee).cloned().unwrap();
+    (stored.href, stored.dirty) = ("jmap:N1".into(), false);
+    let mut back = in_part(vec![card("N1", "Dee"), card("c2", "Ben (on the server)")], Vec::new());
+    back.pushed_cards = vec![stored];
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(back) });
+    assert_eq!(names(&s), ["Ann Lee", "Ben", "Cyd", "Dee"], "Dee once; Ben as changed here");
+    assert!(s.pim[&id].cards.iter().any(|c| c.card.uid == "c2" && c.dirty && c.card.title == "Head of site"));
+    assert!(s.pim[&id].cards.iter().any(|c| c.card.uid == "N1"), "the server's copy of Dee");
+
+    // Read in full again: what the server no longer has goes, what is still to be sent stays.
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(whole(vec![card("c1", "Ann Lee")], vec![event("e1", "Review (moved)")])) });
+    assert_eq!(names(&s), ["Ann Lee", "Ben"]);
+    assert_eq!(summaries(&s), ["Review (moved)"]);
+    done(s);
+}
+
+// //// Neoffice — the browser build with a hosting page's mailboxes keeps nothing between visits (keeps_local_pim off):
+// new contacts and events go to a server's collection only, never to the ones on this computer, lost at the next reload.
+#[test]
+fn where_nothing_here_is_kept_new_items_go_to_a_server_s_collection_only() {
+    use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, LOCAL};
+    use mailcraft_model::vcard::{Card, Typed};
+    let mut s = Session::open(Some(temp("hosted-pim")), mailcraft_model::dates::Clock::new(NOW, 0));
+    s.keeps_local_pim = false;
+    let add = |s: &mut Session, email: &str| {
+        s.run("account.add", &json!({"email": email, "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (own, team) = (add(&mut s, "zoe@example.org"), add(&mut s, "team@example.org"));
+    assert!(!s.can_add_cards() && !s.can_add_events(), "nothing from the servers yet: nowhere to add to");
+    assert!(s.run("contact.create", &json!({"name": "Paul Exemple"})).is_err());
+    assert!(s.run("event.create", &json!({"summary": "Visit", "start": "2026-10-20T10:00"})).is_err());
+
+    // The first mailbox offers a book the person may write; both have read-only calendars only.
+    let read_only = |id: &str| CalendarInfo { id: id.into(), name: "Agenda".into(), read_only: true, ..Default::default() };
+    let books = DavSync {
+        carddav_home: Some("jmap".into()),
+        caldav_home: Some("jmap".into()),
+        books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() }]),
+        synced_books: vec!["B1".into()],
+        calendars: Some(vec![read_only("K1")]),
+        synced_calendars: vec!["K1".into()],
+        checked: NOW,
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: own.clone(), sync: Box::new(books) });
+    let calendars_only = DavSync { caldav_home: Some("jmap".into()), calendars: Some(vec![read_only("K2")]), checked: NOW, ..Default::default() };
+    s.apply(Event::DavSynced { account: team.clone(), sync: Box::new(calendars_only) });
+    assert!(s.can_add_cards() && !s.can_add_events());
+    assert_eq!(s.new_event_calendar(&team), None, "the calendar here isn't offered");
+
+    // The second mailbox on screen: a new contact, and a sender added from one of its messages, go to the first's book.
+    s.view = View::Folder { account: team.clone(), folder: "INBOX".into() };
+    assert_eq!(s.new_card_target(None), Some((own.clone(), "B1".to_string())));
+    let paul = s.run("contact.create", &json!({"name": "Paul Exemple", "emails": "paul@example.ch"})).unwrap();
+    assert_eq!(paul["account"], own.as_str());
+    let sender = Card { name: "Ana Lima".into(), emails: vec![Typed { value: "ana@example.ch".into(), kind: String::new() }], ..Default::default() };
+    let ana = s.create_card(Some(&team), sender).unwrap();
+    assert_eq!(ana["account"], own.as_str());
+    assert!(s.pim[&own].cards.iter().all(|c| c.book == "B1" && c.dirty), "to be sent to the server's book");
+    assert!(s.pim[&team].cards.is_empty() && s.pim[&team].books.iter().all(|b| b.id == LOCAL));
+    // Nor is the calendar here taken when named.
+    assert!(s.run("event.create", &json!({"summary": "Visit", "start": "2026-10-20T10:00", "account": team, "calendar": LOCAL})).is_err());
+    done(s);
+
+    // An invitation with nowhere to keep its event: only the answer goes, by mail.
+    let mut s = sample_session("hosted-invite");
+    s.keeps_local_pim = false;
+    assert!(!s.can_add_cards() && !s.can_add_events(), "the sample's book and calendar are this computer's");
+    s.run("event.delete", &json!({"uid": "mix@sample.mailcraft"})).unwrap();
+    let k = s.list.iter().find(|m| m.subject == "Sound mix, version 3").map(|m| m.key.clone()).unwrap();
+    s.run("list.open", &json!({"key": k.to_id()})).unwrap();
+    let r = s.run("invite.respond", &json!({"answer": "accepted"})).unwrap();
+    assert_eq!((r["answer"].as_str(), r["inCalendar"].as_bool()), (Some("ACCEPTED"), Some(false)));
+    assert!(s.find_event("mix@sample.mailcraft").is_none(), "not put where it would be lost");
+    assert_eq!(sent_calendar(&s, "Sent", "Accepted: Sound mix playback").0, "REPLY");
+    done(s);
+}
+
+// //// Neoffice — saving the contact form keeps what the form doesn't show: the kinds of the addresses and numbers already
+// there, and the given name and surname while the name shown stays the same.
+#[test]
+fn saving_a_contact_keeps_what_the_form_does_not_show() {
+    use mailcraft_model::vcard::{Card, Typed};
+    let mut s = sample_session("contact-kinds");
+    let typed = |value: &str, kind: &str| Typed { value: value.into(), kind: kind.into() };
+    let card = Card {
+        given: "Jeanne".into(),
+        family: "Muster".into(),
+        emails: vec![typed("jeanne@example.ch", "work"), typed("jm@example.org", "home")],
+        phones: vec![typed("+41 79 000 00 00", "cell")],
+        ..Default::default()
+    };
+    let uid = s.create_card(None, card).unwrap()["uid"].as_str().unwrap().to_string();
+    // The form gives back what it shows: the name shown, each address and number (one more address), a title.
+    let edit = json!({"uid": uid, "name": "Jeanne Muster", "emails": "Jeanne@example.ch\njm@example.org\nnew@example.net", "phones": "+41790000000", "title": "Comptable"});
+    s.run("contact.update", &edit).unwrap();
+    let c = s.find_person(&uid).unwrap().card;
+    assert_eq!((c.given.as_str(), c.family.as_str(), c.name.as_str()), ("Jeanne", "Muster", ""), "the parts of the same name stay");
+    assert_eq!(c.emails.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["work", "home", ""], "kinds kept; the new one has none");
+    assert_eq!(c.phones[0].kind, "cell", "the same number, written another way");
+    // Another name: it is the name now, and its parts go.
+    s.run("contact.update", &json!({"uid": uid, "name": "Jeanne Exemple"})).unwrap();
+    let c = s.find_person(&uid).unwrap().card;
+    assert_eq!((c.name.as_str(), c.given.as_str(), c.family.as_str()), ("Jeanne Exemple", "", ""));
+    done(s);
+}
+
+// //// Neoffice — an event a colleague's read-only calendar also holds (the same meeting, shared in Exchange): answering
+// and deleting change the person's own copy, and leave the colleague's as it is.
+#[test]
+fn a_read_only_copy_of_the_same_event_elsewhere_does_not_block_the_own_one() {
+    use mailcraft_model::pim::{CalendarInfo, LOCAL};
+    let mut s = sample_session("shared-copy");
+    let uid = "mix@sample.mailcraft";
+    let p = s.pim_mut("sample");
+    p.calendars.push(CalendarInfo { id: "shared:ana@soundlab.example".into(), name: "Ana".into(), read_only: true, ..Default::default() });
+    let mut theirs = p.events.iter().find(|e| e.event.uid == uid).cloned().unwrap();
+    (theirs.calendar, theirs.href) = ("shared:ana@soundlab.example".into(), "S1".into());
+    p.events.push(theirs.clone());
+    let own = |s: &Session, stat: &str| {
+        s.pim["sample"].events.iter().any(|e| {
+            e.event.uid == uid && e.calendar == LOCAL && e.event.attendees.iter().any(|a| a.email == "riley@studio.example" && a.partstat == stat)
+        })
+    };
+    let k = s.list.iter().find(|m| m.subject == "Sound mix, version 3").map(|m| m.key.clone()).unwrap();
+    s.run("list.open", &json!({"key": k.to_id()})).unwrap();
+    let r = s.run("invite.respond", &json!({"answer": "accepted"})).unwrap();
+    assert_ne!(r["readOnly"], true, "{r}");
+    assert!(own(&s, "ACCEPTED"), "the own copy takes the answer");
+    assert!(s.pim["sample"].events.contains(&theirs), "the colleague's copy as it was");
+    s.run("event.respond", &json!({"uid": uid, "answer": "tentative"})).unwrap();
+    assert!(own(&s, "TENTATIVE") && s.pim["sample"].events.contains(&theirs));
+    // Deleted: the own copy goes, not the colleague's, and nothing is to be deleted on the colleague's server.
+    s.run("event.delete", &json!({"uid": uid})).unwrap();
+    assert!(s.pim["sample"].events.iter().all(|e| e.event.uid != uid || e.calendar != LOCAL));
+    assert!(s.pim["sample"].events.contains(&theirs) && s.pim["sample"].deleted.is_empty());
+    assert!(s.run("event.delete", &json!({"uid": uid})).is_err(), "only the colleague's copy left: refused");
+    done(s);
+}
+
+// //// Neoffice — what a book or calendar read only in part held and three reads in a row didn't bring goes, and what lies
+// wholly outside the span read goes at once.
+#[test]
+fn what_partial_reads_stop_bringing_goes_in_the_end() {
+    use mailcraft_model::ical::CalEvent;
+    use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, StoredCard, StoredEvent};
+    use mailcraft_model::vcard::Card;
+    let mut s = Session::open(Some(temp("partial-misses")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id =
+        s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let card = |uid: &str| StoredCard {
+        book: "B1".into(),
+        href: format!("jmap:{uid}"),
+        card: Card { uid: uid.into(), name: uid.into(), ..Default::default() },
+        ..Default::default()
+    };
+    let event = |uid: &str, start: i64| StoredEvent {
+        calendar: "K1".into(),
+        href: format!("jmap:{uid}"),
+        event: CalEvent { uid: uid.into(), summary: uid.into(), start, end: start + 3600, ..Default::default() },
+        ..Default::default()
+    };
+    let sync = |cards: Vec<StoredCard>, events: Vec<StoredEvent>, part: bool| {
+        let mut sync = DavSync {
+            caldav_home: Some("jmap".into()),
+            carddav_home: Some("jmap".into()),
+            checked: NOW,
+            books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() }]),
+            calendars: Some(vec![CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: true, ..Default::default() }]),
+            cards,
+            events,
+            window: Some((NOW - 10 * 86_400, NOW + 10 * 86_400)),
+            ..Default::default()
+        };
+        if part {
+            (sync.partial_books, sync.partial_calendars) = (vec!["B1".into()], vec!["K1".into()]);
+        } else {
+            (sync.synced_books, sync.synced_calendars) = (vec!["B1".into()], vec!["K1".into()]);
+        }
+        sync
+    };
+    let held = |s: &Session| {
+        let mut v: Vec<String> =
+            s.pim[&id].cards.iter().map(|c| c.card.uid.clone()).chain(s.pim[&id].events.iter().map(|e| e.event.uid.clone())).collect();
+        v.sort();
+        v
+    };
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(sync(vec![card("c1"), card("c2")], vec![event("e1", NOW), event("old", NOW - 100 * 86_400)], false)),
+    });
+    assert_eq!(held(&s), ["c1", "c2", "e1", "old"]);
+    for (round, kept) in [(1, true), (2, true), (3, false)] {
+        s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(sync(vec![card("c1")], vec![event("e1", NOW)], true)) });
+        assert_eq!(held(&s).contains(&"c2".to_string()), kept, "missed {round} time(s)");
+        assert!(!held(&s).contains(&"old".to_string()), "outside the span read: gone at once");
+    }
+    assert_eq!(held(&s), ["c1", "e1"]);
+    assert!(s.pim[&id].partial_misses.is_empty(), "nothing left to count");
+    done(s);
+}
+
+// //// Neoffice — a card changed here before its book became read-only can't be sent: the change goes, said once, and the
+// server's card comes back; one made here and never stored goes.
+#[test]
+fn a_change_to_a_card_whose_book_became_read_only_is_undone_once() {
+    use mailcraft_model::pim::{BookInfo, DavSync, StoredCard};
+    use mailcraft_model::vcard::Card;
+    let mut s = Session::open(Some(temp("undone-card")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id =
+        s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let read = |read_only: bool| DavSync {
+        carddav_home: Some("jmap".into()),
+        checked: NOW,
+        books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only, ctag: String::new() }]),
+        synced_books: vec!["B1".into()],
+        cards: vec![StoredCard {
+            book: "B1".into(),
+            href: "jmap:c1".into(),
+            card: Card { uid: "c1".into(), name: "Ann Lee".into(), ..Default::default() },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(false)) });
+    s.run("contact.update", &json!({"uid": "c1", "title": "Head of site"})).unwrap();
+    s.run("contact.create", &json!({"name": "Dee Park"})).unwrap();
+    let before = s.notices.len();
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(true)) });
+    let p = &s.pim[&id];
+    assert_eq!(p.cards.len(), 1, "the card made here, never stored, is gone");
+    assert!(!p.cards[0].dirty && p.cards[0].card.title.is_empty(), "the server's card is back");
+    let said: Vec<&str> = s.notices[before..].iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said.iter().any(|t| t.starts_with("Ann Lee: its address book can't be changed any more")), "{said:?}");
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(true)) });
+    assert_eq!(s.notices.len(), before + 2, "said once");
+    done(s);
+}
+
+// //// Neoffice — a card of a book whose server doesn't let the person delete its cards isn't deleted; where it may, the
+// deletion is kept to be sent.
+#[test]
+fn a_card_is_deleted_only_where_the_book_s_rights_allow_it() {
+    use mailcraft_model::pim::{BookInfo, DavSync, StoredCard};
+    use mailcraft_model::vcard::Card;
+    let mut s = Session::open(Some(temp("no-delete")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id =
+        s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let read = |no_delete: bool| DavSync {
+        carddav_home: Some("jmap".into()),
+        checked: NOW,
+        books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() }]),
+        no_delete_books: if no_delete { vec!["B1".into()] } else { Vec::new() },
+        synced_books: vec!["B1".into()],
+        cards: vec![StoredCard {
+            book: "B1".into(),
+            href: "jmap:c1".into(),
+            card: Card { uid: "c1".into(), name: "Ann Lee".into(), ..Default::default() },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(true)) });
+    assert!(s.run("contact.delete", &json!({"uid": "c1"})).is_err(), "the person's rights don't allow it");
+    assert!(s.find_person("c1").is_some() && s.pim[&id].deleted.is_empty());
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(false)) });
+    s.run("contact.delete", &json!({"uid": "c1"})).unwrap();
+    assert!(s.find_person("c1").is_none() && s.pim[&id].deleted.iter().any(|t| t.href == "jmap:c1"), "to be deleted on the server");
+    done(s);
+}

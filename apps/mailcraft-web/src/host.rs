@@ -19,7 +19,17 @@
 //!
 //! When the server refuses a token (it expired, or died with the session that asked for it), MailCraft calls
 //! `window.mailcraftJmapRenew()` if the page has it: a promise of `{ accounts: [...] }` with new secrets, as above; the
-//! mailbox then signs in again, once.
+//! mailbox then signs in again, once. An answer that leaves a mailbox out (`{ accounts: [] }` leaves out every one)
+//! means the page gives it no more: the mailbox asks for a reload. No answer (a promise that fails, or gives no
+//! `accounts`: the page has nothing yet, its own credential being renewed), or one that names the mailbox without a
+//! secret, is asked again a minute later, for an hour.
+//!
+//! A page whose window may not reach other sites itself (Neodesk) offers `window.mailcraftFetchUrl(url)`, a promise of
+//! `{ status, contentType, bytes }` (`bytes` a `Uint8Array`): the pictures a message links to, once the person asked to
+//! see them, are then fetched through it.
+//!
+//! The person signed in to the page may be named in the address, as for the document editors (`?author=Jeanne%20Muster`):
+//! MailCraft shows their initials at the right end of its top bar.
 //!
 //! It is read on this page, or on the page that frames it when that one is of the same origin (reading another
 //! origin's window throws, which reads as nothing). Nothing secret travels in the address. With host accounts,
@@ -29,7 +39,11 @@ use std::collections::HashMap;
 
 use mailcraft_engine::model::AccountConfig;
 use mailcraft_engine::store::Store;
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast as _, JsValue};
+use wasm_bindgen_futures::JsFuture;
+
+/// The longest name of the signed-in person taken from the address.
+const MAX_AUTHOR_CHARS: usize = 128;
 
 /// A mailbox the page handed over.
 #[derive(Clone, Debug)]
@@ -71,18 +85,81 @@ pub fn accounts() -> Vec<HostAccount> {
     parse(&host)
 }
 
+/// The hosting page's answer to `mailcraftJmapRenew()`.
+pub struct Renewed {
+    /// The complete mailboxes it gives, with their new secrets.
+    pub accounts: Vec<HostAccount>,
+    /// Every address it names (lower case), complete or not: one named without a secret has none to give yet.
+    pub named: Vec<String>,
+}
+
 /// New tokens for the mailboxes, from the hosting page's `window.mailcraftJmapRenew()` (a promise of
-/// `{ accounts: [...] }`, the same as `mailcraftJmap`'s), when the server refused the ones it had given; `None` when the
-/// page offers no such function, or it gives nothing.
-pub async fn renew() -> Option<Vec<HostAccount>> {
+/// `{ accounts: [...] }`, the same as `mailcraftJmap`'s), when the server refused the ones it had given: the page's
+/// answer, which may leave mailboxes out, or name none (`{ accounts: [] }`). `None` when there is no answer: the page
+/// offers no such function, its promise fails, or it gives no `accounts`.
+pub async fn renew() -> Option<Renewed> {
     let (window, renew) = windows().into_iter().find_map(|w| {
         let f = get(&w, "mailcraftJmapRenew").filter(JsValue::is_function)?;
         Some((w, f))
     })?;
     let promise = js_sys::Function::from(renew).call0(&window).ok()?;
-    let answer = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&promise)).await.ok()?;
-    let accounts = if answer.is_object() { parse(&answer) } else { Vec::new() };
-    (!accounts.is_empty()).then_some(accounts)
+    let answer = JsFuture::from(js_sys::Promise::resolve(&promise)).await.ok()?;
+    let list = get(&answer, "accounts").filter(js_sys::Array::is_array)?;
+    let named = js_sys::Array::from(&list).iter().take(20).map(|item| text(&item, "email").to_lowercase()).filter(|e| e.contains('@')).collect();
+    Some(Renewed { accounts: parse(&answer), named })
+}
+
+/// A picture a message links to, fetched by the hosting page's `window.mailcraftFetchUrl(url)` (a promise of
+/// `{ status, contentType, bytes }`, `bytes` a `Uint8Array`) for a window that may not reach other sites itself
+/// (Neodesk): its bytes when the page got it (status 2xx, at most `max` bytes), else why not. `None` when the page offers
+/// no such function: MailCraft fetches it itself.
+pub async fn fetch_url(url: &str, max: usize) -> Option<Result<Vec<u8>, String>> {
+    let (window, fetch) = windows().into_iter().find_map(|w| {
+        let f = get(&w, "mailcraftFetchUrl").filter(JsValue::is_function)?;
+        Some((w, js_sys::Function::from(f)))
+    })?;
+    Some(fetched(&window, &fetch, url, max).await)
+}
+
+async fn fetched(window: &JsValue, fetch: &js_sys::Function, url: &str, max: usize) -> Result<Vec<u8>, String> {
+    let promise = fetch.call1(window, &JsValue::from_str(url)).map_err(|e| reason(&e))?;
+    let answer = JsFuture::from(js_sys::Promise::resolve(&promise)).await.map_err(|e| reason(&e))?;
+    match get(&answer, "status").and_then(|s| s.as_f64()).filter(|s| (0.0..1000.0).contains(s)).map(|s| s as u16) {
+        Some(status) if (200..300).contains(&status) => {}
+        Some(status) => return Err(format!("HTTP {status}")),
+        None => return Err("the page could not fetch it".into()),
+    }
+    // The picture is read from its bytes: `contentType` isn't needed. The page made them in its own window (or Neodesk's
+    // bridge did): `instanceof` fails from one window to another, so they are viewed as bytes whatever they are (a
+    // Uint8Array or an ArrayBuffer of any window), and nothing else gives any.
+    let bytes = get(&answer, "bytes").filter(JsValue::is_object).ok_or("the page gave no picture")?;
+    let bytes = js_sys::Uint8Array::new(&bytes);
+    if bytes.length() == 0 {
+        return Err("the page gave no picture".into());
+    }
+    // Measured before it is copied in.
+    if usize::try_from(bytes.length()).unwrap_or(usize::MAX) > max {
+        return Err(format!("the picture is larger than {max} bytes"));
+    }
+    Ok(bytes.to_vec())
+}
+
+fn reason(error: &JsValue) -> String {
+    error.as_string().or_else(|| error.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message()))).unwrap_or_else(|| format!("{error:?}"))
+}
+
+/// The name of the person signed in to the hosting page, from the address (`?author=Jeanne%20Muster`), as the document
+/// editors read it: trimmed, at most 128 characters; `None` when there is none.
+pub fn author() -> Option<String> {
+    let name: String = query_param("author")?.trim().chars().take(MAX_AUTHOR_CHARS).collect();
+    let name = name.trim_end().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// A `?key=value` of the page's address, decoded as a form is (`+` is a space).
+fn query_param(key: &str) -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    web_sys::UrlSearchParams::new_with_str(&search).ok()?.get(key)
 }
 
 /// The complete mailboxes of `{ accounts: [...] }` (at most 20).

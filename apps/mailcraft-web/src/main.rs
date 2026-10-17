@@ -25,6 +25,9 @@ mod idb;
 mod host;
 #[cfg(target_arch = "wasm32")]
 mod nora;
+// //// Neoffice — what a hosting page's answer to a renewal of tokens means for each mailbox (backend.rs): built on every
+// target, so that its tests run natively.
+mod renewal;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

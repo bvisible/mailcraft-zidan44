@@ -6,6 +6,8 @@ use serde_json::json;
 
 use crate::icons::{self, Icon};
 use crate::theme::{self, Tokens};
+// //// Neoffice — what isn't offered on a read-only card, or with nowhere to add one, and why (read_only.rs).
+use crate::read_only;
 use crate::{Action, Dialog, UiState, widgets};
 
 /// How the contacts are laid out, as Outlook's Change View offers.
@@ -59,7 +61,9 @@ fn index_letter(name: &str) -> char {
 /// The side pane: search, then everyone, A to Z.
 pub fn nav(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
     let t = st.tokens;
-    if widgets::accent_button(ui, Icon::Plus, "New contact", &t, !s.accounts.is_empty()).clicked() {
+    // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
+    let nowhere = read_only::no_new_cards(s);
+    if read_only::why(widgets::accent_button(ui, Icon::Plus, "New contact", &t, !s.accounts.is_empty() && nowhere.is_none()), nowhere).clicked() {
         acts.push(Action::Dialog(Dialog::new_contact()));
     }
     ui.add_space(8.0);
@@ -112,7 +116,8 @@ pub fn nav(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
                     if resp.clicked() {
                         st.person = Some(p.card.uid.clone());
                     }
-                    if resp.double_clicked() {
+                    // //// Neoffice — not a card of a read-only book (read_only.rs).
+                    if resp.double_clicked() && read_only::locked(s, p).is_none() {
                         acts.push(Action::Dialog(Dialog::edit_contact(&p.card)));
                     }
                 }
@@ -163,6 +168,9 @@ pub fn show(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) 
     };
     let c = &p.card;
     let name = c.display();
+    // //// Neoffice — a card of a read-only book: Edit and Delete greyed, with why, and « read-only » said; Delete also on a
+    // Neoffice contact in a hosting page (read_only.rs).
+    let (locked, undeletable) = (read_only::locked(s, &p), read_only::no_delete(s, &p));
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Frame::new().inner_margin(Margin { left: 28, right: 28, top: 24, bottom: 24 }).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -185,12 +193,17 @@ pub fn show(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) 
                             acts.push(Action::Run("compose.update", json!({"to": format!("{name} <{}>", e.value)})));
                             acts.push(Action::Run("view.module", json!({"name": "mail"})));
                         }
-                        if widgets::pill_button(ui, Icon::Drafts, "Edit", &t).clicked() {
-                            acts.push(Action::Dialog(Dialog::edit_contact(c)));
-                        }
-                        if widgets::pill_button(ui, Icon::Delete, "Delete", &t).clicked() {
-                            acts.push(Action::Run("contact.delete", json!({"uid": c.uid})));
-                        }
+                        // //// Neoffice — see `locked` above.
+                        ui.add_enabled_ui(locked.is_none(), |ui| {
+                            if read_only::why_disabled(widgets::pill_button(ui, Icon::Drafts, "Edit", &t), locked).clicked() {
+                                acts.push(Action::Dialog(Dialog::edit_contact(c)));
+                            }
+                        });
+                        ui.add_enabled_ui(undeletable.is_none(), |ui| {
+                            if read_only::why_disabled(widgets::pill_button(ui, Icon::Delete, "Delete", &t), undeletable).clicked() {
+                                acts.push(Action::Run("contact.delete", json!({"uid": c.uid})));
+                            }
+                        });
                     });
                 });
             });
@@ -219,6 +232,10 @@ pub fn show(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) 
             ui.add_space(14.0);
             if let Some(a) = s.account(&p.account) {
                 ui.label(RichText::new(tf!("In the address book of {account}", account = a.config.email)).color(t.faint).small());
+            }
+            // //// Neoffice — as the calendars say of theirs.
+            if locked.is_some() {
+                ui.label(RichText::new(tl!("read-only")).color(t.faint).small());
             }
         });
     });
@@ -284,7 +301,8 @@ fn cards(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
                         if resp.clicked() {
                             st.person = Some(c.uid.clone());
                         }
-                        if resp.double_clicked() {
+                        // //// Neoffice — not a card of a read-only book (read_only.rs).
+                        if resp.double_clicked() && read_only::locked(s, p).is_none() {
                             acts.push(Action::Dialog(Dialog::edit_contact(c)));
                         }
                     }
@@ -349,7 +367,8 @@ fn phone_list(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>
                 if resp.clicked() {
                     st.person = Some(c.uid.clone());
                 }
-                if resp.double_clicked() {
+                // //// Neoffice — not a card of a read-only book (read_only.rs).
+                if resp.double_clicked() && read_only::locked(s, p).is_none() {
                     acts.push(Action::Dialog(Dialog::edit_contact(c)));
                 }
             }

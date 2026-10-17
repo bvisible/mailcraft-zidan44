@@ -100,6 +100,49 @@ impl Session {
         }
     }
 
+    // //// Neoffice — where new contacts and events can go: a writable book or calendar, and the one on this computer
+    // only where it is kept (`keeps_local_pim`: not in the browser build with a hosting page's mailboxes). The UI greys
+    // « New contact », « Add sender to contacts » and « New event » when there is none.
+    /// The first book of `account` new contacts can go to.
+    pub fn new_card_book(&self, account: &str) -> Option<String> {
+        let Some(p) = self.pim.get(account) else { return self.keeps_local_pim.then(|| LOCAL.to_string()) };
+        p.books.iter().find(|b| !b.read_only && (self.keeps_local_pim || b.id != LOCAL)).map(|b| b.id.clone())
+    }
+
+    /// The first calendar of `account` new events can go to.
+    pub fn new_event_calendar(&self, account: &str) -> Option<String> {
+        let Some(p) = self.pim.get(account) else { return self.keeps_local_pim.then(|| LOCAL.to_string()) };
+        p.calendars.iter().find(|c| !c.read_only && (self.keeps_local_pim || c.id != LOCAL)).map(|c| c.id.clone())
+    }
+
+    /// The account a new contact goes to, and its book: `wanted` (else the one on screen) when it has one; where the
+    /// book here isn't kept, else the first account that has one (the contacts of a Neoffice instance are offered in one
+    /// of the person's mailboxes).
+    pub fn new_card_target(&self, wanted: Option<&str>) -> Option<(String, String)> {
+        let first = match wanted {
+            Some(a) => self.account(a),
+            None => self.current_account(),
+        }
+        .map(|a| a.config.id.clone())?;
+        if let Some(book) = self.new_card_book(&first) {
+            return Some((first, book));
+        }
+        if self.keeps_local_pim {
+            return None;
+        }
+        self.accounts.iter().find_map(|a| self.new_card_book(&a.config.id).map(|book| (a.config.id.clone(), book)))
+    }
+
+    /// Whether a new contact can be added (« New contact »).
+    pub fn can_add_cards(&self) -> bool {
+        self.new_card_target(None).is_some()
+    }
+
+    /// Whether a new event can be added (« New event », whose form offers the calendars of every account).
+    pub fn can_add_events(&self) -> bool {
+        self.accounts.iter().any(|a| self.new_event_calendar(&a.config.id).is_some())
+    }
+
     // ----- the calendar view -----
 
     /// The local day (days since the epoch) the calendar shows.
@@ -212,6 +255,9 @@ impl Session {
         if e.uid.trim().is_empty() {
             e.uid = self.new_uid();
         }
+        // //// Neoffice — none named: the first calendar this account's new events can go to (new_event_calendar), not the
+        // one on this computer where it isn't kept; nor that one when named.
+        let (keeps, first) = (self.keeps_local_pim, self.new_event_calendar(&account));
         let p = self.pim_mut(&account);
         let cal = match calendar {
             Some(c) => p
@@ -219,10 +265,15 @@ impl Session {
                 .iter()
                 .find(|x| x.id == c || x.name.eq_ignore_ascii_case(c))
                 .ok_or_else(|| CmdError::Params(format!("no calendar `{c}`")))?,
-            None => p.default_calendar().ok_or_else(|| CmdError::Disabled("no calendar to add to".into()))?,
+            // //// Neoffice — see `first` above.
+            None => first.and_then(|f| p.calendars.iter().find(|c| c.id == f)).ok_or_else(|| CmdError::Disabled("no calendar to add to".into()))?,
         };
         if cal.read_only {
             return Err(CmdError::Params(format!("{} can't be changed", cal.name)));
+        }
+        // //// Neoffice — see `keeps` above: it would be lost at the next reload.
+        if !keeps && cal.id == LOCAL {
+            return Err(CmdError::Disabled("the calendar on this computer isn't kept here".into()));
         }
         let id = cal.id.clone();
         let uid = e.uid.clone();
@@ -258,12 +309,20 @@ impl Session {
     pub fn delete_event(&mut self, uid: &str, occurrence: Option<i64>) -> CmdResult {
         let account = self.find_event(uid).map(|(a, _)| a.to_string()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
         let p = self.pim_mut(&account);
+        // //// Neoffice — only its copies in calendars that can be changed: another's read-only calendar (a colleague's,
+        // shared) may hold the same event, and it stays there as it is; with no other copy, refused.
+        let locked: Vec<String> = p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect();
+        if !p.events.iter().any(|e| e.event.uid == uid && !locked.contains(&e.calendar)) {
+            return Err(CmdError::Params("this calendar can't be changed".into()));
+        }
         let mut remote = false;
         match occurrence {
             Some(at) if p.events.iter().any(|e| e.event.uid == uid && e.event.rrule.is_some()) => {
                 // One occurrence: an exception on the rule, and any changed instance goes.
-                p.events.retain(|e| !(e.event.uid == uid && e.event.recurrence_id == Some(at)));
-                if let Some(m) = p.events.iter_mut().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none()) {
+                // //// Neoffice — see `locked` above.
+                p.events.retain(|e| !(e.event.uid == uid && e.event.recurrence_id == Some(at) && !locked.contains(&e.calendar)));
+                let writable = |e: &&mut StoredEvent| e.event.uid == uid && e.event.recurrence_id.is_none() && !locked.contains(&e.calendar);
+                if let Some(m) = p.events.iter_mut().find(writable) {
                     if !m.event.exdates.contains(&at) {
                         m.event.exdates.push(at);
                     }
@@ -273,12 +332,14 @@ impl Session {
                 }
             }
             _ => {
-                let gone: Vec<StoredEvent> = p.events.iter().filter(|e| e.event.uid == uid).cloned().collect();
+                // //// Neoffice — see `locked` above.
+                let gone: Vec<StoredEvent> = p.events.iter().filter(|e| e.event.uid == uid && !locked.contains(&e.calendar)).cloned().collect();
                 for g in gone.iter().filter(|g| !g.href.is_empty()) {
                     remote = true;
                     p.deleted.push(Tombstone { href: g.href.clone(), etag: g.etag.clone(), calendar: g.calendar.clone() });
                 }
-                p.events.retain(|e| e.event.uid != uid);
+                // //// Neoffice — see `locked` above.
+                p.events.retain(|e| e.event.uid != uid || locked.contains(&e.calendar));
             }
         }
         self.after_pim_change(&account, remote);
@@ -298,6 +359,8 @@ impl Session {
     /// Merge what a CalDAV / CardDAV sync found. Changes made here since stay (and go to the
     /// server next time); everything else follows the server.
     pub fn apply_dav(&mut self, account: &str, sync: &mailcraft_model::pim::DavSync) {
+        // //// Neoffice — the cards whose change made here had to go (their book now read-only), said once below.
+        let mut undone: Vec<String> = Vec::new();
         let p = self.pim_mut(account);
         p.caldav_home = sync.caldav_home.clone().or_else(|| Some(String::new()));
         p.carddav_home = sync.carddav_home.clone().or_else(|| Some(String::new()));
@@ -343,7 +406,9 @@ impl Session {
         if let Some(server) = &sync.calendars {
             // The calendar on this computer goes once the server has calendars, unless it holds
             // events (they stay there).
-            let keep_local = server.is_empty() || p.events.iter().any(|e| e.calendar == LOCAL);
+            // //// Neoffice — or none of the server's can be added to (none, or all read-only, as a JMAP server's for
+            // NeoMail): new events, and the invitations answered, need somewhere to go.
+            let keep_local = server.iter().all(|c| c.read_only) || p.events.iter().any(|e| e.calendar == LOCAL);
             let mut list: Vec<mailcraft_model::pim::CalendarInfo> = server.clone();
             if keep_local && let Some(l) = p.calendars.iter().find(|c| c.id == LOCAL) {
                 list.push(l.clone());
@@ -358,15 +423,56 @@ impl Session {
                     }
                 }
             }
+            // //// Neoffice — a calendar read only in part: what was read is added or updated (by uid and start, or by
+            // its address on the server), and nothing of it goes; changes made here meanwhile stay to be sent.
+            for cal in &sync.partial_calendars {
+                for x in sync.events.iter().filter(|x| &x.calendar == cal) {
+                    let same = |e: &StoredEvent| {
+                        (e.event.uid == x.event.uid && e.event.recurrence_id == x.event.recurrence_id) || (!x.href.is_empty() && e.href == x.href)
+                    };
+                    // As for a calendar read in full: an event changed here (any of its occurrences) keeps the change.
+                    if !p.events.iter().any(|e| e.dirty && (e.event.uid == x.event.uid || same(e))) {
+                        p.events.retain(|e| !same(e));
+                        p.events.push(x.clone());
+                    }
+                }
+                // What it held and the last reads in a row didn't bring goes after PARTIAL_MISSES of them, as it would
+                // from a read in full; an occurrence wholly outside the span read can't come back, and goes now.
+                let read: std::collections::HashSet<&str> = sync.events.iter().filter(|x| &x.calendar == cal).map(|x| x.href.as_str()).collect();
+                let misses = &mut p.partial_misses;
+                p.events.retain(|e| {
+                    if &e.calendar != cal || e.dirty || e.href.is_empty() || read.contains(e.href.as_str()) {
+                        return true;
+                    }
+                    let outside =
+                        e.event.rrule.is_none() && sync.window.is_some_and(|(from, to)| e.event.end.max(e.event.start) < from || e.event.start > to);
+                    let missed = misses.entry(e.href.clone()).or_insert(0);
+                    *missed = missed.saturating_add(1);
+                    !outside && *missed < mailcraft_model::pim::PARTIAL_MISSES
+                });
+            }
             p.calendars = list;
         }
         if let Some(server) = &sync.books {
-            let keep_local = server.is_empty() || p.cards.iter().any(|c| c.book == LOCAL);
+            // //// Neoffice — likewise the address book here, while none of the server's can be added to: « New contact »
+            // and « Add sender to contacts » need somewhere to go.
+            let keep_local = server.iter().all(|b| b.read_only) || p.cards.iter().any(|c| c.book == LOCAL);
             let mut list: Vec<mailcraft_model::pim::BookInfo> = server.clone();
             if keep_local && let Some(l) = p.books.iter().find(|b| b.id == LOCAL) {
                 list.push(l.clone());
             }
             p.cards.retain(|c| c.book == LOCAL || list.iter().any(|b| b.id == c.book) || c.dirty);
+            // //// Neoffice — a card changed here in a book the server no longer lets the person write can't be sent: the
+            // change goes (said once), and the server's card comes back with this read; one made here, never stored, goes.
+            let locked: Vec<&str> = server.iter().filter(|b| b.read_only).map(|b| b.id.as_str()).collect();
+            p.cards.retain_mut(|c| {
+                if !c.dirty || !locked.contains(&c.book.as_str()) {
+                    return true;
+                }
+                undone.push(c.card.display());
+                c.dirty = false;
+                !c.href.is_empty()
+            });
             for book in &sync.synced_books {
                 p.cards.retain(|c| &c.book != book || c.dirty || c.href.is_empty() || sync.kept.contains(&c.href));
                 for x in sync.cards.iter().filter(|x| &x.book == book) {
@@ -376,11 +482,46 @@ impl Session {
                     }
                 }
             }
+            // //// Neoffice — a book read only in part: likewise, what was read is added or updated (by uid, or by its
+            // address on the server: a card made here and stored there comes back under the server's uid), and nothing
+            // of it goes.
+            for book in &sync.partial_books {
+                for x in sync.cards.iter().filter(|x| &x.book == book) {
+                    let same = |c: &StoredCard| c.card.uid == x.card.uid || (!x.href.is_empty() && c.href == x.href);
+                    if !p.cards.iter().any(|c| c.dirty && same(c)) {
+                        p.cards.retain(|c| !same(c));
+                        p.cards.push(x.clone());
+                    }
+                }
+                // What it held and the last reads in a row didn't bring goes after PARTIAL_MISSES of them.
+                let read: std::collections::HashSet<&str> = sync.cards.iter().filter(|x| &x.book == book).map(|x| x.href.as_str()).collect();
+                let misses = &mut p.partial_misses;
+                p.cards.retain(|c| {
+                    if &c.book != book || c.dirty || c.href.is_empty() || read.contains(c.href.as_str()) {
+                        return true;
+                    }
+                    let missed = misses.entry(c.href.clone()).or_insert(0);
+                    *missed = missed.saturating_add(1);
+                    *missed < mailcraft_model::pim::PARTIAL_MISSES
+                });
+            }
             p.books = list;
+            // //// Neoffice — and whose cards may not be deleted, as this read says.
+            p.no_delete_books.clone_from(&sync.no_delete_books);
         }
+        // //// Neoffice — the misses of what this sync brought, or of what is gone, are let go of.
+        let brought: std::collections::HashSet<&str> =
+            sync.events.iter().map(|x| x.href.as_str()).chain(sync.cards.iter().map(|x| x.href.as_str())).collect();
+        let alive: std::collections::HashSet<String> =
+            p.events.iter().map(|e| e.href.clone()).chain(p.cards.iter().map(|c| c.href.clone())).collect();
+        p.partial_misses.retain(|href, _| !brought.contains(href.as_str()) && alive.contains(href));
         p.ensure_defaults();
         for e in sync.errors.iter().take(3) {
             self.notice(format!("calendars and contacts: {e}"), true);
+        }
+        // //// Neoffice — see `undone` above.
+        for name in undone.iter().take(3) {
+            self.notice(format!("{name}: its address book can't be changed any more, so the change made here was undone"), true);
         }
         self.save_pim(account);
     }
@@ -413,8 +554,10 @@ impl Session {
         if card.uid.trim().is_empty() {
             card.uid = self.new_uid();
         }
+        // //// Neoffice — where it goes: the first book this account's new contacts can go to, and where the book here
+        // isn't kept, else another account's (new_card_target); unchanged where it is.
+        let (account, book) = self.new_card_target(Some(&account)).ok_or_else(|| CmdError::Disabled("no address book to add to".into()))?;
         let p = self.pim_mut(&account);
-        let book = p.default_book().map(|b| b.id.clone()).ok_or_else(|| CmdError::Disabled("no address book to add to".into()))?;
         let uid = card.uid.clone();
         p.cards.retain(|c| c.card.uid != uid);
         p.cards.push(StoredCard { book: book.clone(), href: String::new(), etag: String::new(), card, dirty: book != LOCAL });
@@ -425,6 +568,10 @@ impl Session {
     pub fn update_card(&mut self, uid: &str, change: impl FnOnce(&mut Card)) -> CmdResult {
         let account = self.find_person(uid).map(|p| p.account).ok_or_else(|| CmdError::Params(format!("no contact `{uid}`")))?;
         let p = self.pim_mut(&account);
+        // //// Neoffice — not in an address book that can't be changed (a server's read-only one).
+        if p.cards.iter().find(|c| c.card.uid == uid).is_some_and(|c| p.book_read_only(&c.book)) {
+            return Err(CmdError::Params("this address book can't be changed".into()));
+        }
         let Some(c) = p.cards.iter_mut().find(|c| c.card.uid == uid) else { return Err(CmdError::Params(format!("no contact `{uid}`"))) };
         let mut card = c.card.clone();
         change(&mut card);
@@ -439,6 +586,14 @@ impl Session {
     pub fn delete_card(&mut self, uid: &str) -> CmdResult {
         let account = self.find_person(uid).map(|p| p.account).ok_or_else(|| CmdError::Params(format!("no contact `{uid}`")))?;
         let p = self.pim_mut(&account);
+        // //// Neoffice — nothing goes out of an address book that can't be changed (a server's read-only one), nor out of one
+        // whose cards the person may not delete.
+        if p.cards.iter().any(|c| c.card.uid == uid && p.book_read_only(&c.book)) {
+            return Err(CmdError::Params("this address book can't be changed".into()));
+        }
+        if p.cards.iter().any(|c| c.card.uid == uid && p.no_delete_books.contains(&c.book)) {
+            return Err(CmdError::Params("your rights do not let you delete this contact".into()));
+        }
         let mut remote = false;
         for c in p.cards.iter().filter(|c| c.card.uid == uid && !c.href.is_empty()) {
             remote = true;

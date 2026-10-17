@@ -31,8 +31,11 @@ pub(crate) fn interface_strings() -> BTreeSet<String> {
         include_str!("../calendar.rs"),
         include_str!("../people.rs"),
         include_str!("../pim_dialogs.rs"),
-        // //// Neoffice — Nora's interface (nora.rs), translated in neoffice.rs.
+        // //// Neoffice — Nora's interface (nora.rs), and why read-only cards and add buttons are greyed (read_only.rs),
+        // translated in neoffice.rs.
         include_str!("../nora.rs"),
+        include_str!("../read_only.rs"),
+        include_str!("../messages.rs"),
         include_str!("../notes.rs"),
     ];
     // (prefix, which string literals after it are interface text)

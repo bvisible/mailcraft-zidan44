@@ -160,7 +160,19 @@ pub struct Pim {
     /// When the server was last asked where they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dav_checked: Option<i64>,
+    // //// Neoffice — the items of a calendar or book read only in part (DavSync::partial_*) that the last reads in a row
+    // didn't bring (by their address on the server): one missed PARTIAL_MISSES times goes, as it would from one read whole.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub partial_misses: std::collections::BTreeMap<String, u8>,
+    // //// Neoffice — the server's books whose cards the person may not delete (JMAP `myRights.mayDelete` false, as
+    // Neoffice's facade says it from the person's rights), as the last read of the books said: the engine refuses it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_delete_books: Vec<String>,
 }
+
+// //// Neoffice — see `Pim::partial_misses`.
+/// How many partial reads in a row may miss an item before it goes.
+pub const PARTIAL_MISSES: u8 = 3;
 
 /// What a CalDAV / CardDAV sync found, for the engine to merge into its [`Pim`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,17 +208,55 @@ pub struct DavSync {
     pub deleted: Vec<String>,
     /// What couldn't be stored or deleted (tried again next time).
     pub errors: Vec<String>,
+    // //// Neoffice — calendars and books read only in part (a JMAP server's past the cap of one sync): their items read
+    // are added or updated, and nothing of them goes, where one read in full (`synced_*`) is replaced.
+    /// Calendars read in part: their `events` are merged without removing any.
+    #[serde(default)]
+    pub partial_calendars: Vec<String>,
+    /// Books read in part: their `cards` are merged without removing any.
+    #[serde(default)]
+    pub partial_books: Vec<String>,
+    /// The span of time the calendars were read for (from, to), when they were read for one (JMAP's window around
+    /// today): what a calendar read in part holds wholly outside it can't come back, and goes.
+    #[serde(default)]
+    pub window: Option<(i64, i64)>,
+    /// Of `books`, those whose cards the person may not delete (`Pim::no_delete_books`).
+    #[serde(default)]
+    pub no_delete_books: Vec<String>,
 }
 
 impl Pim {
     /// Make sure there is somewhere to put events and people.
     pub fn ensure_defaults(&mut self) {
-        if self.calendars.is_empty() {
-            self.calendars.push(CalendarInfo { id: LOCAL.into(), name: "Calendar".into(), color: 0, read_only: false, ctag: String::new() });
+        // //// Neoffice — somewhere they can be added: when every calendar or book is read-only (a JMAP server's, as
+        // NeoMail's are), the one on this computer, also when a sync dropped it before.
+        if !self.calendars.iter().any(|c| !c.read_only) {
+            match self.calendars.iter_mut().find(|c| c.id == LOCAL) {
+                Some(local) => local.read_only = false,
+                None => {
+                    self.calendars.push(CalendarInfo { id: LOCAL.into(), name: "Calendar".into(), color: 0, read_only: false, ctag: String::new() })
+                }
+            }
         }
-        if self.books.is_empty() {
-            self.books.push(BookInfo { id: LOCAL.into(), name: "Contacts".into(), read_only: false, ctag: String::new() });
+        // //// Neoffice — likewise for the address books (« New contact », « Add sender to contacts »).
+        if !self.books.iter().any(|b| !b.read_only) {
+            match self.books.iter_mut().find(|b| b.id == LOCAL) {
+                Some(local) => local.read_only = false,
+                None => self.books.push(BookInfo { id: LOCAL.into(), name: "Contacts".into(), read_only: false, ctag: String::new() }),
+            }
         }
+    }
+
+    // //// Neoffice — what the engine may not change (session/pim.rs, session/invite.rs): the items of a read-only
+    // calendar or book stay as the server has them.
+    /// Whether the calendar with this id is listed read-only.
+    pub fn calendar_read_only(&self, id: &str) -> bool {
+        self.calendars.iter().any(|c| c.id == id && c.read_only)
+    }
+
+    /// Whether the address book with this id is listed read-only.
+    pub fn book_read_only(&self, id: &str) -> bool {
+        self.books.iter().any(|b| b.id == id && b.read_only)
     }
 
     /// The first calendar events can be added to.

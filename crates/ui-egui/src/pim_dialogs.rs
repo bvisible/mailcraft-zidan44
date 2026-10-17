@@ -58,7 +58,8 @@ fn writable_calendars(s: &Session) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for a in &s.accounts {
         if let Some(p) = s.pim.get(&a.config.id) {
-            for c in p.calendars.iter().filter(|c| !c.read_only) {
+            // //// Neoffice — not the calendar here where it isn't kept (Session::keeps_local_pim): it would be lost.
+            for c in p.calendars.iter().filter(|c| !c.read_only && (s.keeps_local_pim || c.id != mailcraft_engine::model::pim::LOCAL)) {
                 let name = if c.id == mailcraft_engine::model::pim::LOCAL { tl!("Calendar").to_string() } else { c.name.clone() };
                 out.push((a.config.id.clone(), c.id.clone(), format!("{name} · {}", a.config.email)));
             }
@@ -424,7 +425,8 @@ impl ContactForm {
     }
 }
 
-pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Action>) -> bool {
+// //// Neoffice — `notes`: why the notes can't be written, if so (a Neoffice book, which keeps none: read_only.rs).
+pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Action>, notes: Option<&'static str>) -> bool {
     ui.set_width(500.0);
     // The person's initials once a name is typed, as the people list shows them.
     let initials: String = f.name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
@@ -446,7 +448,9 @@ pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Acti
         area(ui, &mut f.phones, tl!("One number per line"), 1);
     });
     form_row(ui, t, false, None, "Notes", |ui| {
-        area(ui, &mut f.note, "", 3);
+        // //// Neoffice — greyed, saying why, where the book keeps no notes (`notes` above).
+        let r = ui.add_enabled_ui(notes.is_none(), |ui| area(ui, &mut f.note, notes.unwrap_or(""), 3)).inner;
+        crate::read_only::why_disabled(r, notes);
     });
     if let Some(e) = &f.error {
         ui.label(RichText::new(e).color(t.danger));

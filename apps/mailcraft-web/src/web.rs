@@ -107,6 +107,9 @@ pub fn start() {
                     }
                     let mut session = Session::open(Some(store.clone()), Clock::new(now, offset));
                     session.jmap_only = true;
+                    // //// Neoffice — with the host's mailboxes nothing is kept between visits: new events and contacts go to
+                    // their servers' collections only, never to the ones here, lost at the next reload (host.rs).
+                    session.keeps_local_pim = !hosted;
                     // //// Neoffice — the host's mailboxes sign in with what the page gave (host.rs).
                     let backend = WebBackend::new(store.clone(), cc.egui_ctx.clone(), crate::host::secrets(&host));
                     // //// Neoffice — Nora, when the page asked for her (`?nora`) or makes her calls itself (`mailcraftNoraCall`, Neodesk).
@@ -123,6 +126,9 @@ pub fn start() {
                     if let Some(name) = &product {
                         app.ui.title_base = app.ui.title_base.replace("MailCraft", name);
                     }
+                    // //// Neoffice — the person signed in to the hosting page (`?author=`), shown as the document editors
+                    // show them: their initials at the right end of the top bar (host.rs).
+                    app.ui.signed_in = crate::host::author();
                     if let Some(v) = cc.storage.and_then(|s| s.get_string(UI_KEY)).and_then(|j| serde_json::from_str(&j).ok()) {
                         app.restore_state(&v);
                     }
