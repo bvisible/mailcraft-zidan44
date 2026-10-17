@@ -49,12 +49,12 @@ struct Account {
     pushing: bool,
     // //// Neoffice — a new token was asked of the hosting page after a refusal: once, until a sign-in works (renew).
     renewing: bool,
-    // //// Neoffice — when the address books were last read (contacts), so a sync of the mail reads them at most every
-    // CONTACTS_EVERY seconds.
+    // //// Neoffice — when the address books and calendars were last read (pim), so a sync of the mail reads them at most
+    // every CONTACTS_EVERY seconds.
     contacts_at: Option<i64>,
 }
 
-// //// Neoffice — the address books are read again with the mail, at most this often (seconds).
+// //// Neoffice — the address books and calendars are read again with the mail, at most this often (seconds).
 const CONTACTS_EVERY: i64 = 600;
 
 struct Shared {
@@ -313,32 +313,37 @@ async fn sync_all(sh: &Rcs, id: &str) {
         if let Ok(Some((used, limit))) = c.quota().await {
             emit(sh, Event::Quota { account: id.to_string(), used, limit });
         }
-        // //// Neoffice — the address books with the mail, when the server offers them (contacts).
+        // //// Neoffice — the address books and the calendars with the mail, when the server offers them (pim).
         let due = sh.borrow().accounts.get(id).is_some_and(|a| a.contacts_at.is_none_or(|at| now() - at >= CONTACTS_EVERY));
         if due {
-            contacts(sh, id).await;
+            pim(sh, id).await;
         }
         status(sh, id, SyncStatus::Online { at: now() });
     }
 }
 
-// //// Neoffice — read the account's address books (JMAP for Contacts) and hand them to the engine to merge, as a
-// CardDAV sync's result. A server that offers none is not asked again; a failure is said, and tried at the next sync.
-async fn contacts(sh: &Rcs, id: &str) {
+// //// Neoffice — read the account's address books and calendars (JMAP for Contacts and for Calendars) and hand them
+// to the engine to merge in one sync, as a CardDAV and CalDAV sync's result. What the server does not offer is not
+// asked; a failure is said and tried at the next sync, and the other part is merged all the same.
+async fn pim(sh: &Rcs, id: &str) {
     let Some(c) = client(sh, id) else { return };
-    if !c.offers_contacts() {
+    if !c.offers_contacts() && !c.offers_calendars() {
         return;
     }
     let at = now();
-    match c.sync_contacts(at).await {
-        Ok(Some(sync)) => {
-            if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
-                a.contacts_at = Some(at);
-            }
-            emit(sh, Event::DavSynced { account: id.to_string(), sync: Box::new(sync) });
-        }
-        Ok(None) => {}
-        Err(e) => log::warn!("{id}: the address books were not read: {e}"),
+    let contacts = c.sync_contacts(at).await.unwrap_or_else(|e| {
+        log::warn!("{id}: the address books were not read: {e}");
+        None
+    });
+    let calendars = c.sync_calendars(at).await.unwrap_or_else(|e| {
+        log::warn!("{id}: the calendars were not read: {e}");
+        None
+    });
+    if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+        a.contacts_at = Some(at);
+    }
+    if let Some(sync) = mailcraft_jmap::calendars::pim_sync(contacts, calendars, at) {
+        emit(sh, Event::DavSynced { account: id.to_string(), sync: Box::new(sync) });
     }
 }
 
@@ -502,8 +507,8 @@ async fn job(sh: &Rcs, id: &str, j: Job) {
             emit(sh, Event::Vacation { account: id.to_string(), vacation, error });
         }
         // Nothing to do in the browser: no Outbox (sending needs the server), no CalDAV.
-        // //// Neoffice — but address books over JMAP, read again when the engine asks (contacts).
-        Job::SyncDav { .. } => contacts(sh, id).await,
+        // //// Neoffice — but address books and calendars over JMAP, read again when the engine asks (pim).
+        Job::SyncDav { .. } => pim(sh, id).await,
         Job::FlushOutbox { .. } => {}
         Job::Start { .. }
         | Job::Remove { .. }

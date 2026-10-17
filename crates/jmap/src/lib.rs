@@ -20,6 +20,8 @@
 
 // //// Neoffice — address books over JMAP (RFC 9610), for the browser build, which has no CardDAV (maintenance#1630).
 pub mod contacts;
+// //// Neoffice — calendars over JMAP (draft-ietf-jmap-calendars), for the browser build, which has no CalDAV.
+pub mod calendars;
 pub mod sse;
 pub mod url;
 
@@ -141,6 +143,8 @@ pub struct Client<H> {
     max_get: usize,
     // //// Neoffice — the account that holds the address books (contacts.rs), when the session offers them.
     contacts: Option<String>,
+    // //// Neoffice — the account that holds the calendars (calendars.rs), when the session offers them.
+    calendars: Option<String>,
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
@@ -209,6 +213,10 @@ impl<H: Http> Client<H> {
         let contacts = caps
             .get(contacts::CONTACTS)
             .map(|_| v.get("primaryAccounts").and_then(|p| p.get(contacts::CONTACTS)).and_then(Value::as_str).unwrap_or(account).to_string());
+        // //// Neoffice — the calendars' account likewise (calendars.rs).
+        let calendars = caps
+            .get(calendars::CALENDARS)
+            .map(|_| v.get("primaryAccounts").and_then(|p| p.get(calendars::CALENDARS)).and_then(Value::as_str).unwrap_or(account).to_string());
         Ok(Client {
             api: resolve("apiUrl")?,
             // Templates keep their braces: resolve only the part before them.
@@ -220,8 +228,9 @@ impl<H: Http> Client<H> {
             quota: caps.get(QUOTA).is_some(),
             vacation: caps.get(VACATION).is_some(),
             max_get: usize::try_from(max_get).unwrap_or(500).clamp(1, 1000),
-            // //// Neoffice — the address books' account (contacts.rs).
+            // //// Neoffice — the address books' and the calendars' accounts (contacts.rs, calendars.rs).
             contacts,
+            calendars,
             auth,
             http,
         })
