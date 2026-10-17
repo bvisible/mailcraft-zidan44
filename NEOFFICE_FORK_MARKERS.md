@@ -11,10 +11,10 @@ At the next upstream merge, `grep -rn "////"` in the source plus this file give 
 picture of what is ours and why.
 
 - **Upstream**: `ZIDAN44/mailcraft`, branch `main`.
-- **Base of the divergence**: `b31066a55737572b6ae12954ae9fd7e85d39694f`, upstream's `main` and its tag
-  `v0.13.0-test.8`, merged into `version-15` on 2026-10-17 (the fork was cut on 2026-10-16 from `27e59b9`,
-  `v0.10.0-test.4`). Move it at each upstream merge. The check works it out itself (the common ancestor with
-  upstream's `main`), so this line is for the reader.
+- **Base of the divergence**: `0e1420faa3726daefec8e3b374f4c63d7ce04998`, upstream's `main` (no `v0.14` tag yet),
+  merged into `version-15` on 2026-10-17; before it `b31066a` (`v0.13.0-test.8`), and the fork was cut on 2026-10-16
+  from `27e59b9` (`v0.10.0-test.4`). Move it at each upstream merge. The check works it out itself (the common
+  ancestor with upstream's `main`), so this line is for the reader.
 
 ## What the fork adds
 
@@ -130,8 +130,8 @@ person card, the calendar and the day's agenda read them unchanged.
   show (more than one, or more than a name) are kept from the read and written back as they were. A new
   card carries its own uid, so that the server recognises a create it already made whose answer was lost
   (`alreadyExists` and its `existingId` are taken as that card). A card deleted here is deleted there
-  (`destroy`) where the book lets the person delete its cards (`myRights.mayDelete`, which Neoffice's
-  facade answers from the person's right to delete contacts; elsewhere Delete is greyed with the reason);
+  (`destroy`) where the book lets the person delete its cards (`mayWrite`, narrowed by `mayRemoveItems`, as
+  below; elsewhere Delete is greyed with the reason);
   a deletion the server refuses (a contact linked to documents) is said once, and the card comes back.
   The ids created come back as the cards' addresses (`jmap:<id>`); a refusal is said for its card, which
   stays to be sent, and a call that fails stops neither the others nor the read; when the read itself
@@ -144,8 +144,9 @@ person card, the calendar and the day's agenda read them unchanged.
   window around today (90 days back, a year ahead, or as much of it as the server's
   `maxExpandedQueryDuration` allows, back and ahead in the same proportion), each occurrence of a
   repeating event apart, with its start and end in UTC as the server works them out (`utcStart`,
-  `utcEnd`: MailCraft has no time-zone database). The contacts and the calendars make one sync (`pim_sync`), so that neither home is said to
-  be gone when only the other was read.
+  `utcEnd`: MailCraft has no time-zone database), and its keywords (JSCalendar's `keywords`, where iCalendar's
+  `CATEGORIES` go) as its categories, which upstream's category colours paint in the calendar. The contacts and
+  the calendars make one sync (`pim_sync`), so that neither home is said to be gone when only the other was read.
 - **Paging** (`crates/jmap/src/lib.rs`, `query_rest`, `query_page`): a `/query` is read page after page
   from where each page ends (RFC 8620 §5.5), asking `calculateTotal`, until the total is reached or a page
   comes back empty, following a smaller `limit` the server returns, at most 5000 cards or occurrences and
@@ -171,10 +172,14 @@ person card, the calendar and the day's agenda read them unchanged.
 - **The calendar and address book on this computer stay** while none of the server's can be added to
   (`apply_dav`), and come back where an earlier sync dropped them (`Pim::ensure_defaults`, marked in
   `crates/model/src/pim.rs`), so that new items always have somewhere to go in the desktop app.
-- **The People pane** greys Edit and Delete on a card of a read-only book, with the reason on hover
-  (« Your rights do not let you change this contact »), and says « read-only » under the card, as the
-  calendar list says of its read-only calendars; Delete alone where the book's rights don't allow it
-  (« Your rights do not let you delete this contact »).
+- **Read-only address books are upstream's** since its Exchange public folders (`Session::person_read_only`,
+  the refusals in `update_card` and `delete_card`, People saying « In a shared address book: read-only » in place
+  of Edit and Delete): a JMAP book the person may not write is one of them. Ours is folded into it, marked: a card
+  of a book whose server doesn't let the person delete its cards (`Pim::no_delete_books`) isn't deleted, and
+  People and the ribbon grey Delete with the reason (« Your rights do not let you delete this contact »). A JMAP
+  book's cards may be deleted where the person may write it (`myRights.mayWrite`: RFC 9610 puts destroying cards
+  there, `mayDelete` being about the book itself), unless the server narrows it with a non-standard
+  `mayRemoveItems: false` (Neoffice's facade gives it to someone who may write contacts but not delete them).
 - **Nothing kept, nothing offered**: the browser build with a hosting page's mailboxes keeps nothing
   between visits, so the calendar and the book on this computer would lose what is put there at the next
   reload (`Session::keeps_local_pim`, off there, set in `apps/mailcraft-web/src/web.rs`). There, « New
@@ -184,7 +189,8 @@ person card, the calendar and the day's agenda read them unchanged.
   contacts »; « Your rights do not let you add events » where the server's calendars can't be added to,
   « MailCraft cannot add events yet », which reads « NeoMail » under Neoffice, where there is none); an
   accepted invitation with nowhere to go is answered by mail only, and the calendar on this computer,
-  empty, isn't listed. The desktop app, a browser build that keeps its mail in the browser, and the sample
+  empty, isn't offered (`Session::calendar_listed`: neither in the side pane nor in upstream's side-by-side
+  columns). The desktop app, a browser build that keeps its mail in the browser, and the sample
   mailbox are unchanged.
 - New file `crates/ui-egui/src/read_only.rs` (the reasons and the tests); marked changes in
   `crates/ui-egui/src/lib.rs`, `people.rs`, `calendar.rs` and `reading.rs` (the controls).

@@ -713,24 +713,6 @@ const STRINGS: &[Entry] = &[
     ),
     // //// Neoffice — why a read-only card, or adding with nowhere to add to, is greyed (read_only.rs).
     (
-        "Your rights do not let you change this contact",
-        &[
-            ("es", "Tus permisos no te permiten modificar este contacto"),
-            ("fr", "Vos droits ne vous permettent pas de modifier ce contact"),
-            ("de", "Ihre Berechtigungen erlauben es nicht, diesen Kontakt zu ändern"),
-            ("nl", "Je rechten staan je niet toe om deze contactpersoon te wijzigen"),
-            ("pt-br", "Suas permissões não permitem alterar este contato"),
-            ("it", "I tuoi permessi non ti consentono di modificare questo contatto"),
-            ("ru", "Ваши права доступа не позволяют изменить этот контакт"),
-            ("ja", "お使いの権限では、この連絡先を変更できません"),
-            ("ko", "귀하의 권한으로는 이 연락처를 변경할 수 없습니다"),
-            ("zh-hans", "您的权限不允许修改此联系人"),
-            ("zh-hant", "您的權限不允許修改此連絡人"),
-            ("ar", "صلاحياتك لا تسمح لك بتعديل جهة الاتصال هذه"),
-            ("he", "ההרשאות שלך לא מאפשרות לשנות את איש הקשר הזה"),
-        ],
-    ),
-    (
         "Your rights do not let you add contacts",
         &[
             ("es", "Tus permisos no te permiten añadir contactos"),

@@ -8,8 +8,9 @@
 // unchanged; the browser build, which has no CardDAV, gets its contacts this way. A card made or changed here in one of
 // the server's books goes back first (`ContactCard/set`, whole properties, as many at a time as its `maxObjectsInSet`
 // allows); a book is written to only where the server lets the person write (`myRights.mayWrite`). A card deleted here
-// is deleted there too (`destroy`), where the server lets the person delete its cards (`myRights.mayDelete`, as
-// Neoffice's facade answers it from the person's rights): a refusal is said once, and the card comes back. The note goes
+// is deleted there too (`destroy`), where the person may write the book (`mayWrite`, which covers destroying its cards)
+// and the server doesn't narrow it (a `mayRemoveItems: false`, as Neoffice's facade gives it from the person's rights): a
+// refusal is said once, and the card comes back. The note goes
 // with the rest where the server keeps notes (not Neoffice's, whose contacts have none), and the organizations and titles
 // MailCraft doesn't show (more than one, or more than a name) are kept as they were.
 
@@ -354,11 +355,15 @@ pub fn contacts_sync(books: &[Value], cards: &[Value], now: i64) -> DavSync {
             Some(BookInfo { id, name, read_only: !writes, ctag: String::new() })
         })
         .collect();
-    // Whose cards the person may delete: where the server says so (`myRights.mayDelete`, which Neoffice's facade answers
-    // from the person's right to delete contacts).
+    // Whose cards the person may delete: those of a book they may write (RFC 9610: destroying cards is `mayWrite`'s, while
+    // `mayDelete` is about the book itself), unless the server narrows it with `mayRemoveItems: false` (not in the RFC:
+    // Neoffice's facade says so to someone who may write contacts but not delete them).
     let no_delete_books = list_books
         .iter()
-        .filter(|b| b.get("myRights").and_then(|r| r.get("mayDelete")).and_then(Value::as_bool) != Some(true))
+        .filter(|b| {
+            let right = |key: &str| b.get("myRights").and_then(|r| r.get(key)).and_then(Value::as_bool);
+            right("mayWrite") != Some(true) || right("mayRemoveItems") == Some(false)
+        })
         .filter_map(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
         .collect();
     let mut stored = Vec::new();
@@ -1030,12 +1035,17 @@ mod tests {
 
     #[test]
     fn a_book_says_whether_its_cards_may_be_deleted() {
+        let rights = |id: &str, r: Value| json!({"id": id, "name": id, "myRights": r});
         let books = vec![
-            json!({"id": "B1", "name": "Neoffice", "myRights": {"mayRead": true, "mayWrite": true, "mayDelete": true}}),
-            json!({"id": "B2", "name": "Team", "myRights": {"mayRead": true, "mayWrite": true, "mayDelete": false}}),
-            json!({"id": "B3", "name": "Old"}),
+            // A standard server's default book: the person may write it (and so destroy its cards), not delete the book.
+            rights("B1", json!({"mayRead": true, "mayWrite": true, "mayDelete": false})),
+            // Neoffice's facade, for someone who may write contacts but not delete them.
+            rights("B2", json!({"mayRead": true, "mayWrite": true, "mayDelete": false, "mayRemoveItems": false})),
+            rights("B3", json!({"mayRead": true, "mayWrite": true, "mayRemoveItems": true})),
+            rights("B4", json!({"mayRead": true, "mayWrite": false})),
+            json!({"id": "B5", "name": "Old"}),
         ];
         let sync = contacts_sync(&books, &[], 1);
-        assert_eq!(sync.no_delete_books, vec!["B2", "B3"], "where the server says so; one that says nothing, as before: no");
+        assert_eq!(sync.no_delete_books, vec!["B2", "B4", "B5"], "mayWrite decides, mayRemoveItems narrows it; mayDelete (the book) doesn't count");
     }
 }

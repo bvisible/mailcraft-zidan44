@@ -247,13 +247,7 @@ impl Pim {
         }
     }
 
-    // //// Neoffice — what the engine may not change (session/pim.rs, session/invite.rs): the items of a read-only
-    // calendar or book stay as the server has them.
-    /// Whether the calendar with this id is listed read-only.
-    pub fn calendar_read_only(&self, id: &str) -> bool {
-        self.calendars.iter().any(|c| c.id == id && c.read_only)
-    }
-
+    // //// Neoffice — what isn't sent to a server (jmap's contacts.rs): the cards of a read-only book stay as it has them.
     /// Whether the address book with this id is listed read-only.
     pub fn book_read_only(&self, id: &str) -> bool {
         self.books.iter().any(|b| b.id == id && b.read_only)

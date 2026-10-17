@@ -78,6 +78,20 @@ pub struct Vacation {
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
+    /// Exchange: the reply to people outside the organisation, when it isn't the same as `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<String>,
+    /// Exchange: who outside the organisation gets a reply: `all` (the default, empty), `known`
+    /// (the user's contacts only) or `none`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub outside: String,
+}
+
+impl Vacation {
+    /// The reply to people outside the organisation.
+    pub fn external_text(&self) -> &str {
+        self.external.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// A `YYYY-MM-DD` date that is a real day.
@@ -150,6 +164,9 @@ pub enum Job {
     /// Work offline (every account's connection closed, changes and mail kept to send later), or
     /// connect again.
     WorkOffline { on: bool },
+    /// How much mail is kept on this computer: the newest `messages` of each folder (0: all of
+    /// them), and the newest `offline` of them downloaded in full ahead of reading.
+    SetSync { messages: u32, offline: u32 },
     /// Read the account's automatic replies from the server.
     GetVacation { account: String },
     /// Change them.
@@ -180,7 +197,7 @@ impl Job {
             | Job::SyncDav { account }
             | Job::ImportPst { account, .. }
             | Job::ExportPst { account, .. } => account,
-            Job::FetchUrl { .. } | Job::Discover { .. } | Job::WorkOffline { .. } => "",
+            Job::FetchUrl { .. } | Job::Discover { .. } | Job::WorkOffline { .. } | Job::SetSync { .. } => "",
             Job::SignIn { account } => &account.id,
         }
     }
@@ -281,9 +298,12 @@ pub enum Event {
     OpenUrl {
         url: String,
     },
-    /// An OAuth account is signed in (its token is in the keychain): start it.
+    /// An OAuth account is signed in (its token is in the keychain): start it. `user` is who
+    /// the provider says signed in, when it said.
     SignedIn {
         account: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
     },
     /// How much of the account's space on the server is used and its limit, in bytes (`limit`
     /// 0: no limit published).

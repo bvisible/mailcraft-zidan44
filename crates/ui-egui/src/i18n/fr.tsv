@@ -757,6 +757,53 @@
 	All folders are up to date	Tous les dossiers sont à jour
 	{n} accounts disconnected	{n} comptes déconnectés
 	{account}: {status}	{account} : {status}
+	Sign in with Microsoft	Se connecter avec Microsoft
+	Sign in with Microsoft…	Se connecter avec Microsoft…
+	Mailbox won't open	La boîte aux lettres ne s'ouvre pas
+	The mailbox won't open	La boîte aux lettres ne s'ouvre pas
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph accède à la boîte aux lettres sans IMAP et apporte aussi son calendrier et ses contacts. Le compte repart par ce biais : son courrier est téléchargé depuis le serveur.
+	Turned IMAP on, or picked another account in the browser? Sign in again	Vous avez activé IMAP ou choisi un autre compte dans le navigateur ? Reconnectez-vous
+	Use Microsoft Graph	Utiliser Microsoft Graph
+	A message opened in its own window (double-click) is always marked as read.	Un message ouvert dans sa propre fenêtre (double-clic) est toujours marqué comme lu.
+	Mark messages as read in the reading pane	Marquer les messages comme lus dans le volet de lecture
+	When I choose another message	Quand je choisis un autre message
+	When it's shown, after	Quand il s'affiche, après
+	seconds	secondes
+	Arrange by	Réorganiser par
+	Last changed	Dernière modification
+	Title (A to Z)	Titre (A à Z)
+	Insert signature	Insérer la signature
+	Save and insert	Enregistrer et insérer
+	Signatures…	Signatures…
+	Categories	Catégories
+	1 month	1 mois
+	{n} months	{n} mois
+	Day and week show each calendar in a column of its own	Les vues Jour et Semaine affichent chaque calendrier dans sa propre colonne
+	Drag down to show more months	Faites glisser vers le bas pour afficher plus de mois
+	Hidden: click to show it	Masqué : cliquez pour l'afficher
+	Shown: click to hide it	Affiché : cliquez pour le masquer
+	Side by side	Côte à côte
+	Mail kept on this computer	Courrier conservé sur cet ordinateur
+	Of each folder, keep	De chaque dossier, conserver
+	Download in full for reading offline	Télécharger en entier pour lire hors connexion
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	Le nouveau courrier arrive toujours. Le courrier plus ancien reste sur le serveur ; le reste de chaque message est téléchargé à son ouverture.
+	the newest 1,000	les 1 000 plus récents
+	the newest 40	les 40 plus récents
+	all	tous
+	A different reply for them	Une autre réponse pour eux
+	Inside my organization	Dans mon organisation
+	Outside my organization	Hors de mon organisation
+	Anyone	Tout le monde
+	My contacts only	Mes contacts uniquement
+	No one	Personne
+	In a shared address book: read-only	Dans un carnet d'adresses partagé : lecture seule
+	Click a column to sort by it; right-click to choose the columns	Cliquez sur une colonne pour trier ; clic droit pour choisir les colonnes
+	Columns	Colonnes
+	List	Liste
+	Business phone	Téléphone professionnel
+	Mobile phone	Téléphone mobile
+	Home phone	Téléphone domicile
+	Address book	Carnet d'adresses
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archives

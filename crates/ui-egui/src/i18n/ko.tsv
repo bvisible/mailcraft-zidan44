@@ -756,6 +756,53 @@
 	All folders are up to date	모든 폴더가 최신 상태입니다
 	{n} accounts disconnected	{n}개 계정의 연결이 끊김
 	{account}: {status}	{account}: {status}
+	Sign in with Microsoft	Microsoft로 로그인
+	Sign in with Microsoft…	Microsoft로 로그인…
+	Mailbox won't open	사서함을 열 수 없음
+	The mailbox won't open	사서함을 열 수 없습니다
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph는 IMAP 없이 사서함에 접근하며 일정과 연락처도 가져옵니다. 계정이 Graph를 통해 다시 시작되며 메일은 서버에서 내려받습니다.
+	Turned IMAP on, or picked another account in the browser? Sign in again	IMAP을 켰거나 브라우저에서 다른 계정을 골랐나요? 다시 로그인
+	Use Microsoft Graph	Microsoft Graph 사용
+	A message opened in its own window (double-click) is always marked as read.	별도 창에서 연 메시지(두 번 클릭)는 항상 읽음으로 표시됩니다.
+	Mark messages as read in the reading pane	읽기 창에서 메시지를 읽음으로 표시
+	When I choose another message	다른 메시지를 고를 때
+	When it's shown, after	표시된 후
+	seconds	초
+	Arrange by	정렬 기준
+	Last changed	마지막 변경
+	Title (A to Z)	제목(가나다순)
+	Insert signature	서명 삽입
+	Save and insert	저장 후 삽입
+	Signatures…	서명…
+	Categories	범주
+	1 month	1개월
+	{n} months	{n}개월
+	Day and week show each calendar in a column of its own	일 및 주 보기에서 일정마다 별도 열로 표시
+	Drag down to show more months	아래로 끌면 더 많은 달이 표시됩니다
+	Hidden: click to show it	숨김: 클릭하여 표시
+	Shown: click to hide it	표시됨: 클릭하여 숨기기
+	Side by side	나란히 보기
+	Mail kept on this computer	이 컴퓨터에 보관할 메일
+	Of each folder, keep	각 폴더에서 보관
+	Download in full for reading offline	오프라인으로 읽도록 전체 다운로드
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	새 메일은 항상 들어옵니다. 그보다 오래된 메일은 서버에 남고, 각 메시지의 나머지는 열 때 다운로드됩니다.
+	the newest 1,000	최신 1,000개
+	the newest 40	최신 40개
+	all	모두
+	A different reply for them	그들에게 다른 회신
+	Inside my organization	조직 내부
+	Outside my organization	조직 외부
+	Anyone	모든 사람
+	My contacts only	내 연락처만
+	No one	없음
+	In a shared address book: read-only	공유 주소록: 읽기 전용
+	Click a column to sort by it; right-click to choose the columns	열을 클릭하면 정렬, 오른쪽 클릭하면 열 선택
+	Columns	열
+	List	목록
+	Business phone	회사 전화
+	Mobile phone	휴대폰
+	Home phone	집 전화
+	Address book	주소록
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	보관함

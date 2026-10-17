@@ -170,6 +170,10 @@ pub fn event_of(it: &El) -> Option<CalEvent> {
         organizer: it.child("Organizer").and_then(person),
         attendees,
         status: if it.text_of("IsCancelled") == Some("true") { "CANCELLED".into() } else { String::new() },
+        categories: it
+            .child("Categories")
+            .map(|c| c.children("String").map(|s| s.text.trim().to_string()).filter(|s| !s.is_empty()).take(20).collect())
+            .unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -180,11 +184,19 @@ fn event_fields(e: &CalEvent) -> Vec<(&'static str, String)> {
     let mut f = vec![
         ("Subject", format!("<t:Subject>{}</t:Subject>", esc(&e.summary))),
         ("Body", format!("<t:Body BodyType=\"Text\">{}</t:Body>", esc(&e.description))),
+    ];
+    // Categories come between the item's fields and the appointment's (EWS keeps the schema's
+    // order); none at all is left out (an empty list isn't allowed).
+    if !e.categories.is_empty() {
+        let list: String = e.categories.iter().map(|c| format!("<t:String>{}</t:String>", esc(c))).collect();
+        f.push(("Categories", format!("<t:Categories>{list}</t:Categories>")));
+    }
+    f.extend([
         ("Start", format!("<t:Start>{}</t:Start>", utc(start))),
         ("End", format!("<t:End>{}</t:End>", utc(end))),
         ("IsAllDayEvent", format!("<t:IsAllDayEvent>{}</t:IsAllDayEvent>", e.all_day)),
         ("Location", format!("<t:Location>{}</t:Location>", esc(&e.location))),
-    ];
+    ]);
     if let Some(r) = e.rrule.as_deref().and_then(|r| recurrence_xml(r, e.start)) {
         f.push(("Recurrence", r));
     }
@@ -315,6 +327,9 @@ fn note_xml(n: &Note) -> String {
     )
 }
 
+/// Public contact folders and calendars read, at most.
+const MAX_PUBLIC_PIM: usize = 20;
+
 /// Every item of a distinguished folder, with all its properties (bodies as text).
 fn items(c: &Client, folder: &str) -> Result<Vec<El>> {
     items_in(c, &format!("<t:DistinguishedFolderId Id=\"{folder}\"/>"), if folder == "notes" { NOTE_COLOR } else { "" })
@@ -422,7 +437,7 @@ pub fn sync(c: &Client, pim: &Pim, now: i64) -> Result<DavSync> {
             let mut updates: String = fields
                 .iter()
                 .map(|(name, x)| {
-                    let uri = if *name == "Subject" || *name == "Body" { format!("item:{name}") } else { format!("calendar:{name}") };
+                    let uri = if matches!(*name, "Subject" | "Body" | "Categories") { format!("item:{name}") } else { format!("calendar:{name}") };
                     format!("<t:SetItemField><t:FieldURI FieldURI=\"{uri}\"/><t:CalendarItem>{x}</t:CalendarItem></t:SetItemField>")
                 })
                 .collect();
@@ -520,8 +535,54 @@ pub fn sync(c: &Client, pim: &Pim, now: i64) -> Result<DavSync> {
             out.cards.push(StoredCard { book: CONTACTS.into(), href: format!("contact:{}", card.uid), etag, card, dirty: false });
         }
     }
-    out.books = Some(vec![BookInfo { id: CONTACTS.into(), name: "Contacts".into(), read_only: false, ctag: String::new() }]);
+    let mut books = vec![BookInfo { id: CONTACTS.into(), name: "Contacts".into(), read_only: false, ctag: String::new() }];
     out.synced_books.push(CONTACTS.into());
+    // The organisation's shared contacts and calendars kept as public folders (on-premises
+    // Exchange): read-only, as Outlook shows them under Public Folders. A server without public
+    // folders has none.
+    match c.public_pim_folders() {
+        Ok(list) => {
+            for (n, (id, name, class)) in list.into_iter().take(MAX_PUBLIC_PIM).enumerate() {
+                let key = format!("public:{id}");
+                let folder = format!("<t:FolderId Id=\"{}\"/>", esc(&id));
+                let Ok(found) = items_in(c, &folder, "") else { continue };
+                if class.starts_with("IPF.Contact") {
+                    for it in found {
+                        if let Some(card) = card_of(&it) {
+                            out.cards.push(StoredCard {
+                                book: key.clone(),
+                                href: format!("public:{}", card.uid),
+                                etag: String::new(),
+                                card,
+                                dirty: false,
+                            });
+                        }
+                    }
+                    books.push(BookInfo { id: key.clone(), name, read_only: true, ctag: String::new() });
+                    out.synced_books.push(key);
+                } else {
+                    for it in found {
+                        if let Some(event) = event_of(&it) {
+                            let href = it.child("ItemId").and_then(|i| i.attr("Id")).unwrap_or("").to_string();
+                            out.events.push(StoredEvent { calendar: key.clone(), href, etag: String::new(), event, dirty: false });
+                        }
+                    }
+                    if let Some(cals) = out.calendars.as_mut() {
+                        cals.push(CalendarInfo {
+                            id: key.clone(),
+                            name,
+                            color: u8::try_from((n + 3) % 8).unwrap_or(0),
+                            read_only: true,
+                            ctag: String::new(),
+                        });
+                    }
+                    out.synced_calendars.push(key);
+                }
+            }
+        }
+        Err(e) => log::info!("no public contacts or calendars: {e}"),
+    }
+    out.books = Some(books);
     // Notes (Outlook's sticky notes): what changed here goes up (made again, as contacts are),
     // then the folder is read again. A mailbox without one keeps notes on this computer.
     for n in pim.notes.iter().filter(|n| n.dirty) {
@@ -597,5 +658,20 @@ mod tests {
         );
         assert_eq!(back.phones, card.phones);
         assert_eq!(back.emails, card.emails);
+    }
+
+    /// An appointment's categories come in, and go out between its body and its start (the
+    /// schema's order); none at all aren't written.
+    #[test]
+    fn categories_both_ways() {
+        let xml = "<t:CalendarItem><t:ItemId Id=\"E1\"/><t:Subject>Pitch</t:Subject><t:Categories><t:String>Clients</t:String><t:String> </t:String><t:String>Red category</t:String></t:Categories>\
+                   <t:Start>2026-10-16T10:00:00Z</t:Start><t:End>2026-10-16T11:00:00Z</t:End></t:CalendarItem>";
+        let e = event_of(parse(xml).find("CalendarItem").unwrap()).unwrap();
+        assert_eq!(e.categories, ["Clients", "Red category"]);
+        let names: Vec<&str> = event_fields(&e).iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.get(..4), Some(&["Subject", "Body", "Categories", "Start"][..]));
+        assert!(event_fields(&e).iter().any(|(_, x)| x.contains("<t:String>Red category</t:String>")));
+        let plain = CalEvent { categories: Vec::new(), ..e };
+        assert!(event_fields(&plain).iter().all(|(n, _)| *n != "Categories"));
     }
 }

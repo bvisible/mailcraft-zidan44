@@ -267,7 +267,7 @@ fn info(s: &Session, t: &Tokens, has_files: bool, ui: &mut Ui, b: &mut Backstage
             acts.push(Action::SignInAgain(id.clone()));
         }
         if ui.button(tl!("Signature…")).clicked() {
-            acts.push(Action::Dialog(Dialog::Signature { account: id.clone(), text: a.config.signature.clone() }));
+            acts.push(Action::Dialog(Dialog::Signature { account: id.clone(), text: a.config.signature.clone(), insert: false }));
         }
         ui.separator();
         if ui.button(tl!("Remove account…")).clicked() {
@@ -313,7 +313,9 @@ fn info(s: &Session, t: &Tokens, has_files: bool, ui: &mut Ui, b: &mut Backstage
             VacationState::Loaded(v) => v.clone(),
             _ => Default::default(),
         };
-        acts.push(Action::Dialog(Dialog::vacation(&id, &current)));
+        // Exchange keeps one reply for inside the organisation and one for outside.
+        let exchange = a.config.ews.is_some() || a.config.graph.is_some();
+        acts.push(Action::Dialog(Dialog::vacation(&id, &current, exchange)));
     }
 
     // Mailbox: space used, what this computer keeps, emptying.
@@ -523,9 +525,60 @@ fn options(s: &Session, st: &UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
         check(ui, s.prefs.conversations, "Group messages by conversation", "view.conversations", acts);
         check(ui, s.prefs.show_preview, "Show a line of each message in the list", "view.preview", acts);
         check(ui, s.prefs.compact, "Compact list", "view.compact", acts);
-        check(ui, s.prefs.mark_read_on_open, "Mark messages as read when opened", "view.markReadOnOpen", acts);
+        // When the reading pane marks mail read, as Outlook's Reading Pane options: when shown
+        // (after a wait), once another message is chosen, or not at all (only a message opened
+        // in its own window is then).
+        let mut on = s.prefs.mark_read_on_open;
+        if ui.checkbox(&mut on, tl!("Mark messages as read in the reading pane")).changed() {
+            acts.push(Action::Run("view.readingOptions", json!({"markRead": on})));
+        }
+        ui.add_enabled_ui(on, |ui| {
+            ui.indent("read-when", |ui| {
+                let shown = s.prefs.read_in_pane == mailcraft_engine::ReadInPane::Shown;
+                ui.horizontal(|ui| {
+                    if ui.radio(shown, tl!("When it's shown, after")).clicked() {
+                        acts.push(Action::Run("view.readingOptions", json!({"when": "shown"})));
+                    }
+                    let mut secs = s.prefs.read_after_secs;
+                    if ui.add_enabled(shown, egui::DragValue::new(&mut secs).range(0..=999).speed(0.2)).changed() {
+                        acts.push(Action::Run("view.readingOptions", json!({"after": secs})));
+                    }
+                    ui.label(tl!("seconds"));
+                });
+                if ui.radio(!shown, tl!("When I choose another message")).clicked() {
+                    acts.push(Action::Run("view.readingOptions", json!({"when": "left"})));
+                }
+            });
+        });
+        ui.label(RichText::new(tl!("A message opened in its own window (double-click) is always marked as read.")).color(t.faint).small());
         check(ui, s.prefs.new_mail_window, "Write new messages in a window of their own", "view.newMailWindow", acts);
         check(ui, s.prefs.show_html, "Show HTML mail formatted (otherwise as plain text)", "view.html", acts);
+    });
+    // How much mail is kept on this computer, as Outlook's "Mail to keep offline".
+    group(ui, "Mail kept on this computer", &mut |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tl!("Of each folder, keep"));
+            for (n, label) in [(1000u32, "the newest 1,000"), (5000, "5,000"), (20000, "20,000"), (0, "all")] {
+                if ui.radio(s.prefs.keep_messages == n, tl!(label)).clicked() {
+                    acts.push(Action::Run("account.keepMail", json!({"messages": n})));
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tl!("Download in full for reading offline"));
+            for (n, label) in [(40u32, "the newest 40"), (200, "200"), (1000, "1,000")] {
+                if ui.radio(s.prefs.keep_offline == n, tl!(label)).clicked() {
+                    acts.push(Action::Run("account.keepMail", json!({"offline": n})));
+                }
+            }
+        });
+        ui.label(
+            RichText::new(tl!(
+                "New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened."
+            ))
+            .color(t.faint)
+            .small(),
+        );
     });
     group(ui, "Inbox and notifications", &mut |ui| {
         check(ui, s.prefs.notify, "Show a desktop notification when new mail arrives", "view.notifications", acts);

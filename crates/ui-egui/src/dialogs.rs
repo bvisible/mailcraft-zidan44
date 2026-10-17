@@ -254,20 +254,34 @@ pub struct VacationForm {
     pub dated: bool,
     pub from: String,
     pub until: String,
+    /// Exchange keeps a reply for people inside the organisation and one for those outside.
+    pub exchange: bool,
+    /// Outside gets a reply of its own.
+    pub split: bool,
+    pub external: String,
+    /// Who outside gets one: `all`, `known` or `none`.
+    pub outside: String,
     pub error: Option<String>,
 }
 
 impl VacationForm {
     pub(crate) fn params(&self) -> serde_json::Value {
         let day = |d: &str| if self.dated && !d.trim().is_empty() { json!(d.trim()) } else { serde_json::Value::Null };
-        json!({
+        let mut p = json!({
             "account": self.account,
             "enabled": self.enabled,
             "subject": self.subject.trim(),
             "text": self.text,
             "from": day(&self.from),
             "until": day(&self.until),
-        })
+        });
+        if self.exchange {
+            p["outside"] = json!(self.outside);
+            if self.split && self.outside != "none" {
+                p["external"] = json!(self.external);
+            }
+        }
+        p
     }
 }
 
@@ -375,7 +389,29 @@ fn vacation(ui: &mut Ui, f: &mut VacationForm, t: &Tokens, acts: &mut Vec<Action
         ui.add_space(4.0);
         ui.add_sized([ui.available_width(), 26.0], egui::TextEdit::singleline(&mut f.subject).hint_text(tl!("Subject (optional)")));
         ui.add_space(4.0);
-        ui.add(egui::TextEdit::multiline(&mut f.text).hint_text(tl!("I'm away until…")).desired_rows(6).desired_width(f32::INFINITY));
+        let rows = if f.exchange { 4 } else { 6 };
+        if f.exchange {
+            ui.label(RichText::new(tl!("Inside my organization")).strong().small());
+        }
+        ui.add(egui::TextEdit::multiline(&mut f.text).hint_text(tl!("I'm away until…")).desired_rows(rows).desired_width(f32::INFINITY));
+        // Exchange: who outside the organisation gets a reply, and which (Outlook's two tabs).
+        if f.exchange {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(tl!("Outside my organization")).strong().small());
+                for (code, label) in [("all", "Anyone"), ("known", "My contacts only"), ("none", "No one")] {
+                    ui.radio_value(&mut f.outside, code.to_string(), tl!(label));
+                }
+            });
+            if f.outside != "none" {
+                ui.checkbox(&mut f.split, tl!("A different reply for them"));
+                if f.split {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut f.external).hint_text(tl!("I'm away until…")).desired_rows(rows).desired_width(f32::INFINITY),
+                    );
+                }
+            }
+        }
     });
     if let Some(e) = &f.error {
         ui.add_space(6.0);
@@ -412,9 +448,17 @@ pub enum Dialog {
         account: String,
         email: String,
     },
+    /// Microsoft signed the account in but won't open its mailbox over IMAP: why, and the way out.
+    MailboxClosed {
+        account: String,
+        email: String,
+        error: String,
+    },
     Signature {
         account: String,
         text: String,
+        /// Opened from a message being written: shown over its window, and put into it.
+        insert: bool,
     },
     /// An account's name, user name and servers.
     EditAccount(Box<EditForm>),
@@ -698,7 +742,7 @@ impl Dialog {
 
     /// Dialogs that belong to the message being written (shown in its window when it has one).
     pub fn for_compose(&self) -> bool {
-        matches!(self, Dialog::SelectNames(_) | Dialog::SaveChanges | Dialog::EmptySubject)
+        matches!(self, Dialog::SelectNames(_) | Dialog::SaveChanges | Dialog::EmptySubject | Dialog::Signature { insert: true, .. })
     }
 
     /// The add-account dialog with the address filled in (servers guessed from it).
@@ -792,7 +836,8 @@ impl Dialog {
         }))
     }
 
-    pub fn vacation(account: &str, v: &mailcraft_engine::model::job::Vacation) -> Dialog {
+    /// Automatic replies; `exchange`: the server keeps a reply for outside the organisation too.
+    pub fn vacation(account: &str, v: &mailcraft_engine::model::job::Vacation, exchange: bool) -> Dialog {
         Dialog::Vacation(Box::new(VacationForm {
             account: account.to_string(),
             enabled: v.enabled,
@@ -801,6 +846,10 @@ impl Dialog {
             dated: v.from.is_some() || v.until.is_some(),
             from: v.from.clone().unwrap_or_default(),
             until: v.until.clone().unwrap_or_default(),
+            exchange,
+            split: v.external.is_some(),
+            external: v.external.clone().unwrap_or_default(),
+            outside: if v.outside.is_empty() { "all".into() } else { v.outside.clone() },
             error: None,
         }))
     }
@@ -1121,8 +1170,14 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                     egui::TextEdit::singleline(&mut f.name).hint_text(tl!("Shown on mail you send")).min_size(vec2(300.0, 26.0)).desired_width(300.0),
                 );
                 ui.end_row();
-                // Exchange signs in with Microsoft in the browser.
-                if !f.graph {
+                // Exchange signs in with Microsoft in the browser; so do Outlook.com, Hotmail and
+                // Live, which take no passwords from mail apps (when this copy can sign in there).
+                let browser_only = f.graph
+                    || (!f.jmap
+                        && !f.ews
+                        && mailcraft_engine::model::microsoft_consumer(&f.email)
+                        && s.oauth_available.iter().any(|p| p == "microsoft"));
+                if !browser_only {
                     ui.label(tl!("Password"));
                     ui.add(egui::TextEdit::singleline(&mut f.password).password(true).min_size(vec2(300.0, 26.0)).desired_width(300.0));
                     ui.end_row();
@@ -1367,7 +1422,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                     ui.label(RichText::new(tl!("in your browser: no password stored")).color(t.faint).small());
                 });
             }
-            let ready = !f.graph && !blocked && !f.email.trim().is_empty() && !f.password.is_empty() && (!f.jmap || !f.jmap_url.trim().is_empty());
+            let ready = !f.graph && !consumer && !f.email.trim().is_empty() && !f.password.is_empty() && (!f.jmap || !f.jmap_url.trim().is_empty());
             let (ok, cancel) = buttons(ui, t, "Connect", ready);
             if ok {
                 if !f.jmap && !f.ews && f.imap_host.is_empty() {
@@ -1465,14 +1520,46 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             }
             !cancel
         }
-        Dialog::Signature { account, text } => {
+        Dialog::MailboxClosed { account, email, error } => {
+            ui.set_width(440.0);
+            title(ui, t, "The mailbox won't open");
+            ui.label(RichText::new(email.as_str()).strong());
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new(tl!(error.as_str())).color(t.dim)).wrap());
+            ui.add_space(8.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tl!(
+                        "Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server."
+                    ))
+                    .color(t.faint)
+                    .small(),
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+            if ui.link(RichText::new(tl!("Turned IMAP on, or picked another account in the browser? Sign in again")).small()).clicked() {
+                acts.push(Action::Run("account.signIn", json!({"account": account})));
+                return false;
+            }
+            let (ok, cancel) = buttons(ui, t, "Use Microsoft Graph", true);
+            if ok {
+                acts.push(Action::Run("account.useGraph", json!({"account": account})));
+                return false;
+            }
+            !cancel
+        }
+        Dialog::Signature { account, text, insert } => {
             ui.set_width(420.0);
             title(ui, t, "Signature");
             ui.label(RichText::new(tl!("Added to new messages, replies and forwards.")).color(t.dim).small());
             ui.add(egui::TextEdit::multiline(text).desired_rows(5).desired_width(f32::INFINITY));
-            let (ok, cancel) = buttons(ui, t, "Save", true);
+            let (ok, cancel) = buttons(ui, t, if *insert { "Save and insert" } else { "Save" }, true);
             if ok {
                 acts.push(Action::Run("account.setSignature", json!({"account": account, "signature": text})));
+                if *insert && !text.trim().is_empty() {
+                    acts.push(Action::InsertSignature);
+                }
                 return false;
             }
             !cancel

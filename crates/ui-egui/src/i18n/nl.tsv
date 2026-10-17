@@ -758,3 +758,50 @@ month	May	mei
 	All folders are up to date	Alle mappen zijn bijgewerkt
 	{n} accounts disconnected	{n} accounts niet verbonden
 	{account}: {status}	{account}: {status}
+	Sign in with Microsoft	Aanmelden met Microsoft
+	Sign in with Microsoft…	Aanmelden met Microsoft…
+	Mailbox won't open	Postvak gaat niet open
+	The mailbox won't open	Het postvak gaat niet open
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph bereikt het postvak zonder IMAP en brengt ook de agenda en contactpersonen mee. Het account begint daarmee opnieuw: de e-mail wordt van de server opgehaald.
+	Turned IMAP on, or picked another account in the browser? Sign in again	IMAP aangezet, of in de browser een ander account gekozen? Opnieuw aanmelden
+	Use Microsoft Graph	Microsoft Graph gebruiken
+	A message opened in its own window (double-click) is always marked as read.	Een bericht dat in een eigen venster wordt geopend (dubbelklikken) wordt altijd als gelezen gemarkeerd.
+	Mark messages as read in the reading pane	Berichten in het leesvenster als gelezen markeren
+	When I choose another message	Wanneer ik een ander bericht kies
+	When it's shown, after	Wanneer het wordt getoond, na
+	seconds	seconden
+	Arrange by	Rangschikken op
+	Last changed	Laatst gewijzigd
+	Title (A to Z)	Titel (A tot Z)
+	Insert signature	Handtekening invoegen
+	Save and insert	Opslaan en invoegen
+	Signatures…	Handtekeningen…
+	Categories	Categorieën
+	1 month	1 maand
+	{n} months	{n} maanden
+	Day and week show each calendar in a column of its own	Dag en week tonen elke agenda in een eigen kolom
+	Drag down to show more months	Sleep omlaag om meer maanden te tonen
+	Hidden: click to show it	Verborgen: klik om te tonen
+	Shown: click to hide it	Getoond: klik om te verbergen
+	Side by side	Naast elkaar
+	Mail kept on this computer	E-mail op deze computer bewaard
+	Of each folder, keep	Van elke map bewaren
+	Download in full for reading offline	Volledig downloaden om offline te lezen
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	Nieuwe e-mail komt altijd binnen. Oudere e-mail blijft op de server; de rest van elk bericht wordt bij openen gedownload.
+	the newest 1,000	de nieuwste 1.000
+	the newest 40	de nieuwste 40
+	all	alle
+	A different reply for them	Een ander antwoord voor hen
+	Inside my organization	Binnen mijn organisatie
+	Outside my organization	Buiten mijn organisatie
+	Anyone	Iedereen
+	My contacts only	Alleen mijn contactpersonen
+	No one	Niemand
+	In a shared address book: read-only	In een gedeeld adresboek: alleen-lezen
+	Click a column to sort by it; right-click to choose the columns	Klik op een kolom om erop te sorteren; klik met rechts om de kolommen te kiezen
+	Columns	Kolommen
+	List	Lijst
+	Business phone	Telefoon werk
+	Mobile phone	Mobiele telefoon
+	Home phone	Telefoon thuis
+	Address book	Adresboek

@@ -586,7 +586,7 @@ fn oauth_accounts_sign_in_through_the_browser() {
     }
     s.apply(Event::OpenUrl { url: "https://accounts.google.com/o/oauth2/v2/auth?x".into() });
     assert_eq!(s.open_urls.len(), 1);
-    s.apply(Event::SignedIn { account: id.clone() });
+    s.apply(Event::SignedIn { account: id.clone(), user: None });
     assert!(matches!(s.take_jobs().as_slice(), [Job::Start { password: None, .. }]));
     s.run("account.signIn", &json!({"account": id})).unwrap();
     assert!(matches!(s.take_jobs().as_slice(), [Job::SignIn { .. }]));
@@ -666,7 +666,9 @@ fn web_pictures_load_only_when_asked() {
         mailcraft_model::Summary { key: key(1), subject: "News".into(), date: NOW, ..Default::default() },
         mailcraft_model::Summary { key: key(2), subject: "More".into(), date: NOW - 1, ..Default::default() },
     ];
-    store.save_folder(&id, "INBOX", &mailcraft_store::FolderState { validity: 1, uid_next: 3, highest_modseq: 0, messages: msgs }).unwrap();
+    store
+        .save_folder(&id, "INBOX", &mailcraft_store::FolderState { validity: 1, uid_next: 3, highest_modseq: 0, messages: msgs, window: 0 })
+        .unwrap();
     let html = |n: u32| {
         format!(
             "From: Shop <news@shop.example>\r\nSubject: n\r\nContent-Type: text/html\r\n\r\n<p>Sale</p><img src=\"https://cdn.shop.example/{n}.png\">"
@@ -824,7 +826,9 @@ fn only_mail_that_arrives_later_is_announced() {
         ..Default::default()
     };
     let save = |msgs: Vec<mailcraft_model::Summary>| {
-        store.save_folder(&id, "INBOX", &mailcraft_store::FolderState { validity: 9, uid_next: 99, highest_modseq: 0, messages: msgs }).unwrap();
+        store
+            .save_folder(&id, "INBOX", &mailcraft_store::FolderState { validity: 9, uid_next: 99, highest_modseq: 0, messages: msgs, window: 0 })
+            .unwrap();
     };
     // The first sync's backlog is not news.
     save(vec![m(2, false, 60), m(1, false, 120)]);
@@ -945,6 +949,7 @@ fn remote_accounts_go_through_jobs_and_events() {
         uid_next: 2,
         highest_modseq: 0,
         messages: vec![mailcraft_model::Summary { key: key.clone(), subject: "Hello".into(), date: NOW - 60, ..Default::default() }],
+        window: 0,
     };
     s.store.as_ref().unwrap().save_folder(&id, "INBOX", &st).unwrap();
     s.apply(Event::FolderChanged { account: id.clone(), folder: "INBOX".into() });
@@ -2139,6 +2144,9 @@ fn where_nothing_here_is_kept_new_items_go_to_a_server_s_collection_only() {
     // An invitation with nowhere to keep its event: only the answer goes, by mail.
     let mut s = sample_session("hosted-invite");
     s.keeps_local_pim = false;
+    // Without the sample's studio calendar, its book and calendar are this computer's only.
+    s.pim_mut("sample").calendars.retain(|c| c.id == LOCAL);
+    s.pim_mut("sample").events.retain(|e| e.calendar == LOCAL);
     assert!(!s.can_add_cards() && !s.can_add_events(), "the sample's book and calendar are this computer's");
     s.run("event.delete", &json!({"uid": "mix@sample.mailcraft"})).unwrap();
     let k = s.list.iter().find(|m| m.subject == "Sound mix, version 3").map(|m| m.key.clone()).unwrap();
@@ -2345,10 +2353,322 @@ fn a_card_is_deleted_only_where_the_book_s_rights_allow_it() {
         ..Default::default()
     };
     s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(true)) });
-    assert!(s.run("contact.delete", &json!({"uid": "c1"})).is_err(), "the person's rights don't allow it");
+    assert!(
+        matches!(s.run("contact.delete", &json!({"uid": "c1"})), Err(CmdError::Disabled(m)) if m.contains("rights")),
+        "the person's rights don't allow it"
+    );
     assert!(s.find_person("c1").is_some() && s.pim[&id].deleted.is_empty());
     s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(false)) });
     s.run("contact.delete", &json!({"uid": "c1"})).unwrap();
     assert!(s.find_person("c1").is_none() && s.pim[&id].deleted.iter().any(|t| t.href == "jmap:c1"), "to be deleted on the server");
     done(s);
+}
+
+/// Issue #2: a Hotmail account added with a password (which Microsoft refuses) switches to Sign
+/// in with Microsoft in place, and keeps its mail.
+#[test]
+fn a_microsoft_account_with_a_password_switches_to_microsoft_sign_in() {
+    let store = temp("ms-switch");
+    let mut s = Session::open(Some(store.clone()), mailcraft_model::dates::Clock::new(NOW, 0));
+    s.oauth_available = vec!["microsoft".into()];
+    let id = s.run("account.add", &json!({"email": "zoe@hotmail.com", "password": "old"})).unwrap()["account"].as_str().unwrap().to_string();
+    s.take_jobs();
+    s.apply(Event::Status {
+        account: id.clone(),
+        status: SyncStatus::Error { error: format!("{} (Basic authentication is disabled)", mailcraft_model::MICROSOFT_NO_PASSWORDS) },
+    });
+    assert!(s.notices.last().unwrap().text.contains("Sign in with Microsoft"), "said once, as it comes");
+    let n = s.notices.len();
+    s.apply(Event::Status {
+        account: id.clone(),
+        status: SyncStatus::Error { error: format!("{} (Basic authentication is disabled)", mailcraft_model::MICROSOFT_NO_PASSWORDS) },
+    });
+    assert_eq!(s.notices.len(), n, "not again while it stays so");
+    s.run("account.signIn", &json!({"account": id})).unwrap();
+    match s.take_jobs().as_slice() {
+        [Job::SignIn { account }] => assert_eq!(
+            (account.id.as_str(), account.oauth.as_deref(), account.imap.host.as_str()),
+            (id.as_str(), Some("microsoft"), "outlook.office365.com")
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.account(&id).unwrap().config.oauth.as_deref(), Some("microsoft"));
+    // Who the browser signed in as is kept when it isn't the account's address.
+    s.apply(Event::SignedIn { account: id.clone(), user: Some("Zoe@Outlook.com".into()) });
+    assert_eq!(s.account(&id).unwrap().config.oauth_user.as_deref(), Some("Zoe@Outlook.com"));
+    assert!(matches!(s.take_jobs().as_slice(), [Job::Start { account, password: None }] if account.oauth_user.is_some()));
+    s.apply(Event::SignedIn { account: id.clone(), user: Some("ZOE@hotmail.com".into()) });
+    assert_eq!(s.account(&id).unwrap().config.oauth_user, None, "the same address isn't kept");
+    // Other accounts don't switch; nor does a copy without Microsoft sign-in.
+    let other = s.run("account.add", &json!({"email": "ann@studio.example", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    assert!(s.run("account.signIn", &json!({"account": other})).is_err());
+    let live = s.run("account.add", &json!({"email": "bo@live.com", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    s.oauth_available.clear();
+    assert!(s.run("account.signIn", &json!({"account": live})).is_err());
+    let _ = std::fs::remove_dir_all(store.root());
+}
+
+/// A mailbox Microsoft won't open over IMAP can start again through Microsoft Graph, in the
+/// same place among the accounts.
+#[test]
+fn a_microsoft_account_moves_to_graph() {
+    let store = temp("ms-graph");
+    let mut s = Session::open(Some(store.clone()), mailcraft_model::dates::Clock::new(NOW, 0));
+    s.oauth_available = vec!["microsoft".into()];
+    let first = s.run("account.add", &json!({"email": "ann@studio.example", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    let id = s.run("account.add", &json!({"email": "zoe@hotmail.com", "oauth": "microsoft", "name": "Zoe"})).unwrap()["account"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let last = s.run("account.add", &json!({"email": "bo@studio.example", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    s.run("account.setSignature", &json!({"account": id, "signature": "Zoe x"})).unwrap();
+    s.take_jobs();
+    let closed = format!("{}. Turn on IMAP", mailcraft_model::MICROSOFT_IMAP_CLOSED);
+    s.apply(Event::Status { account: id.clone(), status: SyncStatus::Error { error: closed } });
+    assert!(s.notices.last().unwrap().text.contains("IMAP"));
+    assert!(s.run("account.useGraph", &json!({"account": first})).is_err(), "not a Microsoft account");
+    let new = s.run("account.useGraph", &json!({"account": id})).unwrap()["account"].as_str().unwrap().to_string();
+    let order: Vec<&str> = s.accounts.iter().map(|a| a.config.id.as_str()).collect();
+    assert_eq!(order, [first.as_str(), new.as_str(), last.as_str()]);
+    let c = &s.account(&new).unwrap().config;
+    assert_eq!((c.email.as_str(), c.name.as_str(), c.signature.as_str()), ("zoe@hotmail.com", "Zoe", "Zoe x"));
+    assert_eq!((c.graph.as_deref(), c.oauth.as_deref()), (Some(mailcraft_model::GRAPH_URL), Some("microsoft")));
+    let jobs = s.take_jobs();
+    assert!(jobs.iter().any(|j| matches!(j, Job::Remove { account } if *account == id)));
+    assert!(jobs.iter().any(|j| matches!(j, Job::SignIn { account } if account.id == new && account.graph.is_some())));
+    assert!(s.run("account.useGraph", &json!({"account": new})).is_err(), "already on Graph");
+    let _ = std::fs::remove_dir_all(store.root());
+}
+
+/// Typing in the search box stays quick on a big mailbox: a search after mail changes (which
+/// rebuilds the index) doesn't parse every message again.
+#[test]
+fn searching_a_big_mailbox_stays_quick() {
+    let store = temp("big-search");
+    store.save_accounts(&[mailcraft_model::AccountConfig { id: "a1".into(), email: "me@studio.example".into(), ..Default::default() }]).unwrap();
+    store
+        .save_folders(
+            "a1",
+            &[mailcraft_model::Folder {
+                account: "a1".into(),
+                path: "INBOX".into(),
+                role: FolderRole::Inbox,
+                selectable: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    let mut st = store.load_folder("a1", "INBOX").unwrap();
+    for uid in 1..=3000u32 {
+        let key = mailcraft_model::MessageKey { account: "a1".into(), folder: "INBOX".into(), validity: 1, uid };
+        let html = format!("<html><body><table><tr><td><h1>Report {uid}</h1></td><td>{}</td></tr></table></body></html>", "word ".repeat(400));
+        let raw = format!("From: a@x.example\r\nSubject: Report {uid}\r\nContent-Type: text/html\r\n\r\n{html}\r\n");
+        store.write_body(&key, raw.as_bytes()).unwrap();
+        st.messages.push(mailcraft_model::Summary { key, subject: format!("Report {uid}"), ..Default::default() });
+    }
+    st.messages[1234].subject = "needle here".into();
+    store.save_folder("a1", "INBOX", &st).unwrap();
+    let mut s = Session::open(Some(store.clone()), mailcraft_model::dates::Clock::new(NOW, 0));
+    s.take_jobs();
+    let t = std::time::Instant::now();
+    assert_eq!(s.run("search.run", &json!({"query": "needle"})).unwrap()["results"], 1);
+    let first = t.elapsed();
+    // Mail changes (as a sync does), and the next key is typed: the index is built again.
+    s.open_view(View::Folder { account: "a1".into(), folder: "INBOX".into() });
+    let t = std::time::Instant::now();
+    assert_eq!(s.run("search.run", &json!({"query": "needl"})).unwrap()["results"], 1);
+    let again = t.elapsed();
+    println!("first {first:?}, again {again:?}");
+    assert!(again < first / 2 || again < std::time::Duration::from_millis(300), "first {first:?}, again {again:?}");
+    let _ = std::fs::remove_dir_all(store.root());
+}
+
+/// Issue #1: the reading pane marks mail read as Outlook's Reading Pane options say: when shown
+/// (after a wait), once another message is chosen, or not at all; a message opened in its own
+/// window (a double-click) is always read.
+#[test]
+fn the_reading_pane_marks_mail_read_as_chosen() {
+    let mut s = sample_session("read-options");
+    let unread: Vec<mailcraft_model::MessageKey> = s.list.iter().take(4).map(|m| m.key.clone()).collect();
+    assert_eq!(unread.len(), 4, "the sample has mail");
+    s.selection = unread.clone();
+    s.run("mail.markUnread", &json!({})).unwrap();
+    let seen = |s: &Session, k: &mailcraft_model::MessageKey| s.summary(k).is_some_and(|m| m.flags.seen);
+    // After a wait: not read until its time, and not at all when left before.
+    s.run("view.readingOptions", &json!({"when": "shown", "after": 3})).unwrap();
+    s.open_message(&unread[0]);
+    assert!(!seen(&s, &unread[0]));
+    s.open_message(&unread[1]);
+    s.clock.now += 5;
+    s.tick();
+    assert!(!seen(&s, &unread[0]), "left before its time");
+    s.open_message(&unread[1]);
+    s.clock.now += 3;
+    s.tick();
+    assert!(seen(&s, &unread[1]), "read once shown long enough");
+    // Once another is chosen.
+    s.run("view.readingOptions", &json!({"when": "left"})).unwrap();
+    s.open_message(&unread[2]);
+    assert!(!seen(&s, &unread[2]));
+    s.open_message(&unread[3]);
+    assert!(seen(&s, &unread[2]) && !seen(&s, &unread[3]));
+    // Not in the pane at all: only a double-click (its own window) marks it.
+    s.run("view.readingOptions", &json!({"markRead": false})).unwrap();
+    s.open_message(&unread[0]);
+    assert!(!seen(&s, &unread[0]));
+    s.run("message.popOut", &json!({"key": unread[0].to_id()})).unwrap();
+    assert!(seen(&s, &unread[0]), "opened in its own window");
+    assert!(s.run("view.readingOptions", &json!({"when": "sometime"})).is_err());
+    let back: crate::Prefs = serde_json::from_value(json!({"markReadOnOpen": false})).unwrap();
+    assert_eq!(
+        (back.mark_read_on_open, back.read_in_pane, back.read_after_secs),
+        (false, crate::ReadInPane::Shown, 0),
+        "older settings read as before"
+    );
+}
+
+/// Issue #1: notes sort A to Z (by their first line), by colour, or the last changed first.
+#[test]
+fn notes_can_be_arranged() {
+    let mut s = sample_session("notes-order");
+    for (text, color) in [("banana bread", 3), ("Apple pie\nwith cream", 1), ("cherry jam", 1)] {
+        s.run("note.create", &json!({"text": text, "color": color})).unwrap();
+    }
+    let titles = |s: &Session| {
+        s.notes("")
+            .iter()
+            .filter(|n| ["Apple", "banana", "cherry"].iter().any(|w| n.note.text.starts_with(w)))
+            .map(|n| n.note.text.lines().next().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+    s.run("note.arrange", &json!({"by": "title"})).unwrap();
+    assert_eq!(titles(&s), ["Apple pie", "banana bread", "cherry jam"]);
+    s.run("note.arrange", &json!({"by": "color"})).unwrap();
+    assert_eq!(titles(&s), ["Apple pie", "cherry jam", "banana bread"]);
+    assert!(s.run("note.arrange", &json!({"by": "size"})).is_err());
+}
+
+/// Issue #1: a signature goes into the message being written from the message itself.
+#[test]
+fn a_signature_goes_in_from_the_message() {
+    let mut s = sample_session("insert-signature");
+    s.run("account.setSignature", &json!({"account": "sample", "signature": ""})).unwrap();
+    s.run("mail.new", &json!({})).unwrap();
+    s.compose.as_mut().unwrap().body = "Hello there".into();
+    assert!(s.run("compose.insertSignature", &json!({})).is_err(), "no signature yet");
+    s.run("account.setSignature", &json!({"account": "sample", "signature": "Riley\nStudio"})).unwrap();
+    let r = s.run("compose.insertSignature", &json!({"at": 5})).unwrap();
+    assert_eq!(s.compose.as_ref().unwrap().body, "Hello\n-- \nRiley\nStudio\n there");
+    assert_eq!(r["end"], 23);
+    // One already there is replaced, wherever the cursor is.
+    s.run("account.setSignature", &json!({"account": "sample", "signature": "R."})).unwrap();
+    s.run("compose.insertSignature", &json!({"at": 9999})).unwrap();
+    assert_eq!(s.compose.as_ref().unwrap().body, "Hello\n-- \nR.\n there");
+    // A reply made with the old signature: that one is replaced.
+    let c = s.compose.as_mut().unwrap();
+    c.body = "Hi\n\n-- \nOld\n\n> quoted".into();
+    c.signature = "-- \nOld".into();
+    s.run("compose.insertSignature", &json!({})).unwrap();
+    assert_eq!(s.compose.as_ref().unwrap().body, "Hi\n\n-- \nR.\n\n> quoted");
+}
+
+/// Issue #1: events are drawn in their category's colour (shared with mail's categories), so a
+/// calendar isn't all one colour.
+#[test]
+fn events_take_their_categorys_colour() {
+    let mut s = sample_session("event-colours");
+    s.run("category.create", &json!({"name": "Clients", "color": 5})).unwrap();
+    let mut add = |summary: &str, categories: Value| {
+        s.run("event.create", &json!({"summary": summary, "start": "2026-10-16T10:00", "categories": categories})).unwrap();
+    };
+    add("Pitch", json!(["clients"]));
+    add("Mix", json!("Studio, Clients"));
+    add("Plain", json!([]));
+    let day = mailcraft_engine_day(&s);
+    let item = |name: &str| s.agenda(day, day + 86_400).into_iter().find(|i| i.summary == name).unwrap();
+    assert_eq!(item("Pitch").category, Some(5), "a category's own colour, whatever its case");
+    let studio = item("Mix").category.unwrap();
+    assert_eq!(studio, s.category_color_of("Studio"), "the first category; one from elsewhere gets one from its name");
+    assert_eq!(s.category_color_of("Studio"), s.category_color_of(" studio "));
+    assert_eq!(item("Plain").category, None, "no category: its calendar's colour");
+    let (_, stored) = s.find_event(&item("Mix").uid).unwrap();
+    assert_eq!(stored.event.categories, ["Studio", "Clients"]);
+}
+
+/// The start of 2026-10-16, local, as the sample's clock has it.
+fn mailcraft_engine_day(s: &Session) -> i64 {
+    crate::parse_local("2026-10-16", i64::from(s.clock.offset)).map(|(t, _)| t).unwrap()
+}
+
+/// Issue #1: calendars can be hidden (Outlook's ticks) and shown side by side, and the side
+/// pane can show several months; all kept with the settings.
+#[test]
+fn calendars_can_be_hidden_and_shown_side_by_side() {
+    let mut s = sample_session("calendar-views");
+    let studio = crate::sample::STUDIO_CALENDAR;
+    let names = |s: &Session| s.shown_calendars().into_iter().map(|c| c.1).collect::<Vec<_>>();
+    assert_eq!(names(&s), [mailcraft_model::pim::LOCAL, studio]);
+    let (from, to) = (s.clock.now - 7 * 86_400, s.clock.now + 7 * 86_400);
+    let in_studio = |s: &Session| s.agenda(from, to).iter().filter(|i| i.calendar == studio).count();
+    assert_eq!(in_studio(&s), 2);
+    s.run("calendar.show", &json!({"account": "sample", "calendar": studio})).unwrap();
+    assert_eq!(names(&s), [mailcraft_model::pim::LOCAL]);
+    assert_eq!(in_studio(&s), 0, "a hidden calendar's events aren't shown");
+    assert!(s.agenda(from, to).iter().any(|i| i.summary == "Lunch with Jun"));
+    s.run("calendar.show", &json!({"account": "sample", "calendar": studio, "shown": true})).unwrap();
+    assert_eq!(in_studio(&s), 2);
+    assert!(s.run("calendar.show", &json!({"account": "sample", "calendar": "nope"})).is_err());
+    s.run("calendar.sideBySide", &json!({})).unwrap();
+    assert!(s.prefs.calendars_side_by_side);
+    s.run("calendar.months", &json!({"count": 9})).unwrap();
+    assert_eq!(s.prefs.calendar_months, 6, "at most six");
+    s.run("calendar.show", &json!({"account": "sample", "calendar": studio, "shown": false})).unwrap();
+    let back: crate::Prefs = serde_json::from_value(serde_json::to_value(&s.prefs).unwrap()).unwrap();
+    assert_eq!((back.calendars_side_by_side, back.calendar_months, back.hidden_calendars.len()), (true, 6, 1));
+    // The sample's events in categories take their colours.
+    let edit = s.agenda(from, to).into_iter().find(|i| i.summary == "Lunch with Jun").unwrap();
+    assert_eq!(edit.category, Some(s.category_color_of("Personal")));
+}
+
+/// Issue #1: how much mail is kept on this computer is a setting (Outlook's "Mail to keep
+/// offline"), told to the network side ahead of anything queued.
+#[test]
+fn how_much_mail_is_kept_is_a_setting() {
+    let mut s = sample_session("keep-mail");
+    assert_eq!((s.prefs.keep_messages, s.prefs.keep_offline), (1000, 40));
+    s.jobs_push_for_test(Job::SyncAll { account: "sample".into() });
+    s.run("account.keepMail", &json!({"messages": 0, "offline": 200})).unwrap();
+    let jobs = s.take_jobs();
+    assert!(matches!(jobs.first(), Some(Job::SetSync { messages: 0, offline: 200 })), "{jobs:?}");
+    s.run("account.keepMail", &json!({"messages": 5000})).unwrap();
+    s.run("account.keepMail", &json!({"messages": 20000})).unwrap();
+    let jobs = s.take_jobs();
+    assert_eq!(jobs.iter().filter(|j| matches!(j, Job::SetSync { .. })).count(), 1, "the last one only");
+    assert!(matches!(jobs.first(), Some(Job::SetSync { messages: 20000, offline: 200 })));
+}
+
+/// Issue #1: an organisation's shared contacts (Exchange public folders) can be read, not
+/// changed or deleted.
+#[test]
+fn shared_contacts_are_read_only() {
+    use mailcraft_model::pim::{BookInfo, DavSync, StoredCard};
+    let mut s = sample_session("shared-contacts");
+    let card = mailcraft_model::vcard::Card { uid: "desk".into(), name: "Front desk".into(), ..Default::default() };
+    let mut books = s.pim.get("sample").unwrap().books.clone();
+    books.push(BookInfo { id: "public:pc".into(), name: "Company contacts".into(), read_only: true, ctag: String::new() });
+    let sync = DavSync {
+        books: Some(books),
+        cards: vec![StoredCard { book: "public:pc".into(), href: "public:desk".into(), card, ..Default::default() }],
+        synced_books: vec!["public:pc".into()],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: "sample".into(), sync: Box::new(sync) });
+    assert!(s.find_person("desk").is_some(), "shown with the others");
+    assert!(s.person_read_only("desk"));
+    assert!(s.run("contact.update", &json!({"uid": "desk", "name": "Reception"})).is_err());
+    assert!(s.run("contact.delete", &json!({"uid": "desk"})).is_err());
+    assert!(s.find_person("desk").is_some());
+    // New contacts go to a book that can take them.
+    let made = s.run("contact.create", &json!({"name": "New one"})).unwrap();
+    assert!(!s.person_read_only(made["uid"].as_str().unwrap()));
 }

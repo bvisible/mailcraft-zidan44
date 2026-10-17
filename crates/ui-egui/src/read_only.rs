@@ -1,29 +1,21 @@
 // //// Neoffice — added file (no upstream equivalent): what the People pane and the calendar don't offer, and why.
 
-//! What can't be done to a person, or added at all, and the reason the greyed control gives on hover:
-//! - a card in a read-only address book (a server's the person's rights don't let them write) is neither edited nor
-//!   deleted, as the event form keeps a read-only event as it is;
+//! What can't be done to a person, or added at all, and the reason the greyed control gives on hover (a card in a
+//! read-only address book is upstream's: `Session::person_read_only`, and People says so in place of Edit and Delete):
+//! - a card of a book whose server doesn't let the person delete its cards (a JMAP book's rights) isn't deleted;
 //! - « New contact », « Add sender to contacts » and « New event » need somewhere to go: a writable book or calendar, and
 //!   the one on this computer only where it is kept (not in the browser build with a hosting page's mailboxes, which
 //!   keeps nothing between visits: `Session::keeps_local_pim`). The native app always has its own.
-//! - A card is deleted only where its server lets the person delete its cards (JMAP `myRights.mayDelete`, which Neoffice's
-//!   facade answers from the person's rights); in the browser build with a hosting page's mailboxes, Neoffice's cards keep
-//!   no notes, and the calendar on this computer, empty and where nothing can be put, isn't listed.
+//! - in the browser build with a hosting page's mailboxes, Neoffice's cards keep no notes, and the calendar on this
+//!   computer, empty and where nothing can be put, isn't listed.
 
-use mailcraft_engine::model::pim::{CalendarInfo, LOCAL, Pim};
+use mailcraft_engine::model::pim::LOCAL;
 use mailcraft_engine::{Person, Session};
 
-/// Why this person's card can't be edited or deleted, if so: its address book is read-only.
-pub fn locked(s: &Session, p: &Person) -> Option<&'static str> {
-    s.pim.get(&p.account).is_some_and(|pim| pim.book_read_only(&p.book)).then(|| tl!("Your rights do not let you change this contact"))
-}
-
-/// Why this person's card can't be deleted, if so: its book is read-only, or its server doesn't let the person delete
-/// its cards (`Pim::no_delete_books`).
+/// Why this person's card can't be deleted, if so: its server doesn't let the person delete its book's cards
+/// (`Pim::no_delete_books`; one in a read-only book has neither Edit nor Delete).
 pub fn no_delete(s: &Session, p: &Person) -> Option<&'static str> {
-    locked(s, p).or_else(|| {
-        s.pim.get(&p.account).is_some_and(|pim| pim.no_delete_books.contains(&p.book)).then(|| tl!("Your rights do not let you delete this contact"))
-    })
+    s.pim.get(&p.account).is_some_and(|pim| pim.no_delete_books.contains(&p.book)).then(|| tl!("Your rights do not let you delete this contact"))
 }
 
 /// Why the contact form's notes can't be written, if so: in the browser build with a hosting page's mailboxes, the card
@@ -34,12 +26,6 @@ pub fn no_notes(s: &Session, uid: Option<&str>) -> Option<&'static str> {
         None => s.new_card_target(None).map(|(_, book)| book),
     };
     (!s.keeps_local_pim && book.is_some_and(|b| b != LOCAL)).then(|| tl!("Neoffice keeps no notes on contacts"))
-}
-
-/// Whether the calendar list shows this calendar: not the one on this computer, empty, where nothing can be put (the
-/// browser build with a hosting page's mailboxes); one holding events from before stays.
-pub fn listed(s: &Session, p: &Pim, c: &CalendarInfo) -> bool {
-    s.keeps_local_pim || c.id != LOCAL || p.events.iter().any(|e| e.calendar == LOCAL)
 }
 
 /// Why no contact can be added, if so (with no account at all, the controls are greyed already).
@@ -160,22 +146,20 @@ mod tests {
         app.run("view.module", json!({"name": "people"}));
         app.ui.person = Some("c1".into());
         let shown = f.run(&mut app, vec![]);
-        assert!(shown.iter().any(|(t, _)| t == "read-only"), "the card says so");
+        // As upstream shows a card of a shared address book: said, with neither Edit nor Delete on it.
+        assert!(shown.iter().any(|(t, _)| t == "In a shared address book: read-only"), "the card says so");
         let (edits, deletes) = (at(&shown, "Edit"), at(&shown, "Delete"));
-        assert_eq!((edits.len(), deletes.len()), (2, 2), "the ribbon's and the card's");
+        assert_eq!((edits.len(), deletes.len()), (1, 1), "the ribbon's only");
         for spot in edits.iter().chain(&deletes) {
             f.click(&mut app, *spot);
             assert!(app.ui.dialog.is_none(), "no form for a read-only card");
         }
         assert!(app.session.find_person("c1").is_some(), "not deleted");
-        for spot in [edits[1], deletes[0]] {
-            assert!(f.hovered(&mut app, spot).iter().any(|t| t == "Your rights do not let you change this contact"), "why, on hover");
-        }
 
         // A card of the book here is edited as before.
         app.ui.person = app.session.people("").into_iter().find(|p| p.book == LOCAL).map(|p| p.card.uid);
         let shown = f.run(&mut app, vec![]);
-        assert!(!shown.iter().any(|(t, _)| t == "read-only"));
+        assert!(!shown.iter().any(|(t, _)| t == "In a shared address book: read-only"));
         f.click(&mut app, at(&shown, "Edit")[1]);
         assert!(matches!(app.ui.dialog, Some(Dialog::Contact(_))), "the form opens");
     }
@@ -224,6 +208,7 @@ mod tests {
         assert_eq!(listed(&mut f, &mut app), with, "the sample's calendar holds events: still listed");
         app.session.pim_mut("sample").events.clear();
         assert_eq!(listed(&mut f, &mut app), with - 1, "empty: not listed");
+        assert!(app.session.shown_calendars().iter().all(|(_, c, _, _)| c != LOCAL), "nor given a column of its own side by side");
     }
 
     #[test]
@@ -232,6 +217,9 @@ mod tests {
         // page), there is nowhere to add a contact or an event.
         let (mut app, mut f) = sample_app();
         app.session.keeps_local_pim = false;
+        // Without the sample's studio calendar.
+        app.session.pim_mut("sample").calendars.retain(|c| c.id == LOCAL);
+        app.session.pim_mut("sample").events.retain(|e| e.calendar == LOCAL);
         for (module, button, why) in
             [("people", "New contact", "Your rights do not let you add contacts"), ("calendar", "New event", "MailCraft cannot add events yet")]
         {

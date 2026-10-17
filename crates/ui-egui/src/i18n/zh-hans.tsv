@@ -759,3 +759,50 @@ month	May	5月
 	All folders are up to date	所有文件夹都是最新的
 	{n} accounts disconnected	{n} 个帐户已断开连接
 	{account}: {status}	{account}:{status}
+	Sign in with Microsoft	使用 Microsoft 登录
+	Sign in with Microsoft…	使用 Microsoft 登录…
+	Mailbox won't open	邮箱无法打开
+	The mailbox won't open	邮箱无法打开
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph 不经 IMAP 即可访问邮箱，还会同步日历和联系人。账户将通过它重新开始：邮件会从服务器下载。
+	Turned IMAP on, or picked another account in the browser? Sign in again	已开启 IMAP，或在浏览器中选了别的账户？重新登录
+	Use Microsoft Graph	使用 Microsoft Graph
+	A message opened in its own window (double-click) is always marked as read.	在单独窗口中打开的邮件（双击）总是标为已读。
+	Mark messages as read in the reading pane	在阅读窗格中将邮件标为已读
+	When I choose another message	当我选择其他邮件时
+	When it's shown, after	显示后，经过
+	seconds	秒
+	Arrange by	排列方式
+	Last changed	最近更改
+	Title (A to Z)	标题（A 到 Z）
+	Insert signature	插入签名
+	Save and insert	保存并插入
+	Signatures…	签名…
+	Categories	类别
+	1 month	1 个月
+	{n} months	{n} 个月
+	Day and week show each calendar in a column of its own	日视图和周视图中每个日历各占一列
+	Drag down to show more months	向下拖动以显示更多月份
+	Hidden: click to show it	已隐藏：单击以显示
+	Shown: click to hide it	已显示：单击以隐藏
+	Side by side	并排
+	Mail kept on this computer	保存在此电脑上的邮件
+	Of each folder, keep	每个文件夹保留
+	Download in full for reading offline	完整下载以便脱机阅读
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	新邮件总会收到。更早的邮件留在服务器上；每封邮件的其余部分在打开时下载。
+	the newest 1,000	最新 1,000 封
+	the newest 40	最新 40 封
+	all	全部
+	A different reply for them	为他们使用另一条回复
+	Inside my organization	组织内部
+	Outside my organization	组织外部
+	Anyone	任何人
+	My contacts only	仅我的联系人
+	No one	不回复任何人
+	In a shared address book: read-only	在共享通讯簿中：只读
+	Click a column to sort by it; right-click to choose the columns	单击列以排序；右键单击以选择列
+	Columns	列
+	List	列表
+	Business phone	商务电话
+	Mobile phone	移动电话
+	Home phone	住宅电话
+	Address book	通讯簿

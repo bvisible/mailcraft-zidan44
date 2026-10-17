@@ -158,6 +158,31 @@ pub enum ReadingPane {
     Off,
 }
 
+/// How notes are listed (Outlook's Arrange by for notes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotesOrder {
+    /// The last changed first.
+    #[default]
+    Modified,
+    /// A to Z by their first line.
+    Title,
+    /// By colour, then A to Z.
+    Color,
+}
+
+/// When a message shown in the reading pane is marked read (with `Prefs::mark_read_on_open`),
+/// as Outlook's Reading Pane options have it. Opened in its own window, it always is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReadInPane {
+    /// When it's shown (after `Prefs::read_after_secs`).
+    #[default]
+    Shown,
+    /// When another message is chosen (or the folder left).
+    Left,
+}
+
 /// Settings the user changes from the View tab (saved by the app).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -165,7 +190,25 @@ pub struct Prefs {
     pub reading_pane: ReadingPane,
     /// Group the list by conversation.
     pub conversations: bool,
+    /// Mark messages read in the reading pane at all (when off, only opening one in its own
+    /// window does).
     pub mark_read_on_open: bool,
+    pub read_in_pane: ReadInPane,
+    pub notes_order: NotesOrder,
+    /// Calendars left out of the calendar (`account/calendar id`), as Outlook's unticked ones.
+    pub hidden_calendars: BTreeSet<String>,
+    /// Day and week show each calendar in a column of its own (Outlook's side-by-side view)
+    /// rather than all of them together.
+    pub calendars_side_by_side: bool,
+    /// Months shown one under another in the calendar's side pane (1 to 6).
+    pub calendar_months: u8,
+    /// The newest messages of each folder kept on this computer (0: all of them), as Outlook's
+    /// "Mail to keep offline".
+    pub keep_messages: u32,
+    /// Of those, the newest downloaded in full ahead of reading (the rest when opened).
+    pub keep_offline: u32,
+    /// With `ReadInPane::Shown`: after it's been shown this many seconds (0: at once).
+    pub read_after_secs: u32,
     /// Show the first line of text under each message.
     pub show_preview: bool,
     /// Tighter rows.
@@ -343,6 +386,14 @@ impl Default for Prefs {
             reading_pane: ReadingPane::Right,
             conversations: false,
             mark_read_on_open: true,
+            read_in_pane: ReadInPane::Shown,
+            notes_order: NotesOrder::Modified,
+            hidden_calendars: BTreeSet::new(),
+            calendars_side_by_side: false,
+            calendar_months: 1,
+            keep_messages: 1000,
+            keep_offline: 40,
+            read_after_secs: 0,
             show_preview: true,
             compact: false,
             confirm_permanent_delete: true,
@@ -395,6 +446,10 @@ pub struct Reading {
 pub struct Compose {
     pub id: u64,
     pub account: String,
+    /// The signature in the text as it was put there (`-- ` and the signature): replaced when
+    /// another goes in, while it's still there unchanged.
+    #[serde(default)]
+    pub signature: String,
     pub to: String,
     pub cc: String,
     pub bcc: String,
@@ -475,7 +530,7 @@ pub struct Notice {
 struct SearchIndex {
     index: Index,
     keys: Vec<MessageKey>,
-    bodies: HashMap<MessageKey, String>,
+    bodies: HashMap<MessageKey, Arc<str>>,
     scope: SearchScope,
     view: View,
 }
@@ -552,6 +607,14 @@ pub struct Session {
     /// The local day the calendar shows (`None`: today).
     pub cal_day: Option<i64>,
     index: Option<SearchIndex>,
+    /// The message in the reading pane to mark read, and when (`ReadInPane::Shown` with a wait).
+    read_due: Option<(MessageKey, i64)>,
+    /// The message to mark read once another is chosen (`ReadInPane::Left`).
+    read_on_leave: Option<MessageKey>,
+    /// Each downloaded message's words for search (its text and attachment names), read from
+    /// the cache once: the index is rebuilt whenever mail changes, and parsing every message
+    /// again each time made typing in the search box hang.
+    body_words: HashMap<MessageKey, Arc<str>>,
     registry: Arc<Registry>,
     next_id: u64,
     seed: u64,
@@ -607,6 +670,9 @@ impl Session {
             cal_mode: pim::CalMode::Week,
             cal_day: None,
             index: None,
+            read_due: None,
+            read_on_leave: None,
+            body_words: HashMap::new(),
             registry: Arc::new(crate::cmd::registry()),
             // Compose ids also name Outbox entries, which outlive a session: start from the clock.
             next_id: u64::try_from(clock.now.max(0)).unwrap_or(0).saturating_mul(1000),
@@ -1063,11 +1129,51 @@ impl Session {
         self.selection.clear();
         self.focus = None;
         self.reading = None;
+        self.leave_reading(None);
         self.refresh_list();
     }
 
-    /// Select one message and show it in the reading pane.
+    /// Mark a message read (when it's there and isn't yet).
+    fn mark_seen(&mut self, key: &MessageKey) {
+        if key.folder != OUTBOX && self.summary(key).is_some_and(|m| !m.flags.seen) {
+            self.apply_op(&key.account.clone(), Op::SetFlag { keys: vec![key.clone()], flag: Flag::Seen, on: true });
+        }
+    }
+
+    /// The reading pane moves on from what it showed (to `next`, or to nothing): one waiting for
+    /// that is marked read now, and one waiting for its time no longer is.
+    fn leave_reading(&mut self, next: Option<&MessageKey>) {
+        if self.read_due.as_ref().is_some_and(|(k, _)| Some(k) != next) {
+            self.read_due = None;
+        }
+        if let Some(prev) = self.read_on_leave.take() {
+            if Some(&prev) == next {
+                self.read_on_leave = Some(prev);
+            } else {
+                self.mark_seen(&prev);
+            }
+        }
+    }
+
+    /// A message waiting in the reading pane for its time to be marked read, once it's come.
+    pub(crate) fn read_when_due(&mut self) {
+        let Some((key, at)) = self.read_due.clone() else { return };
+        if self.clock.now >= at {
+            self.read_due = None;
+            if self.reading.as_ref().is_some_and(|r| r.key == key) {
+                self.mark_seen(&key);
+            }
+        }
+    }
+
+    /// Select one message and show it in the reading pane (marked read as the options say).
     pub fn open_message(&mut self, key: &MessageKey) {
+        self.show_message(key, true);
+    }
+
+    /// Select one message and show it; `mark`: as the reading options say (else left as it is).
+    fn show_message(&mut self, key: &MessageKey, mark: bool) {
+        self.leave_reading(Some(key));
         self.selection = vec![key.clone()];
         self.focus = Some(key.clone());
         let thread = self.thread_of(key);
@@ -1081,8 +1187,13 @@ impl Session {
             Some(raw) => self.show_body(key, &raw),
             None => self.jobs.push(Job::FetchBody { key: key.clone() }),
         }
-        if self.prefs.mark_read_on_open && key.folder != OUTBOX && self.summary(key).is_some_and(|m| !m.flags.seen) {
-            self.apply_op(&key.account.clone(), Op::SetFlag { keys: vec![key.clone()], flag: Flag::Seen, on: true });
+        let unread = key.folder != OUTBOX && self.summary(key).is_some_and(|m| !m.flags.seen);
+        if mark && unread && self.prefs.mark_read_on_open {
+            match (self.prefs.read_in_pane, self.prefs.read_after_secs) {
+                (ReadInPane::Shown, 0) => self.mark_seen(key),
+                (ReadInPane::Shown, secs) => self.read_due = Some((key.clone(), self.clock.now.saturating_add(i64::from(secs.min(3600))))),
+                (ReadInPane::Left, _) => self.read_on_leave = Some(key.clone()),
+            }
         }
     }
 
@@ -1107,9 +1218,8 @@ impl Session {
                 None => self.jobs.push(Job::FetchBody { key: key.clone() }),
             }
             self.windows.push(w);
-            if self.prefs.mark_read_on_open && key.folder != OUTBOX && self.summary(key).is_some_and(|m| !m.flags.seen) {
-                self.apply_op(&key.account.clone(), Op::SetFlag { keys: vec![key.clone()], flag: Flag::Seen, on: true });
-            }
+            // Opened on its own (a double-click): read, whatever the reading pane does.
+            self.mark_seen(key);
         }
         Ok(serde_json::json!({"key": key.to_id(), "windows": self.windows.len()}))
     }
@@ -1123,14 +1233,32 @@ impl Session {
             w.parsed = mime::parse(raw);
             w.error = w.parsed.is_none().then(|| "this message could not be read".to_string());
         }
-        let parsed = mime::parse(raw);
+        // Only the open message is laid out (bodies downloaded ahead aren't, each costing time).
         if let Some(r) = self.reading.as_mut()
             && &r.key == key
         {
+            let parsed = mime::parse(raw);
             r.error = if parsed.is_none() { Some("this message could not be read".into()) } else { None };
             r.parsed = parsed;
         }
         self.request_pictures();
+    }
+
+    /// A body that came in joins the search index there is (rather than throwing it away).
+    fn index_body(&mut self, key: &MessageKey, raw: &[u8]) {
+        // No index yet: read when one is built (downloading ahead costs nothing extra then).
+        if self.index.is_none() {
+            return;
+        }
+        let words: Arc<str> = Arc::from(mime::search_text(raw));
+        self.body_words.insert(key.clone(), words.clone());
+        if let Some(ix) = self.index.as_mut()
+            && let Some(doc) = ix.keys.iter().position(|k| k == key)
+            && !ix.bodies.contains_key(key)
+        {
+            ix.index.add(u32::try_from(doc).unwrap_or(u32::MAX), &words);
+            ix.bodies.insert(key.clone(), words);
+        }
     }
 
     // ----- pictures from the web -----
@@ -1748,10 +1876,7 @@ impl Session {
             && self.list.iter().any(|m| m.key == k)
         {
             // Show the next message, but don't mark it read just because something was deleted.
-            let mark = self.prefs.mark_read_on_open;
-            self.prefs.mark_read_on_open = false;
-            self.open_message(&k);
-            self.prefs.mark_read_on_open = mark;
+            self.show_message(&k, false);
         }
     }
 
@@ -1877,20 +2002,28 @@ impl Session {
             for m in msgs {
                 let doc = u32::try_from(keys.len()).unwrap_or(u32::MAX);
                 index.add(doc, &summary_text(&m));
-                if let Some(raw) = self.store.as_ref().and_then(|s| s.read_body(&m.key))
-                    && let Some(p) = mime::parse(&raw)
-                {
-                    let text: String = p.text.chars().take(50_000).collect();
-                    index.add(doc, &text);
-                    for att in &p.attachments {
-                        index.add(doc, &att.name);
-                    }
-                    bodies.insert(m.key.clone(), text);
+                if let Some(words) = self.words_of(&m.key) {
+                    index.add(doc, &words);
+                    bodies.insert(m.key.clone(), words);
                 }
                 keys.push(m.key);
             }
         }
         self.index = Some(SearchIndex { index, keys, bodies, scope, view: self.view.clone() });
+    }
+
+    /// A downloaded message's words for search, read once (`None`: not downloaded).
+    fn words_of(&mut self, key: &MessageKey) -> Option<Arc<str>> {
+        if let Some(w) = self.body_words.get(key) {
+            return Some(w.clone());
+        }
+        let raw = self.store.as_ref().and_then(|s| s.read_body(key))?;
+        if self.body_words.len() > 200_000 {
+            self.body_words.clear();
+        }
+        let words: Arc<str> = Arc::from(mime::search_text(&raw));
+        self.body_words.insert(key.clone(), words.clone());
+        Some(words)
     }
 
     fn search_results(&mut self, q: &str, scope: SearchScope) -> Vec<Summary> {
@@ -1916,7 +2049,7 @@ impl Session {
         for doc in ix.index.candidates(&query) {
             let Some(key) = ix.keys.get(doc as usize) else { continue };
             let Some(m) = self.folder_state(&key.account, &key.folder).find(key.uid).cloned() else { continue };
-            if query.matches(&Doc { summary: &m, body: ix.bodies.get(key).map(String::as_str) }) {
+            if query.matches(&Doc { summary: &m, body: ix.bodies.get(key).map(|b| &**b) }) {
                 out.push(m);
             }
         }
@@ -1956,9 +2089,10 @@ impl Session {
         .ok_or_else(|| CmdError::Disabled("add an account first".into()))?;
         let sig = self.signature(&account);
         let id = self.fresh_id();
-        let body = if sig.trim().is_empty() { String::new() } else { format!("\n\n-- \n{}", sig.trim_end()) };
+        let body = if sig.trim().is_empty() { String::new() } else { format!("\n\n{}", signature_block(&sig)) };
         let window = self.prefs.new_mail_window;
-        self.compose = Some(Compose { id, account, body, window, ..Default::default() });
+        let signature = if sig.trim().is_empty() { String::new() } else { signature_block(&sig) };
+        self.compose = Some(Compose { id, account, body, window, signature, ..Default::default() });
         self.compose.as_mut().ok_or_else(|| CmdError::Failed("compose".into()))
     }
 
@@ -1982,6 +2116,7 @@ impl Session {
         self.compose = Some(Compose {
             id,
             account,
+            signature: if sig.trim().is_empty() { String::new() } else { signature_block(&sig) },
             to: addr::format_list(&d.to),
             cc: addr::format_list(&d.cc),
             subject: d.subject,
@@ -2008,7 +2143,8 @@ impl Session {
         let subject = r.parsed.as_ref().map(|p| p.subject.trim().to_string()).unwrap_or_default();
         let name = format!("{}.eml", if subject.is_empty() { "message" } else { subject.as_str() });
         if let Some(c) = self.compose.as_mut() {
-            c.set_text(if sig.trim().is_empty() { String::new() } else { format!("\n\n-- \n{}", sig.trim_end()) });
+            c.set_text(if sig.trim().is_empty() { String::new() } else { format!("\n\n{}", signature_block(&sig)) });
+            c.signature = if sig.trim().is_empty() { String::new() } else { signature_block(&sig) };
             c.attachments = vec![OutAttachment { name, mime: "message/rfc822".into(), data: raw }];
         }
         Ok(out)
@@ -2531,6 +2667,64 @@ impl Session {
         Ok(serde_json::json!({ "removed": id }))
     }
 
+    /// An account that signs in to Microsoft with a password (which Microsoft refuses) switched to
+    /// Sign in with Microsoft, keeping its mail: the browser opens, and the token replaces the
+    /// password in the keychain.
+    pub fn use_microsoft_sign_in(&mut self, id: &str) -> CmdResult {
+        let a = self.account_mut(id).ok_or_else(|| CmdError::Params(format!("no account `{id}`")))?;
+        if !mailcraft_model::microsoft_password_account(&a.config) {
+            return Err(CmdError::Params("this account doesn't sign in to Microsoft with a password".into()));
+        }
+        a.config.oauth = Some("microsoft".into());
+        // Outlook.com's own servers, where the address is one of Microsoft's.
+        if a.config.imap.host.trim().is_empty() || mailcraft_model::microsoft_consumer(&a.config.email) && a.config.pop.is_none() {
+            let guess = AccountConfig::guess(&a.config.email);
+            a.config.imap = guess.imap;
+            a.config.smtp = guess.smtp;
+        }
+        a.status = SyncStatus::Connecting;
+        let config = a.config.clone();
+        self.save_accounts();
+        self.jobs.push(Job::SignIn { account: config });
+        Ok(serde_json::json!({ "account": id, "signingIn": true }))
+    }
+
+    /// A Microsoft account that signs in with Microsoft moved from IMAP and SMTP to Microsoft
+    /// Graph (for a mailbox Microsoft won't open over IMAP). Graph names folders its own way, so
+    /// it starts again as a new account in the same place: its mail comes down from the server,
+    /// and what was only on this computer for it (unsent mail in the Outbox) goes.
+    pub fn use_graph(&mut self, id: &str) -> CmdResult {
+        let a = self.account(id).ok_or_else(|| CmdError::Params(format!("no account `{id}`")))?;
+        let c = a.config.clone();
+        let microsoft = c.oauth.as_deref() == Some("microsoft") || mailcraft_model::microsoft_password_account(&c);
+        if c.graph.is_some() || c.jmap.is_some() || c.ews.is_some() || c.pop.is_some() || !microsoft {
+            return Err(CmdError::Params("only a Microsoft account connected over IMAP can move to Microsoft Graph".into()));
+        }
+        if !self.oauth_available.iter().any(|p| p == "microsoft") {
+            return Err(CmdError::Params("signing in with Microsoft isn't set up in this copy of MailCraft".into()));
+        }
+        let at = self.accounts.iter().position(|x| x.config.id == id).unwrap_or(0);
+        self.remove_account(id)?;
+        let config = AccountConfig {
+            name: c.name,
+            email: c.email,
+            username: String::new(),
+            signature: c.signature,
+            oauth: Some("microsoft".into()),
+            graph: Some(mailcraft_model::GRAPH_URL.to_string()),
+            ..Default::default()
+        };
+        let new = self.add_account(config, None)?;
+        if let Some(from) = self.accounts.iter().position(|x| x.config.id == new) {
+            let mut moved = self.accounts.remove(from);
+            moved.config.color = c.color;
+            self.accounts.insert(at.min(self.accounts.len()), moved);
+            self.save_accounts();
+        }
+        self.open_view(View::Folder { account: new.clone(), folder: "INBOX".into() });
+        Ok(serde_json::json!({ "account": new, "graph": true }))
+    }
+
     pub fn update_account(&mut self, config: AccountConfig, password: Option<String>) -> CmdResult {
         let id = config.id.clone();
         let Some(a) = self.account_mut(&id) else { return Err(CmdError::Params(format!("no account `{id}`"))) };
@@ -2566,6 +2760,18 @@ impl Session {
     /// Ask every account to sync now.
     /// Work offline, or connect again: every account's connection closes (changes, sent mail and
     /// drafts wait on this computer) or opens. Ahead of anything queued, so what follows sees it.
+    #[cfg(test)]
+    pub(crate) fn jobs_push_for_test(&mut self, j: Job) {
+        self.jobs.push(j);
+    }
+
+    /// Tell the network side how much mail to keep (ahead of anything queued, so accounts
+    /// start with it).
+    pub fn apply_sync_prefs(&mut self) {
+        self.jobs.retain(|j| !matches!(j, Job::SetSync { .. }));
+        self.jobs.insert(0, Job::SetSync { messages: self.prefs.keep_messages, offline: self.prefs.keep_offline });
+    }
+
     pub fn set_work_offline(&mut self, on: bool) {
         self.prefs.work_offline = on;
         self.jobs.retain(|j| !matches!(j, Job::WorkOffline { .. }));
@@ -2591,6 +2797,14 @@ impl Session {
     pub fn apply(&mut self, e: Event) {
         match e {
             Event::Status { account, status } => {
+                // Refusals that need something done say so once, as they come.
+                if let SyncStatus::Error { error } = &status
+                    && (error.starts_with(mailcraft_model::MICROSOFT_IMAP_CLOSED) || error.starts_with(mailcraft_model::MICROSOFT_NO_PASSWORDS))
+                    && self.account(&account).is_some_and(|a| a.status != status)
+                {
+                    let who = self.account(&account).map(|a| a.config.email.clone()).unwrap_or_default();
+                    self.notice(format!("{who}: {error}"), true);
+                }
                 if let SyncStatus::NeedsPassword { error } = &status {
                     let (who, browser) = self.account(&account).map(|a| (a.config.email.clone(), a.config.oauth.is_some())).unwrap_or_default();
                     let why = if error.is_empty() { String::new() } else { format!(": {error}") };
@@ -2670,7 +2884,7 @@ impl Session {
             }
             Event::Body { key, raw } => {
                 self.show_body(&key, &raw);
-                self.index = None;
+                self.index_body(&key, &raw);
             }
             Event::BodyFailed { key, error } => {
                 for w in self.windows.iter_mut().filter(|w| w.key == key && w.parsed.is_none()) {
@@ -2715,12 +2929,24 @@ impl Session {
                     self.open_urls.push(url);
                 }
             }
-            Event::SignedIn { account } => {
-                if let Some(a) = self.account(&account) {
+            Event::SignedIn { account, user } => {
+                // Who the browser signed in as, kept when it isn't the account's address: tried
+                // when the mailbox won't open under that, and named when it still won't.
+                let user = user.map(|u| u.trim().to_string()).filter(|u| !u.is_empty() && u.len() < 320);
+                if let Some(a) = self.account_mut(&account) {
+                    let other = user.filter(|u| !u.eq_ignore_ascii_case(&a.config.email));
+                    let changed = a.config.oauth_user != other;
+                    a.config.oauth_user = other.clone();
                     let config = a.config.clone();
                     let who = config.email.clone();
+                    if changed {
+                        self.save_accounts();
+                    }
                     self.jobs.push(Job::Start { account: config, password: None });
-                    self.notice(format!("{who} is signed in"), false);
+                    match other {
+                        Some(o) => self.notice(format!("{who} is signed in (as {o})"), false),
+                        None => self.notice(format!("{who} is signed in"), false),
+                    }
                 }
             }
             Event::Discovered { email, config, source } => {
@@ -2770,4 +2996,9 @@ pub fn parse_key(v: &Value) -> Option<MessageKey> {
 /// What a follow-up date is kept under: the Message-ID, or (without one) the message's place.
 fn follow_up_id(m: &Summary) -> String {
     if m.message_id.trim().is_empty() { m.key.to_id() } else { m.message_id.trim().to_string() }
+}
+
+/// A signature as it goes into a message: after the usual `-- ` line (RFC 3676's delimiter).
+pub fn signature_block(sig: &str) -> String {
+    format!("-- \n{}", sig.trim_end())
 }

@@ -152,6 +152,15 @@ pub fn event_of(v: &Value) -> Option<CalEvent> {
     let uid = [text("uid"), text("id")].into_iter().find(|u| !u.is_empty())?;
     // An occurrence of a repeating event stands apart from the others by when it starts.
     let occurrence = v.get("recurrenceId").is_some_and(|r| !r.is_null());
+    // Its keywords (JSCalendar's tags, where iCalendar's CATEGORIES go) are its categories, which colour it in the
+    // calendar; as many as an iCalendar event keeps (model/src/ical.rs).
+    let mut categories: Vec<String> = Vec::new();
+    for (k, on) in v.get("keywords").and_then(Value::as_object).into_iter().flatten() {
+        let k: String = k.trim().chars().take(100).collect();
+        if on.as_bool() == Some(true) && !k.is_empty() && !categories.contains(&k) && categories.len() < 20 {
+            categories.push(k);
+        }
+    }
     Some(CalEvent {
         uid,
         summary: text("title"),
@@ -162,6 +171,7 @@ pub fn event_of(v: &Value) -> Option<CalEvent> {
         all_day,
         recurrence_id: occurrence.then_some(start),
         status: text("status").to_ascii_uppercase(),
+        categories,
         ..Default::default()
     })
 }
@@ -213,8 +223,8 @@ mod tests {
     fn meeting() -> Value {
         json!({
             "@type": "Event", "id": "E1", "uid": "f00d", "calendarIds": {"K1": true},
-            "title": "Chantier, point hebdo", "description": "Avec le client.",
-            "locations": {"l1": {"@type": "Location", "name": "Bureau"}},
+            "title": "Site meeting, weekly", "description": "With the customer.",
+            "locations": {"l1": {"@type": "Location", "name": "Office"}},
             "start": "2026-10-19T09:00:00", "timeZone": "Europe/Zurich", "duration": "PT1H30M",
             "utcStart": "2026-10-19T07:00:00Z", "utcEnd": "2026-10-19T08:30:00Z",
             "recurrenceId": "2026-10-19T09:00:00", "status": "confirmed"
@@ -224,7 +234,7 @@ mod tests {
     #[test]
     fn an_occurrence_reads_with_its_times_in_utc() {
         let e = event_of(&meeting()).unwrap();
-        assert_eq!((e.uid.as_str(), e.summary.as_str(), e.location.as_str()), ("f00d", "Chantier, point hebdo", "Bureau"));
+        assert_eq!((e.uid.as_str(), e.summary.as_str(), e.location.as_str()), ("f00d", "Site meeting, weekly", "Office"));
         assert_eq!((e.start, e.end), (utc_date("2026-10-19T07:00:00Z").unwrap(), utc_date("2026-10-19T08:30:00Z").unwrap()));
         assert_eq!(e.recurrence_id, Some(e.start), "an occurrence stands apart by its start");
         assert_eq!(e.status, "CONFIRMED");
@@ -237,8 +247,22 @@ mod tests {
     }
 
     #[test]
+    fn its_keywords_are_its_categories() {
+        let mut e = meeting();
+        assert!(event_of(&e).unwrap().categories.is_empty(), "none given");
+        e["keywords"] = json!({"Work": true, " Clients ": true, "": true, "Off": false, "Clients": true});
+        let mut got = event_of(&e).unwrap().categories;
+        got.sort();
+        assert_eq!(got, ["Clients", "Work"], "the ones set, trimmed, once each");
+        e["keywords"] = json!((0..30).map(|i| (format!("k{i}"), json!(true))).collect::<serde_json::Map<_, _>>());
+        assert_eq!(event_of(&e).unwrap().categories.len(), 20, "as many as an iCalendar event keeps");
+        e["keywords"] = json!(["Work"]);
+        assert!(event_of(&e).unwrap().categories.is_empty(), "not a map: none");
+    }
+
+    #[test]
     fn a_day_long_event_keeps_its_days() {
-        let day = json!({"id": "E2", "uid": "d1", "calendarIds": {"K1": true}, "title": "Fermeture", "start": "2026-12-24T00:00:00", "duration": "P2D", "showWithoutTime": true});
+        let day = json!({"id": "E2", "uid": "d1", "calendarIds": {"K1": true}, "title": "Closed", "start": "2026-12-24T00:00:00", "duration": "P2D", "showWithoutTime": true});
         let e = event_of(&day).unwrap();
         assert!(e.all_day);
         assert_eq!((e.start, e.end), (utc_date("2026-12-24T00:00:00Z").unwrap(), utc_date("2026-12-26T00:00:00Z").unwrap()));

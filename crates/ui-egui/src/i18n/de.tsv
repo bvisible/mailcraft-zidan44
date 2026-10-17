@@ -757,6 +757,53 @@
 	All folders are up to date	Alle Ordner sind auf dem neuesten Stand
 	{n} accounts disconnected	{n} Konten getrennt
 	{account}: {status}	{account}: {status}
+	Sign in with Microsoft	Mit Microsoft anmelden
+	Sign in with Microsoft…	Mit Microsoft anmelden…
+	Mailbox won't open	Postfach öffnet sich nicht
+	The mailbox won't open	Das Postfach öffnet sich nicht
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph erreicht das Postfach ohne IMAP und bringt auch Kalender und Kontakte mit. Das Konto beginnt darüber neu: Die E-Mails werden vom Server geladen.
+	Turned IMAP on, or picked another account in the browser? Sign in again	IMAP eingeschaltet oder im Browser ein anderes Konto gewählt? Erneut anmelden
+	Use Microsoft Graph	Microsoft Graph verwenden
+	A message opened in its own window (double-click) is always marked as read.	Eine im eigenen Fenster geöffnete Nachricht (Doppelklick) wird immer als gelesen markiert.
+	Mark messages as read in the reading pane	Nachrichten im Lesebereich als gelesen markieren
+	When I choose another message	Wenn ich eine andere Nachricht wähle
+	When it's shown, after	Wenn sie angezeigt wird, nach
+	seconds	Sekunden
+	Arrange by	Anordnen nach
+	Last changed	Zuletzt geändert
+	Title (A to Z)	Titel (A bis Z)
+	Insert signature	Signatur einfügen
+	Save and insert	Speichern und einfügen
+	Signatures…	Signaturen…
+	Categories	Kategorien
+	1 month	1 Monat
+	{n} months	{n} Monate
+	Day and week show each calendar in a column of its own	Tag und Woche zeigen jeden Kalender in einer eigenen Spalte
+	Drag down to show more months	Nach unten ziehen, um mehr Monate zu zeigen
+	Hidden: click to show it	Ausgeblendet: zum Einblenden klicken
+	Shown: click to hide it	Eingeblendet: zum Ausblenden klicken
+	Side by side	Nebeneinander
+	Mail kept on this computer	Auf diesem Computer behaltene E-Mails
+	Of each folder, keep	Aus jedem Ordner behalten
+	Download in full for reading offline	Vollständig für das Offline-Lesen herunterladen
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	Neue E-Mails kommen immer an. Ältere bleiben auf dem Server; der Rest einer Nachricht wird beim Öffnen geladen.
+	the newest 1,000	die neuesten 1.000
+	the newest 40	die neuesten 40
+	all	alle
+	A different reply for them	Eine andere Antwort für sie
+	Inside my organization	Innerhalb meiner Organisation
+	Outside my organization	Außerhalb meiner Organisation
+	Anyone	Alle
+	My contacts only	Nur meine Kontakte
+	No one	Niemand
+	In a shared address book: read-only	In einem freigegebenen Adressbuch: schreibgeschützt
+	Click a column to sort by it; right-click to choose the columns	Auf eine Spalte klicken, um danach zu sortieren; Rechtsklick, um die Spalten zu wählen
+	Columns	Spalten
+	List	Liste
+	Business phone	Telefon geschäftlich
+	Mobile phone	Mobiltelefon
+	Home phone	Telefon privat
+	Address book	Adressbuch
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archiv

@@ -163,7 +163,20 @@ pub(crate) fn tour() {
                     text: "Back soon".into(),
                     from: Some("2026-10-15".into()),
                     until: None,
+                    ..Default::default()
                 },
+                false,
+            ),
+            Dialog::vacation(
+                "sample",
+                &mailcraft_engine::model::job::Vacation {
+                    enabled: true,
+                    text: "Back soon".into(),
+                    external: Some("Out of office".into()),
+                    outside: "known".into(),
+                    ..Default::default()
+                },
+                true,
             ),
             Dialog::ConfirmEmpty { account: "sample".into(), folder: "Trash".into(), name: "Deleted Items".into(), for_good: true },
             Dialog::ConfirmEmpty { account: "sample".into(), folder: "INBOX".into(), name: "Inbox".into(), for_good: false },
@@ -177,7 +190,14 @@ pub(crate) fn tour() {
             },
             Dialog::OpenSharedCalendar { email: "ana@contoso.example".into(), error: Some("no access".into()) },
             Dialog::RemoveAccount { account: "sample".into(), email: "x".into() },
-            Dialog::Signature { account: "sample".into(), text: "sig".into() },
+            Dialog::MailboxClosed {
+                account: "sample".into(),
+                email: "zoe@hotmail.com".into(),
+                error: format!("{}. Turn on IMAP on Outlook.com.", mailcraft_engine::model::MICROSOFT_IMAP_CLOSED),
+            },
+            Dialog::add_account_with("zoe@hotmail.com", true),
+            Dialog::Signature { account: "sample".into(), text: "sig".into(), insert: false },
+            Dialog::Signature { account: "sample".into(), text: "sig".into(), insert: true },
             Dialog::Password { account: "sample".into(), email: "x".into(), password: String::new() },
             Dialog::new_folder("sample", Some("Projects")),
             Dialog::new_folder("sample", None),
@@ -518,7 +538,7 @@ fn the_file_page_shows_accounts_replies_space_and_options() {
     a.session.apply(mailcraft_engine::model::Event::Quota { account: id.clone(), used: 3 << 30, limit: 15 << 30 });
     frame(&ctx, &mut a, vec![]);
     // The replies dialog saves through the command; bad dates are reported in it.
-    let mut d = Dialog::vacation(&id, &Default::default());
+    let mut d = Dialog::vacation(&id, &Default::default(), false);
     if let Dialog::Vacation(f) = &mut d {
         f.enabled = true;
         f.text = "Back Monday".into();
@@ -870,7 +890,7 @@ fn long_folders_render_quickly() {
             ..Default::default()
         })
         .collect();
-    store.save_folder("sample", "Archive", &FolderState { validity: 1, uid_next: 2001, highest_modseq: 0, messages }).unwrap();
+    store.save_folder("sample", "Archive", &FolderState { validity: 1, uid_next: 2001, highest_modseq: 0, messages, window: 0 }).unwrap();
     a.session.apply(MailEvent::FolderChanged { account: "sample".into(), folder: "Archive".into() });
     a.run("folder.open", json!({"account": "sample", "folder": "Archive"}));
     assert_eq!(a.session.list.len(), 2000);
@@ -1086,11 +1106,18 @@ fn people_lay_out_as_a_list_cards_or_a_phone_list() {
         frame(&ctx, &mut a, vec![]);
     }
     // The layout is remembered with the window's other settings.
+    // The list's columns and sort are kept too.
+    a.ui.people_list.columns = vec![crate::people::Column::Mobile, crate::people::Column::Book];
+    a.ui.people_list.sort = Some(crate::people::Column::Book);
+    frame(&ctx, &mut a, vec![]);
     let saved = a.saved_state();
     assert_eq!(saved["peopleView"], "phone");
     a.ui.people_view = crate::people::PeopleView::People;
+    a.ui.people_list = Default::default();
     a.restore_state(&saved);
     assert_eq!(a.ui.people_view, crate::people::PeopleView::Phone);
+    assert_eq!(a.ui.people_list.columns, [crate::people::Column::Mobile, crate::people::Column::Book]);
+    assert_eq!(a.ui.people_list.sort, Some(crate::people::Column::Book));
     let _ = std::fs::remove_dir_all(dir);
 }
 

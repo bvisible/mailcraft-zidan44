@@ -226,6 +226,9 @@ xmlns:m=\"http://schemas.microsoft.com/exchange/services/2006/messages\">\
     )
 }
 
+/// Messages kept of one folder at most, when all of them are asked for.
+const MAX_KEPT: usize = 100_000;
+
 /// Base64 without line breaks.
 fn b64(data: &[u8]) -> String {
     crate::imap::base64(data)
@@ -527,12 +530,55 @@ impl Client {
     /// a "Public Folders" folder. Public folders only list one level at a time, so the tree is
     /// walked, a few levels deep and up to a few hundred folders.
     fn public_folders(&self) -> Result<Vec<Mailbox>> {
+        let (root_id, all) = self.public_tree()?;
+        // Calendars and contacts kept as public folders aren't mail; a folder holding others is
+        // kept for them.
+        let mut out: Vec<Mailbox> = all
+            .into_iter()
+            .filter(|(_, class, children)| class.is_empty() || class == "IPF.Note" || class.starts_with("IPF.Note.") || *children)
+            .map(|(m, _, _)| m)
+            .collect();
+        if out.is_empty() {
+            return Ok(out);
+        }
+        out.insert(0, Mailbox { id: root_id, name: PUBLIC_FOLDERS.into(), parent: None, role: FolderRole::Other, total: 0, unread: 0 });
+        Ok(out)
+    }
+
+    /// Exchange's public contact folders and calendars (shared address books and calendars):
+    /// (id, its path under Public Folders, its class).
+    pub(crate) fn public_pim_folders(&self) -> Result<Vec<(String, String, String)>> {
+        let (_, all) = self.public_tree()?;
+        let path = |m: &Mailbox| {
+            let mut parts = vec![m.name.clone()];
+            let mut up = m.parent.clone();
+            while let Some(p) = up.take() {
+                if let Some((f, _, _)) = all.iter().find(|(x, _, _)| x.id == p)
+                    && parts.len() < PUBLIC_DEPTH + 1
+                {
+                    parts.push(f.name.clone());
+                    up = f.parent.clone();
+                }
+            }
+            parts.reverse();
+            parts.join(" › ")
+        };
+        Ok(all
+            .iter()
+            .filter(|(_, class, _)| class.starts_with("IPF.Contact") || class.starts_with("IPF.Appointment"))
+            .map(|(m, class, _)| (m.id.clone(), path(m), class.clone()))
+            .collect())
+    }
+
+    /// Every public folder (walked a level at a time, a few levels deep): the root's id, and
+    /// each folder with its class and whether it holds others.
+    fn public_tree(&self) -> Result<(String, Vec<(Mailbox, String, bool)>)> {
         let root = self.call_one(
             "<m:GetFolder><m:FolderShape><t:BaseShape>IdOnly</t:BaseShape></m:FolderShape>\
              <m:FolderIds><t:DistinguishedFolderId Id=\"publicfoldersroot\"/></m:FolderIds></m:GetFolder>",
         )?;
-        let Some(root_id) = root.find("FolderId").and_then(|f| f.attr("Id")).map(str::to_string) else { return Ok(Vec::new()) };
-        let mut out = Vec::new();
+        let Some(root_id) = root.find("FolderId").and_then(|f| f.attr("Id")).map(str::to_string) else { return Ok((String::new(), Vec::new())) };
+        let mut out: Vec<(Mailbox, String, bool)> = Vec::new();
         let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::from([(root_id.clone(), 0)]);
         while let Some((parent, depth)) = queue.pop_front() {
             if depth >= PUBLIC_DEPTH || out.len() >= MAX_PUBLIC {
@@ -554,21 +600,19 @@ impl Client {
             for f in folders {
                 let Some(id) = f.child("FolderId").and_then(|i| i.attr("Id")).map(str::to_string) else { continue };
                 let count = |k: &str| f.text_of(k).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
-                let class = f.text_of("FolderClass").unwrap_or("");
-                let mail = class.is_empty() || class == "IPF.Note" || class.starts_with("IPF.Note.");
-                // Calendars and contacts kept as public folders aren't mail; a folder holding
-                // others is kept for them.
-                if !mail && count("ChildFolderCount") == 0 {
-                    continue;
-                }
-                out.push(Mailbox {
-                    name: f.text_of("DisplayName").unwrap_or_default().chars().take(255).collect(),
-                    parent: Some(parent.clone()),
-                    role: FolderRole::Other,
-                    total: count("TotalCount"),
-                    unread: count("UnreadCount"),
-                    id: id.clone(),
-                });
+                let class = f.text_of("FolderClass").unwrap_or("").to_string();
+                out.push((
+                    Mailbox {
+                        name: f.text_of("DisplayName").unwrap_or_default().chars().take(255).collect(),
+                        parent: Some(parent.clone()),
+                        role: FolderRole::Other,
+                        total: count("TotalCount"),
+                        unread: count("UnreadCount"),
+                        id: id.clone(),
+                    },
+                    class,
+                    count("ChildFolderCount") > 0,
+                ));
                 if count("ChildFolderCount") > 0 {
                     queue.push_back((id, depth + 1));
                 }
@@ -577,11 +621,7 @@ impl Client {
                 }
             }
         }
-        if out.is_empty() {
-            return Ok(out);
-        }
-        out.insert(0, Mailbox { id: root_id, name: PUBLIC_FOLDERS.into(), parent: None, role: FolderRole::Other, total: 0, unread: 0 });
-        Ok(out)
+        Ok((root_id, out))
     }
 
     /// A folder's (total, unread).
@@ -598,17 +638,33 @@ impl Client {
     }
 
     /// The newest `limit` messages of a folder with their flags.
+    /// The newest `limit` messages' ids and flags, a page of up to a thousand at a time (EWS
+    /// pages by offset; it says when the last page is in).
     fn newest(&self, folder: &str, limit: usize) -> Result<Vec<(String, Flags)>> {
-        let m = self.call_one(&format!(
-            "<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>{FLAG_FIELDS}</t:AdditionalProperties></m:ItemShape>\
-             <m:IndexedPageItemView MaxEntriesReturned=\"{}\" Offset=\"0\" BasePoint=\"Beginning\"/>\
-             <m:SortOrder><t:FieldOrder Order=\"Descending\"><t:FieldURI FieldURI=\"item:DateTimeReceived\"/></t:FieldOrder></m:SortOrder>\
-             <m:ParentFolderIds><t:FolderId Id=\"{}\"/></m:ParentFolderIds></m:FindItem>",
-            limit.clamp(1, 1000),
-            esc(folder)
-        ))?;
-        let Some(items) = m.find("Items") else { return Ok(Vec::new()) };
-        Ok(items.kids.iter().filter_map(|it| Some((it.child("ItemId")?.attr("Id")?.to_string(), flags(it)))).collect())
+        let limit = limit.clamp(1, MAX_KEPT);
+        let mut out: Vec<(String, Flags)> = Vec::new();
+        while out.len() < limit {
+            let page = (limit - out.len()).min(1000);
+            let m = self.call_one(&format!(
+                "<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>{FLAG_FIELDS}</t:AdditionalProperties></m:ItemShape>\
+                 <m:IndexedPageItemView MaxEntriesReturned=\"{}\" Offset=\"{}\" BasePoint=\"Beginning\"/>\
+                 <m:SortOrder><t:FieldOrder Order=\"Descending\"><t:FieldURI FieldURI=\"item:DateTimeReceived\"/></t:FieldOrder></m:SortOrder>\
+                 <m:ParentFolderIds><t:FolderId Id=\"{}\"/></m:ParentFolderIds></m:FindItem>",
+                page,
+                out.len(),
+                esc(folder)
+            ))?;
+            let last = m.find("RootFolder").and_then(|r| r.attr("IncludesLastItemInRange")) != Some("false");
+            let Some(items) = m.find("Items") else { break };
+            let got: Vec<(String, Flags)> =
+                items.kids.iter().filter_map(|it| Some((it.child("ItemId")?.attr("Id")?.to_string(), flags(it)))).collect();
+            let n = got.len();
+            out.extend(got);
+            if last || n == 0 || n < page {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Messages' details, for the list.
@@ -689,12 +745,23 @@ impl Client {
             Some(format!("{y:04}-{m:02}-{d:02}"))
         };
         let scheduled = state == "Scheduled";
-        let message = s.find("InternalReply").and_then(|r| r.child("Message")).map(|m| m.text.clone()).unwrap_or_default();
-        let text = if message.contains('<') { mime::html_to_text(&message) } else { message };
+        let reply = |which: &str| {
+            let m = s.find(which).and_then(|r| r.child("Message")).map(|m| m.text.clone()).unwrap_or_default();
+            if m.contains('<') { mime::html_to_text(&m).trim().to_string() } else { m.trim().to_string() }
+        };
+        let (text, external) = (reply("InternalReply"), reply("ExternalReply"));
+        let outside = match s.text_of("ExternalAudience").unwrap_or("All") {
+            "None" => "none",
+            "Known" => "known",
+            _ => "",
+        };
         Ok(mailcraft_model::job::Vacation {
             enabled: state != "Disabled",
             subject: String::new(),
-            text: text.trim().to_string(),
+            // Outside, the same unless it says something else (an empty one is the same).
+            external: (!external.is_empty() && external != text).then_some(external),
+            outside: outside.to_string(),
+            text,
             from: if scheduled { day("StartTime", false) } else { None },
             until: if scheduled { day("EndTime", true) } else { None },
         })
@@ -717,10 +784,16 @@ impl Client {
             end.unwrap_or_else(|| "2100-01-01T00:00:00Z".into())
         );
         let text = esc(&v.text).replace('\n', "&lt;br&gt;");
+        let external = esc(v.external_text()).replace('\n', "&lt;br&gt;");
+        let audience = match v.outside.as_str() {
+            "none" => "None",
+            "known" => "Known",
+            _ => "All",
+        };
         let doc = self.call(&format!(
             "<m:SetUserOofSettingsRequest><t:Mailbox><t:Address>{}</t:Address></t:Mailbox><t:UserOofSettings>\
-             <t:OofState>{state}</t:OofState><t:ExternalAudience>All</t:ExternalAudience>{duration}\
-             <t:InternalReply><t:Message>{text}</t:Message></t:InternalReply><t:ExternalReply><t:Message>{text}</t:Message></t:ExternalReply>\
+             <t:OofState>{state}</t:OofState><t:ExternalAudience>{audience}</t:ExternalAudience>{duration}\
+             <t:InternalReply><t:Message>{text}</t:Message></t:InternalReply><t:ExternalReply><t:Message>{external}</t:Message></t:ExternalReply>\
              </t:UserOofSettings></m:SetUserOofSettingsRequest>",
             esc(&self.email)
         ))?;

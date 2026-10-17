@@ -756,6 +756,53 @@
 	All folders are up to date	Tutte le cartelle sono aggiornate
 	{n} accounts disconnected	{n} account disconnessi
 	{account}: {status}	{account}: {status}
+	Sign in with Microsoft	Accedi con Microsoft
+	Sign in with Microsoft…	Accedi con Microsoft…
+	Mailbox won't open	La casella non si apre
+	The mailbox won't open	La casella di posta non si apre
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph raggiunge la casella senza IMAP e porta anche calendario e contatti. L'account riparte tramite Graph: la posta viene scaricata dal server.
+	Turned IMAP on, or picked another account in the browser? Sign in again	Hai attivato IMAP o scelto un altro account nel browser? Accedi di nuovo
+	Use Microsoft Graph	Usa Microsoft Graph
+	A message opened in its own window (double-click) is always marked as read.	Un messaggio aperto nella sua finestra (doppio clic) viene sempre segnato come letto.
+	Mark messages as read in the reading pane	Segna i messaggi come letti nel riquadro di lettura
+	When I choose another message	Quando scelgo un altro messaggio
+	When it's shown, after	Quando viene mostrato, dopo
+	seconds	secondi
+	Arrange by	Disponi per
+	Last changed	Ultima modifica
+	Title (A to Z)	Titolo (A-Z)
+	Insert signature	Inserisci firma
+	Save and insert	Salva e inserisci
+	Signatures…	Firme…
+	Categories	Categorie
+	1 month	1 mese
+	{n} months	{n} mesi
+	Day and week show each calendar in a column of its own	Giorno e settimana mostrano ogni calendario in una colonna propria
+	Drag down to show more months	Trascina in basso per mostrare più mesi
+	Hidden: click to show it	Nascosto: fai clic per mostrarlo
+	Shown: click to hide it	Visibile: fai clic per nasconderlo
+	Side by side	Affiancati
+	Mail kept on this computer	Posta conservata su questo computer
+	Of each folder, keep	Di ogni cartella, conserva
+	Download in full for reading offline	Scarica per intero per leggere offline
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	La posta nuova arriva sempre. Quella più vecchia resta sul server; il resto di ogni messaggio si scarica quando lo apri.
+	the newest 1,000	i 1.000 più recenti
+	the newest 40	i 40 più recenti
+	all	tutti
+	A different reply for them	Una risposta diversa per loro
+	Inside my organization	All'interno dell'organizzazione
+	Outside my organization	All'esterno dell'organizzazione
+	Anyone	Chiunque
+	My contacts only	Solo i miei contatti
+	No one	Nessuno
+	In a shared address book: read-only	In una rubrica condivisa: sola lettura
+	Click a column to sort by it; right-click to choose the columns	Fai clic su una colonna per ordinare; clic destro per scegliere le colonne
+	Columns	Colonne
+	List	Elenco
+	Business phone	Telefono ufficio
+	Mobile phone	Cellulare
+	Home phone	Telefono casa
+	Address book	Rubrica
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archivio

@@ -264,6 +264,8 @@ pub enum Action {
     SignInAgain(String),
     /// Insert a picture at the cursor of the message being written (from a file).
     InsertPicture,
+    /// The account's signature at the cursor of the message being written.
+    InsertSignature,
     /// Paste a picture from the clipboard, if there is one.
     PastePicture,
     /// Choose the interface language (`auto` or a code).
@@ -363,6 +365,8 @@ pub struct UiState {
     search_focused: bool,
     /// Put the search box's cursor at the end when it next takes the focus.
     search_cursor_end: bool,
+    /// When to search for what's typed (a moment after the last key, so typing stays quick).
+    search_due: Option<f64>,
     /// Why the message being written couldn't be sent or saved, shown over it until dismissed.
     pub compose_alert: Option<String>,
     /// The attachment shown in place of its message's text (a click on its chip), as Outlook
@@ -421,9 +425,13 @@ pub struct UiState {
     pub(crate) people_query: String,
     /// How People lays contacts out (Outlook's Change View).
     pub people_view: people::PeopleView,
+    /// The People list's columns and sort.
+    pub people_list: people::ListSettings,
     /// Notes: the search, the note being written on (and its text), a new note to write on,
     /// and the keyboard to give its text box.
     pub(crate) notes_query: String,
+    /// How far the calendar's month grip has been dragged since it last added or took a month.
+    pub(crate) months_drag: f32,
     pub(crate) note_edit: Option<(String, String)>,
     pub(crate) note_focus: bool,
     /// The person whose card is shown (uid).
@@ -478,6 +486,7 @@ impl MailApp {
                 focus_search: false,
                 search_focused: false,
                 search_cursor_end: false,
+                search_due: None,
                 compose_alert: None,
                 attachment_view: None,
                 ribbon_rect: None,
@@ -510,7 +519,9 @@ impl MailApp {
                 cal_scrolled: [false; 2],
                 people_query: String::new(),
                 people_view: people::PeopleView::default(),
+                people_list: people::ListSettings::default(),
                 notes_query: String::new(),
+                months_drag: 0.0,
                 note_edit: None,
                 note_focus: false,
                 person: None,
@@ -1245,6 +1256,19 @@ impl MailApp {
                     }
                 }
             }
+            Action::InsertSignature => {
+                let r = self.session.run("compose.insertSignature", &json!({"at": self.picture_at()}));
+                match r {
+                    Ok(v) => {
+                        // The cursor after it.
+                        let end = v.get("end").and_then(serde_json::Value::as_u64).and_then(|e| usize::try_from(e).ok()).unwrap_or(0);
+                        if let Some(ed) = self.ui.editor.as_mut() {
+                            ed.refocus = Some(end..end);
+                        }
+                    }
+                    Err(e) => self.session.notice(e.to_string(), true),
+                }
+            }
             Action::InsertPicture => {
                 for p in self.services.pick_pictures() {
                     let r = self.session.run("compose.insertPicture", &json!({"path": p.to_string_lossy(), "at": self.picture_at()}));
@@ -1280,8 +1304,18 @@ impl MailApp {
     }
 
     fn sign_in_again(&mut self, id: &str) {
-        let Some(config) = self.session.account(id).map(|a| a.config.clone()) else { return };
-        if config.oauth.is_some() {
+        let Some((config, status)) = self.session.account(id).map(|a| (a.config.clone(), a.status.clone())) else { return };
+        // Microsoft took the sign-in but won't open the mailbox: say why, and what helps.
+        if let SyncStatus::Error { error } = &status
+            && error.starts_with(mailcraft_engine::model::MICROSOFT_IMAP_CLOSED)
+        {
+            self.ui.dialog = Some(Dialog::MailboxClosed { account: id.to_string(), email: config.email.clone(), error: error.clone() });
+            return;
+        }
+        // A Microsoft account with a password, which Microsoft refuses: Sign in with Microsoft.
+        if config.oauth.is_some()
+            || mailcraft_engine::model::microsoft_password_account(&config) && self.session.oauth_available.iter().any(|p| p == "microsoft")
+        {
             self.run("account.signIn", json!({"account": id}));
         } else {
             self.ui.dialog = Some(Dialog::password(&config));
@@ -1495,6 +1529,30 @@ impl MailApp {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                     icons::paint(ui.painter(), r, Icon::Search, t.dim);
+                    // In People and Notes it searches those (as Outlook's box searches where you are).
+                    let module = self.session.module;
+                    if matches!(module, Module::People | Module::Notes) {
+                        let focus = std::mem::take(&mut self.ui.focus_search);
+                        let (query, hint) = if module == Module::People {
+                            (&mut self.ui.people_query, tl!("Search people"))
+                        } else {
+                            (&mut self.ui.notes_query, tl!("Search notes"))
+                        };
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(query)
+                                .hint_text(hint)
+                                .frame(egui::Frame::NONE)
+                                .desired_width(search_w - 60.0)
+                                .text_color(t.text),
+                        );
+                        if focus {
+                            resp.request_focus();
+                        }
+                        if !query.is_empty() && widgets::tiny_icon_button(ui, Icon::Close, "Clear search", &t).clicked() {
+                            query.clear();
+                        }
+                        return;
+                    }
                     let te = egui::TextEdit::singleline(&mut self.ui.search_text)
                         .hint_text(tl!("Search mail (from:, subject:, has:attachment…)"))
                         .frame(egui::Frame::NONE)
@@ -1518,9 +1576,20 @@ impl MailApp {
                         resp.request_focus();
                         self.ui.focus_search = false;
                     }
+                    // Searched a moment after the last key (Enter: at once), not on every key.
+                    let now = ui.input(|i| i.time);
                     if resp.changed() {
-                        let q = self.ui.search_text.clone();
-                        acts.push(Action::Run("search.run", json!({"query": q})));
+                        self.ui.search_due = Some(now + SEARCH_PAUSE);
+                    }
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    match self.ui.search_due {
+                        Some(due) if enter || now >= due || self.ui.search_text.is_empty() => {
+                            self.ui.search_due = None;
+                            let q = self.ui.search_text.clone();
+                            acts.push(Action::Run("search.run", json!({"query": q})));
+                        }
+                        Some(due) => ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((due - now).max(0.01))),
+                        None => {}
                     }
                     if !self.ui.search_text.is_empty() && widgets::tiny_icon_button(ui, Icon::Close, "Clear search", &t).clicked() {
                         acts.push(Action::Run("search.clear", json!({})));
@@ -1610,6 +1679,13 @@ impl MailApp {
                             acts.push(Action::Run("calendar.view", json!({"mode": code})));
                         }
                     }
+                    // Each calendar in a column of its own (Outlook's side by side), or together.
+                    if s.pim.values().map(|p| p.calendars.len()).sum::<usize>() > 1 {
+                        widgets::group_sep(ui, &t);
+                        if widgets::tool_toggle(ui, Icon::Calendar, "Side by side", &t, s.prefs.calendars_side_by_side).clicked() {
+                            acts.push(Action::Run("calendar.sideBySide", json!({})));
+                        }
+                    }
                 } else if s.module == Module::Notes {
                     if widgets::accent_button(ui, Icon::Note, "New note", &t, !s.accounts.is_empty()).clicked() {
                         notes::new_note(&mut self.ui, acts);
@@ -1634,6 +1710,20 @@ impl MailApp {
                             }
                         }
                     });
+                    // How they're listed: the last changed first, A to Z, or by colour.
+                    widgets::group_sep(ui, &t);
+                    let r = widgets::tool_button(ui, Icon::ListBullet, "Arrange by", &t, true);
+                    egui::Popup::menu(&r).show(|ui| {
+                        use mailcraft_engine::NotesOrder as O;
+                        for (order, label, code) in
+                            [(O::Modified, "Last changed", "modified"), (O::Title, "Title (A to Z)", "title"), (O::Color, "Color", "color")]
+                        {
+                            if ui.radio(s.prefs.notes_order == order, tl!(label)).clicked() {
+                                acts.push(Action::Run("note.arrange", json!({"by": code})));
+                                ui.close();
+                            }
+                        }
+                    });
                 } else {
                     // //// Neoffice — greyed, with why, when there is nowhere to add one (read_only.rs).
                     let nowhere = read_only::no_new_cards(s);
@@ -1647,15 +1737,15 @@ impl MailApp {
                     }
                     widgets::group_sep(ui, &t);
                     let picked = self.ui.person.as_deref().and_then(|u| s.find_person(u));
-                    // //// Neoffice — Edit and Delete greyed on a card of a read-only book, with why (read_only.rs).
-                    let locked = picked.as_ref().and_then(|p| read_only::locked(s, p));
-                    let can = picked.is_some() && locked.is_none();
-                    if read_only::why(widgets::tool_button(ui, Icon::Drafts, "Edit", &t, can), locked).clicked()
+                    // Someone in a shared (read-only) address book can't be changed here.
+                    let picked = picked.filter(|p| !s.person_read_only(&p.card.uid));
+                    if widgets::tool_button(ui, Icon::Drafts, "Edit", &t, picked.is_some()).clicked()
                         && let Some(p) = &picked
                     {
                         acts.push(Action::Dialog(Dialog::edit_contact(&p.card)));
                     }
-                    // //// Neoffice — the same for Delete, also greyed on a Neoffice contact in a hosting page (read_only.rs).
+                    // //// Neoffice — Delete also greyed, with why, where the book's rights don't let the person delete its cards
+                    // (a JMAP book's, read_only.rs).
                     let undeletable = picked.as_ref().and_then(|p| read_only::no_delete(s, p));
                     if read_only::why(widgets::tool_button(ui, Icon::Delete, "Delete", &t, picked.is_some() && undeletable.is_none()), undeletable)
                         .clicked()
@@ -1669,6 +1759,13 @@ impl MailApp {
                         if widgets::tool_toggle(ui, v.icon(), v.label(), &t, self.ui.people_view == v).clicked() {
                             self.ui.people_view = v;
                         }
+                    }
+                    // The list's columns (also from its header's right-click).
+                    if self.ui.people_view == people::PeopleView::Phone {
+                        let r = widgets::tool_button(ui, Icon::Layout, "Columns", &t, true);
+                        egui::Popup::menu(&r)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| people::column_menu(ui, &mut self.ui.people_list));
                     }
                 }
             });
@@ -1961,8 +2058,8 @@ impl MailApp {
                     for a in &s.accounts {
                         let (color, text) = account_status(s, &t, a);
                         // "Password needed" is a link: click it to enter the password again.
-                        if matches!(a.status, SyncStatus::NeedsPassword { .. }) {
-                            if ui.link(RichText::new(text).color(t.danger).small()).on_hover_text(&a.config.email).clicked() {
+                        if needs_you(a) {
+                            if ui.link(RichText::new(text).color(t.danger).small()).on_hover_text(why(a)).clicked() {
                                 again = Some(a.config.id.clone());
                             }
                         } else {
@@ -1977,7 +2074,7 @@ impl MailApp {
                 let each = each.join("\n");
                 let busy = s.accounts.iter().any(|a| matches!(a.status, SyncStatus::Syncing { .. }));
                 let connecting = s.accounts.iter().any(|a| matches!(a.status, SyncStatus::Connecting));
-                let failed = s.accounts.iter().filter(|a| matches!(a.status, SyncStatus::Error { .. })).count();
+                let failed = s.accounts.iter().filter(|a| matches!(a.status, SyncStatus::Error { .. }) && !needs_you(a)).count();
                 let online = s.accounts.iter().any(|a| matches!(a.status, SyncStatus::Online { .. }));
                 let (color, text) = if busy {
                     (t.accent, tl!("Updating…").to_string())
@@ -1993,10 +2090,10 @@ impl MailApp {
                 ui.label(RichText::new(text).color(t.dim).small()).on_hover_text(&each);
                 dot(ui, color);
                 // Accounts waiting for you: a link each (it signs in again).
-                for a in s.accounts.iter().rev().filter(|a| matches!(a.status, SyncStatus::NeedsPassword { .. })) {
+                for a in s.accounts.iter().rev().filter(|a| needs_you(a)) {
                     ui.add_space(10.0);
                     let text = tf!("{account}: {status}", account = a.config.email, status = account_status(s, &t, a).1);
-                    if ui.link(RichText::new(text).color(t.danger).small()).clicked() {
+                    if ui.link(RichText::new(text).color(t.danger).small()).on_hover_text(why(a)).clicked() {
                         again = Some(a.config.id.clone());
                     }
                     dot(ui, t.danger);
@@ -2044,14 +2141,20 @@ impl MailApp {
 
     /// Preferences and theme for the app to save.
     pub fn saved_state(&self) -> Value {
-        json!({ "prefs": self.session.prefs, "dark": self.ui.dark, "language": self.ui.language, "windows": self.ui.places, "peopleView": self.ui.people_view })
+        json!({ "prefs": self.session.prefs, "dark": self.ui.dark, "language": self.ui.language, "windows": self.ui.places, "peopleView": self.ui.people_view, "peopleList": self.ui.people_list })
     }
 
     pub fn restore_state(&mut self, v: &Value) {
         if let Some(p) = v.get("prefs").and_then(|p| serde_json::from_value::<mailcraft_engine::Prefs>(p.clone()).ok()) {
             let offline = p.work_offline;
+            let keep = (p.keep_messages, p.keep_offline);
             self.session.prefs = p;
             self.session.refresh_list();
+            // How much mail to keep, before any account connects (when it isn't the default).
+            let d = mailcraft_engine::Prefs::default();
+            if keep != (d.keep_messages, d.keep_offline) {
+                self.session.apply_sync_prefs();
+            }
             // Still working offline from last time: before any account connects.
             if offline {
                 self.session.set_work_offline(true);
@@ -2060,6 +2163,9 @@ impl MailApp {
         self.ui.dark = v.get("dark").and_then(Value::as_bool);
         if let Some(pv) = v.get("peopleView").and_then(|w| serde_json::from_value(w.clone()).ok()) {
             self.ui.people_view = pv;
+        }
+        if let Some(pl) = v.get("peopleList").and_then(|w| serde_json::from_value(w.clone()).ok()) {
+            self.ui.people_list = pl;
         }
         if let Some(w) = v.get("windows").and_then(|w| serde_json::from_value(w.clone()).ok()) {
             self.ui.places = w;
@@ -2072,9 +2178,40 @@ impl MailApp {
 
 /// The toolbar of a message window. Replying and forwarding happen in the main window, so
 /// they close this one; so do Delete and Archive.
+/// How long the search box waits after the last key before searching, in seconds.
+const SEARCH_PAUSE: f64 = 0.3;
+
+/// An account that waits for you to do something: sign in (again, or with Microsoft rather than
+/// a password), or choose what to do about a mailbox Microsoft won't open over IMAP.
+fn needs_you(a: &mailcraft_engine::AccountState) -> bool {
+    match &a.status {
+        SyncStatus::NeedsPassword { .. } => true,
+        SyncStatus::Error { error } => {
+            error.starts_with(mailcraft_engine::model::MICROSOFT_IMAP_CLOSED) || error.starts_with(mailcraft_engine::model::MICROSOFT_NO_PASSWORDS)
+        }
+        _ => false,
+    }
+}
+
+/// An account's address, and what's wrong with it when something is (for hovering its status).
+fn why(a: &mailcraft_engine::AccountState) -> String {
+    match &a.status {
+        SyncStatus::Error { error } | SyncStatus::NeedsPassword { error } if !error.is_empty() => {
+            format!("{}\n{}", a.config.email, tl!(error))
+        }
+        _ => a.config.email.clone(),
+    }
+}
+
 /// An account's status for the status bar: its colour and words.
 fn account_status(s: &Session, t: &Tokens, a: &mailcraft_engine::AccountState) -> (egui::Color32, String) {
     match &a.status {
+        SyncStatus::Error { error } if error.starts_with(mailcraft_engine::model::MICROSOFT_NO_PASSWORDS) => {
+            (t.danger, tl!("Sign in with Microsoft").to_string())
+        }
+        SyncStatus::Error { error } if error.starts_with(mailcraft_engine::model::MICROSOFT_IMAP_CLOSED) => {
+            (t.danger, tl!("Mailbox won't open").to_string())
+        }
         SyncStatus::Online { at } => (t.ok, tf!("Updated {time}", time = i18n::date(&mailcraft_engine::model::dates::list_time(*at, &s.clock)))),
         SyncStatus::Syncing { .. } if a.is_data_file() => (t.accent, tf!("Opening {file}…", file = a.config.email)),
         SyncStatus::Syncing { folder } => (

@@ -756,6 +756,53 @@
 	All folders are up to date	Все папки обновлены
 	{n} accounts disconnected	Отключено учётных записей: {n}
 	{account}: {status}	{account}: {status}
+	Sign in with Microsoft	Войти через Microsoft
+	Sign in with Microsoft…	Войти через Microsoft…
+	Mailbox won't open	Почтовый ящик не открывается
+	The mailbox won't open	Почтовый ящик не открывается
+	Microsoft Graph reaches the mailbox without IMAP, and brings its calendar and contacts too. The account starts again through it: its mail comes down from the server.	Microsoft Graph открывает почтовый ящик без IMAP, а заодно календарь и контакты. Учётная запись начнётся заново через него: почта загрузится с сервера.
+	Turned IMAP on, or picked another account in the browser? Sign in again	Включили IMAP или выбрали в браузере другую учётную запись? Войдите снова
+	Use Microsoft Graph	Использовать Microsoft Graph
+	A message opened in its own window (double-click) is always marked as read.	Сообщение, открытое в отдельном окне (двойной щелчок), всегда помечается как прочитанное.
+	Mark messages as read in the reading pane	Помечать сообщения прочитанными в области чтения
+	When I choose another message	Когда я выбираю другое сообщение
+	When it's shown, after	Когда показано, через
+	seconds	с
+	Arrange by	Упорядочить по
+	Last changed	Последнее изменение
+	Title (A to Z)	Название (А–Я)
+	Insert signature	Вставить подпись
+	Save and insert	Сохранить и вставить
+	Signatures…	Подписи…
+	Categories	Категории
+	1 month	1 месяц
+	{n} months	Месяцев: {n}
+	Day and week show each calendar in a column of its own	В режимах «День» и «Неделя» каждый календарь в своём столбце
+	Drag down to show more months	Потяните вниз, чтобы показать больше месяцев
+	Hidden: click to show it	Скрыт: щёлкните, чтобы показать
+	Shown: click to hide it	Показан: щёлкните, чтобы скрыть
+	Side by side	Рядом
+	Mail kept on this computer	Почта на этом компьютере
+	Of each folder, keep	Из каждой папки хранить
+	Download in full for reading offline	Загружать полностью для чтения без сети
+	New mail always comes in. Older mail past these stays on the server; the rest of each message is downloaded when it's opened.	Новая почта приходит всегда. Более старая остаётся на сервере; остальное в каждом письме загружается при открытии.
+	the newest 1,000	последние 1000
+	the newest 40	последние 40
+	all	все
+	A different reply for them	Другой ответ для них
+	Inside my organization	Внутри организации
+	Outside my organization	За пределами организации
+	Anyone	Все
+	My contacts only	Только мои контакты
+	No one	Никто
+	In a shared address book: read-only	В общей адресной книге: только чтение
+	Click a column to sort by it; right-click to choose the columns	Щёлкните столбец, чтобы сортировать по нему; правый щелчок — выбор столбцов
+	Columns	Столбцы
+	List	Список
+	Business phone	Рабочий телефон
+	Mobile phone	Мобильный телефон
+	Home phone	Домашний телефон
+	Address book	Адресная книга
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Архив

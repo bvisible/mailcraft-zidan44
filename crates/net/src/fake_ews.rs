@@ -42,7 +42,8 @@ pub struct Data {
     /// MIME sources sent.
     pub sent: Vec<Vec<u8>>,
     /// (state, start, end, message)
-    pub oof: (String, String, String, String),
+    /// State, start, end, inside reply, outside reply, outside audience.
+    pub oof: (String, String, String, String, String, String),
     /// Sign in with Basic instead of NTLM.
     pub basic: bool,
     /// Operations asked for, in order.
@@ -63,7 +64,7 @@ impl Default for Data {
             items: Vec::new(),
             pim: Vec::new(),
             sent: Vec::new(),
-            oof: ("Disabled".into(), String::new(), String::new(), String::new()),
+            oof: ("Disabled".into(), String::new(), String::new(), String::new(), String::new(), "All".into()),
             basic: false,
             calls: Vec::new(),
             handshakes: 0,
@@ -463,15 +464,16 @@ impl Data {
                 }
             }
             "GetUserOofSettingsRequest" => {
-                let (state, start, end, msg) = self.oof.clone();
+                let (state, start, end, msg, outside, audience) = self.oof.clone();
                 return (
                     "GetUserOofSettingsResponse".into(),
                     vec![format!(
                         "<ResponseMessage ResponseClass=\"Success\"><ResponseCode>NoError</ResponseCode></ResponseMessage>\
-                         <OofSettings><OofState>{state}</OofState><ExternalAudience>All</ExternalAudience>\
+                         <OofSettings><OofState>{state}</OofState><ExternalAudience>{audience}</ExternalAudience>\
                          <Duration><StartTime>{start}</StartTime><EndTime>{end}</EndTime></Duration>\
-                         <InternalReply><Message>{}</Message></InternalReply><ExternalReply><Message/></ExternalReply></OofSettings>",
-                        esc(&msg)
+                         <InternalReply><Message>{}</Message></InternalReply><ExternalReply><Message>{}</Message></ExternalReply></OofSettings>",
+                        esc(&msg),
+                        esc(&outside)
                     )],
                 );
             }
@@ -483,7 +485,8 @@ impl Data {
                     let refused = "<ResponseMessage ResponseClass=\"Error\"><MessageText>refused</MessageText><ResponseCode>ErrorInvalidParameter</ResponseCode></ResponseMessage>";
                     return ("SetUserOofSettingsResponse".into(), vec![refused.into()]);
                 }
-                self.oof = (get("OofState"), get("StartTime"), get("EndTime"), msg);
+                let outside = s.and_then(|s| s.find("ExternalReply")).and_then(|r| r.child("Message")).map(|m| m.text.clone()).unwrap_or_default();
+                self.oof = (get("OofState"), get("StartTime"), get("EndTime"), msg, outside, get("ExternalAudience"));
                 return (
                     "SetUserOofSettingsResponse".into(),
                     vec!["<ResponseMessage ResponseClass=\"Success\"><ResponseCode>NoError</ResponseCode></ResponseMessage>".into()],
@@ -772,10 +775,19 @@ mod tests {
             text: "Back on Monday".into(),
             from: Some("2026-10-15".into()),
             until: Some("2026-10-20".into()),
+            ..Default::default()
         };
         pool.submit(Job::SetVacation { account: "a1".into(), vacation: away.clone() });
         until(&pool, "replies on", |e| matches!(e, Event::Vacation { vacation: Some(v), error: None, .. } if *v == away));
         assert_eq!(data.lock().unwrap().oof.0, "Scheduled");
+        // Another reply for people outside the organisation, to the user's contacts only.
+        let split = mailcraft_model::job::Vacation { external: Some("Out of office".into()), outside: "known".into(), ..away.clone() };
+        pool.submit(Job::SetVacation { account: "a1".into(), vacation: split.clone() });
+        until(&pool, "two replies", |e| matches!(e, Event::Vacation { vacation: Some(v), error: None, .. } if *v == split));
+        let oof = data.lock().unwrap().oof.clone();
+        assert_eq!((oof.4.as_str(), oof.5.as_str()), ("Out of office", "Known"));
+        pool.submit(Job::SetVacation { account: "a1".into(), vacation: away.clone() });
+        until(&pool, "one reply again", |e| matches!(e, Event::Vacation { vacation: Some(v), error: None, .. } if *v == away));
         pool.submit(Job::SetVacation { account: "a1".into(), vacation: mailcraft_model::job::Vacation { text: "refuse".into(), ..away.clone() } });
         until(&pool, "a refused change", |e| matches!(e, Event::Vacation { vacation: Some(v), error: Some(_), .. } if *v == away));
 
@@ -1024,10 +1036,27 @@ mod tests {
     fn public_folders_list_under_their_own_folder_and_sync() {
         let mut d = Data::default();
         d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.folder("Calendar", None, Some("calendar"), "IPF.Appointment");
+        d.folder("Contacts", None, Some("contacts"), "IPF.Contact");
         let root = d.folder("IPM_SUBTREE", None, Some("publicfoldersroot"), "IPF.Note");
         let team = d.folder("Team", Some(&root), None, "IPF.Note");
         let news = d.folder("Announcements", Some(&team), None, "IPF.Note");
-        d.folder("Rooms", Some(&root), None, "IPF.Appointment");
+        let rooms = d.folder("Rooms", Some(&root), None, "IPF.Appointment");
+        let shared = d.folder("Company contacts", Some(&team), None, "IPF.Contact");
+        d.pim.push((
+            "PC1".into(),
+            shared,
+            parse("<t:Contact><t:ItemId Id=\"PC1\" ChangeKey=\"k\"/><t:DisplayName>Front desk</t:DisplayName><t:EmailAddresses><t:Entry Key=\"EmailAddress1\">desk@contoso.example</t:Entry></t:EmailAddresses></t:Contact>")
+                .kids[0]
+                .clone(),
+        ));
+        d.pim.push((
+            "PE1".into(),
+            rooms,
+            parse("<t:CalendarItem><t:Subject>Room 2 booked</t:Subject><t:Start>2026-10-16T09:00:00Z</t:Start><t:End>2026-10-16T10:00:00Z</t:End><t:UID>room-1</t:UID></t:CalendarItem>")
+                .kids[0]
+                .clone(),
+        ));
         d.deliver(
             &news,
             b"From: hr@contoso.example\r\nSubject: Holiday hours\r\nMessage-ID: <h@x>\r\n\r\nClosed Friday.\r\n",
@@ -1053,6 +1082,16 @@ mod tests {
         assert_eq!(fs.messages.len(), 1);
         assert_eq!(fs.messages[0].subject, "Holiday hours");
         let _ = std::fs::remove_dir_all(store.root());
+        // Issue #1: the organisation's shared contacts and calendars come in, read-only.
+        let sync = crate::ews_pim::sync(&c, &mailcraft_model::pim::Pim::default(), 0).unwrap();
+        let books = sync.books.clone().unwrap_or_default();
+        let book = books.iter().find(|b| b.id.starts_with("public:")).unwrap();
+        assert_eq!((book.name.as_str(), book.read_only), ("Team › Company contacts", true));
+        assert!(sync.cards.iter().any(|k| k.book == book.id && k.card.display() == "Front desk"));
+        let cals = sync.calendars.clone().unwrap_or_default();
+        let room = cals.iter().find(|c| c.id.starts_with("public:")).unwrap();
+        assert_eq!((room.name.as_str(), room.read_only), ("Rooms", true));
+        assert!(sync.events.iter().any(|e| e.calendar == room.id && e.event.summary == "Room 2 booked"));
         // A server without public folders lists the mailbox's alone.
         let mut d = Data::default();
         d.folder("Inbox", None, Some("inbox"), "IPF.Note");

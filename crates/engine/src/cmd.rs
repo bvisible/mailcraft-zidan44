@@ -362,6 +362,77 @@ pub fn registry() -> Registry {
             Ok(json!({"on": s.prefs.mark_read_on_open}))
         })
         .params(r#"{"on"?: bool}"#),
+        CommandSpec::new("calendar.show", "Show or hide a calendar", "Calendar › Calendars", |s, v| {
+            let account = p::req_str(v, "account")?.to_string();
+            let calendar = p::req_str(v, "calendar")?.to_string();
+            if !s.pim.get(&account).is_some_and(|p| p.calendars.iter().any(|c| c.id == calendar)) {
+                return Err(CmdError::Params(format!("no calendar `{calendar}` in `{account}`")));
+            }
+            let key = Session::calendar_key(&account, &calendar);
+            let shown = p::bool(v, "shown").unwrap_or(s.prefs.hidden_calendars.contains(&key));
+            if shown {
+                s.prefs.hidden_calendars.remove(&key);
+            } else {
+                s.prefs.hidden_calendars.insert(key);
+            }
+            s.pim_revision = s.pim_revision.wrapping_add(1);
+            Ok(json!({"account": account, "calendar": calendar, "shown": shown}))
+        })
+        .params(r#"{"account": string, "calendar": string, "shown"?: bool (default: the other way)}"#),
+        CommandSpec::new("calendar.sideBySide", "Side by side", "Calendar › View", |s, v| {
+            s.prefs.calendars_side_by_side = p::bool(v, "on").unwrap_or(!s.prefs.calendars_side_by_side);
+            Ok(json!({"on": s.prefs.calendars_side_by_side}))
+        })
+        .params(r#"{"on"?: bool (each calendar in a column of its own in day and week)}"#),
+        CommandSpec::new("calendar.months", "Months in the side pane", "Calendar › Side pane", |s, v| {
+            let n = p::u64(v, "count").ok_or_else(|| CmdError::Params("`count` is required (1 to 6)".into()))?;
+            s.prefs.calendar_months = u8::try_from(n.clamp(1, 6)).unwrap_or(1);
+            Ok(json!({"count": s.prefs.calendar_months}))
+        })
+        .params(r#"{"count": number (1 to 6)}"#),
+        CommandSpec::new("account.keepMail", "Mail kept on this computer", "File › Options › Mail", |s, v| {
+            if let Some(n) = p::u64(v, "messages") {
+                s.prefs.keep_messages = u32::try_from(n.min(1_000_000)).unwrap_or(0);
+            }
+            if let Some(n) = p::u64(v, "offline") {
+                s.prefs.keep_offline = u32::try_from(n.min(100_000)).unwrap_or(0);
+            }
+            s.apply_sync_prefs();
+            Ok(json!({"messages": s.prefs.keep_messages, "offline": s.prefs.keep_offline}))
+        })
+        .params(r#"{"messages"?: number (the newest of each folder kept; 0: all), "offline"?: number (of those, the newest downloaded in full)}"#),
+        CommandSpec::new("note.arrange", "Arrange notes", "Notes › Arrange by", |s, v| {
+            s.prefs.notes_order = match p::req_str(v, "by")? {
+                "modified" => crate::session::NotesOrder::Modified,
+                "title" => crate::session::NotesOrder::Title,
+                "color" => crate::session::NotesOrder::Color,
+                other => return Err(CmdError::Params(format!("`by` is modified, title or color, not `{other}`"))),
+            };
+            Ok(json!({"by": p::req_str(v, "by")?}))
+        })
+        .params(r#"{"by": "modified"|"title"|"color"}"#),
+        CommandSpec::new("compose.insertSignature", "Insert signature", "Message › Signature", insert_signature)
+            .params(r#"{"at"?: number (the character it goes at; default the end)}"#),
+        CommandSpec::new("view.readingOptions", "Reading pane options", "File › Options › Mail", |s, v| {
+            if let Some(on) = p::bool(v, "markRead") {
+                s.prefs.mark_read_on_open = on;
+            }
+            match p::str(v, "when") {
+                Some("shown") => s.prefs.read_in_pane = crate::session::ReadInPane::Shown,
+                Some("left") => s.prefs.read_in_pane = crate::session::ReadInPane::Left,
+                Some(other) => return Err(CmdError::Params(format!("`when` is shown or left, not `{other}`"))),
+                None => {}
+            }
+            if let Some(secs) = p::u64(v, "after") {
+                s.prefs.read_after_secs = u32::try_from(secs.min(999)).unwrap_or(999);
+            }
+            let when = match s.prefs.read_in_pane {
+                crate::session::ReadInPane::Shown => "shown",
+                crate::session::ReadInPane::Left => "left",
+            };
+            Ok(json!({"markRead": s.prefs.mark_read_on_open, "when": when, "after": s.prefs.read_after_secs}))
+        })
+        .params(r#"{"markRead"?: bool (in the reading pane at all; opening a message in its own window always does), "when"?: "shown"|"left" (when it's shown, or once another is chosen), "after"?: number (seconds shown first, with "shown")}"#),
         CommandSpec::new("view.trustSender", "Show pictures from a sender", "File › Options › Privacy", |s, v| {
             let who = p::req_str(v, "address")?.trim().to_ascii_lowercase();
             if !mailcraft_model::addr::is_valid_email(&who) {
@@ -451,7 +522,7 @@ pub fn registry() -> Registry {
             }
             Ok(r)
         })
-        .params(r#"{"summary": string, "start": "YYYY-MM-DD[THH:MM]", "end"?: …, "allDay"?: bool, "location"?: string, "description"?: string, "repeat"?: "daily"|"weekly"|"monthly"|"yearly"|RRULE, "attendees"?: "a@x, Name <b@y>" (invited by mail), "account"?: string, "calendar"?: string}"#),
+        .params(r#"{"summary": string, "start": "YYYY-MM-DD[THH:MM]", "end"?: …, "allDay"?: bool, "location"?: string, "description"?: string, "repeat"?: "daily"|"weekly"|"monthly"|"yearly"|RRULE, "attendees"?: "a@x, Name <b@y>" (invited by mail), "categories"?: [string] | "Work, Clients" (colour it as those categories), "account"?: string, "calendar"?: string}"#),
         CommandSpec::new("event.update", "Edit event", "Calendar › Event", |s, v| {
             let uid = p::req_str(v, "uid")?.to_string();
             let current = s.find_event(&uid).map(|(_, e)| e.event.clone()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
@@ -628,12 +699,24 @@ pub fn registry() -> Registry {
             let id = p::req_str(v, "account")?;
             let config = s.account(id).map(|a| a.config.clone()).ok_or_else(|| CmdError::Params(format!("no account `{id}`")))?;
             if config.oauth.is_none() {
+                // A Microsoft account signing in with a password (refused there) switches over.
+                if mailcraft_model::microsoft_password_account(&config) {
+                    if !s.oauth_available.iter().any(|p| p == "microsoft") {
+                        return Err(CmdError::Params("signing in with Microsoft isn't set up in this copy of MailCraft".into()));
+                    }
+                    return s.use_microsoft_sign_in(id);
+                }
                 return Err(CmdError::Params("this account signs in with a password".into()));
             }
             s.push_job(mailcraft_model::Job::SignIn { account: config });
             Ok(json!({"signingIn": id}))
         })
-        .params(r#"{"account": string}"#),
+        .params(r#"{"account": string} (a Microsoft account that signs in with a password switches to Sign in with Microsoft, keeping its mail)"#),
+        CommandSpec::new("account.useGraph", "Connect through Microsoft Graph", "File › Accounts", |s, v| {
+            let id = p::req_str(v, "account")?.to_string();
+            s.use_graph(&id)
+        })
+        .params(r#"{"account": string} (a Microsoft account over IMAP starts again through Microsoft Graph, for a mailbox Microsoft won't open over IMAP)"#),
         CommandSpec::new("account.setPassword", "Sign in again", "File › Accounts", set_password).params(r#"{"account": string, "password": string}"#),
         CommandSpec::new("account.setSignature", "Signature", "File › Options › Mail", set_signature).params(r#"{"account": string, "signature": string}"#),
         CommandSpec::new("account.list", "Accounts", "File › Accounts", list_accounts),
@@ -665,10 +748,16 @@ pub fn registry() -> Registry {
                 text: p::str(v, "text").unwrap_or_default().chars().take(20_000).collect(),
                 from: day("from"),
                 until: day("until"),
+                external: p::str(v, "external").map(|t| t.chars().take(20_000).collect::<String>()).filter(|t| !t.trim().is_empty()),
+                outside: match p::str(v, "outside").map(str::trim) {
+                    None | Some("" | "all") => String::new(),
+                    Some(o @ ("known" | "none")) => o.to_string(),
+                    Some(other) => return Err(CmdError::Params(format!("`outside` is all, known or none, not `{other}`"))),
+                },
             };
             s.set_vacation(&id, vacation)
         })
-        .params(r#"{"account"?: string, "enabled": bool, "subject"?: string, "text": string, "from"?: "YYYY-MM-DD", "until"?: "YYYY-MM-DD"}"#),
+        .params(r#"{"account"?: string, "enabled": bool, "subject"?: string, "text": string, "from"?: "YYYY-MM-DD", "until"?: "YYYY-MM-DD", "external"?: string (Exchange: another reply for people outside the organisation), "outside"?: "all"|"known"|"none" (Exchange: who outside gets one)}"#),
     ])
 }
 
@@ -1029,6 +1118,41 @@ fn insert_picture(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"cid": cid}))
 }
 
+/// The account's signature into the message being written, at character `at` (else the end),
+/// on a line of its own after the usual `-- ` line (Outlook's Insert › Signature).
+fn insert_signature(s: &mut Session, v: &Value) -> CmdResult {
+    use mailcraft_mime::rich::Style;
+    let account = s.compose.as_ref().map(|c| c.account.clone()).ok_or_else(|| CmdError::Disabled("no message is being written".into()))?;
+    let sig = s.account(&account).map(|a| a.config.signature.trim_end().to_string()).unwrap_or_default();
+    if sig.trim().is_empty() {
+        return Err(CmdError::Params("this account has no signature yet: make one with Signatures…".into()));
+    }
+    let c = s.compose.as_mut().ok_or_else(|| CmdError::Disabled("no message is being written".into()))?;
+    let old = c.body.clone();
+    let block = crate::session::signature_block(&sig);
+    // The signature put in before, still there as it was, is replaced (as choosing a signature
+    // in Outlook replaces the one there); otherwise it goes in at the cursor.
+    let there = if c.signature.is_empty() { None } else { old.rfind(&c.signature).map(|b| (b, b + c.signature.len())) };
+    let (start, stop, text) = match there {
+        Some((b, e)) => (b, e, block.clone()),
+        None => {
+            let n = old.chars().count();
+            let at = p::u64(v, "at").and_then(|a| usize::try_from(a).ok()).unwrap_or(n).min(n);
+            let b = old.char_indices().nth(at).map_or(old.len(), |(b, _)| b);
+            let before = if at > 0 && old.chars().nth(at - 1) != Some('\n') { "\n" } else { "" };
+            (b, b, format!("{before}{block}\n"))
+        }
+    };
+    c.signature = block;
+    c.body.replace_range(start..stop, &text);
+    let at = old.get(..start).unwrap_or("").chars().count();
+    let end = at + text.chars().count();
+    let mut styles = std::mem::take(&mut c.styles);
+    styles.edit_at(&old, &c.body, &Style::default(), Some(end));
+    c.styles = styles;
+    Ok(json!({"inserted": at, "end": end}))
+}
+
 /// Put picture `cid` into the text at character `at`.
 pub fn insert_picture_at(c: &mut crate::session::Compose, at: usize, cid: &str) {
     use mailcraft_mime::rich::{PICTURE, Style};
@@ -1276,6 +1400,7 @@ fn add_account(s: &mut Session, v: &Value) -> CmdResult {
             Some(n) => Some(u32::try_from(n).unwrap_or(u32::MAX)),
         },
         pop_delete_with_trash: p::bool(v, "popDeleteWithTrash").unwrap_or(false),
+        oauth_user: None,
     };
     if let Some(o) = &config.oauth
         && !s.oauth_available.contains(o)
@@ -1430,6 +1555,15 @@ fn event_from(s: &Session, v: &Value, mut e: mailcraft_model::ical::CalEvent) ->
                 }
             })
             .collect();
+    }
+    let list: Option<Vec<String>> = match v.get("categories") {
+        Some(Value::String(x)) => Some(x.split([',', ';']).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect()),
+        Some(Value::Array(a)) => Some(a.iter().filter_map(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect()),
+        _ => None,
+    };
+    if let Some(mut list) = list {
+        list.dedup();
+        e.categories = list.into_iter().take(20).map(|c| c.chars().take(100).collect()).collect();
     }
     match p::str(v, "repeat").map(str::trim) {
         Some("" | "none" | "never") => e.rrule = None,

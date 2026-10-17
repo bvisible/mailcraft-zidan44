@@ -49,6 +49,9 @@ pub struct AgendaItem {
     pub end: i64,
     pub all_day: bool,
     pub color: u8,
+    /// The colour of its first category (an index into the category palette), which Outlook
+    /// draws an appointment in rather than its calendar's.
+    pub category: Option<u8>,
     /// `TENTATIVE`, `CANCELLED`…
     pub status: String,
     /// The user's reply is awaited (`NEEDS-ACTION`).
@@ -198,12 +201,40 @@ impl Session {
         Ok(serde_json::json!({"date": format!("{y:04}-{m:02}-{dd:02}"), "mode": self.cal_mode}))
     }
 
-    /// The occurrences overlapping `[from, to)`, by start, from every calendar.
+    /// The key a calendar is shown or hidden under (`Prefs::hidden_calendars`).
+    pub fn calendar_key(account: &str, calendar: &str) -> String {
+        format!("{account}/{calendar}")
+    }
+
+    /// Whether a calendar is shown (ticked) in the calendar.
+    pub fn calendar_shown(&self, account: &str, calendar: &str) -> bool {
+        !self.prefs.hidden_calendars.contains(&Session::calendar_key(account, calendar))
+    }
+
+    // //// Neoffice — whether a calendar is offered at all (the side pane, side by side): not the one on this computer,
+    // empty, where nothing put there is kept (the browser build in a hosting page: `keeps_local_pim`); one holding events
+    // from before still is.
+    pub fn calendar_listed(&self, account: &str, calendar: &str) -> bool {
+        self.keeps_local_pim || calendar != LOCAL || self.pim.get(account).is_some_and(|p| p.events.iter().any(|e| e.calendar == LOCAL))
+    }
+
+    /// The calendars shown, in the order the side pane lists them: (account, id, name, colour).
+    pub fn shown_calendars(&self) -> Vec<(String, String, String, u8)> {
+        self.accounts
+            .iter()
+            .filter_map(|a| self.pim.get(&a.config.id).map(|p| (a, p)))
+            .flat_map(|(a, p)| p.calendars.iter().map(move |c| (a.config.id.clone(), c.id.clone(), c.name.clone(), c.color)))
+            // //// Neoffice — and offered (calendar_listed).
+            .filter(|(a, c, _, _)| self.calendar_shown(a, c) && self.calendar_listed(a, c))
+            .collect()
+    }
+
+    /// The occurrences overlapping `[from, to)`, by start, from every calendar that's shown.
     pub fn agenda(&self, from: i64, to: i64) -> Vec<AgendaItem> {
         let off = i64::from(self.clock.offset);
         let mut out = Vec::new();
         for (account, p) in &self.pim {
-            for cal in &p.calendars {
+            for cal in p.calendars.iter().filter(|c| self.calendar_shown(account, &c.id)) {
                 let stored: Vec<&StoredEvent> = p.events.iter().filter(|e| e.calendar == cal.id).collect();
                 let events: Vec<CalEvent> = stored.iter().map(|e| e.event.clone()).collect();
                 // All-day events are dates, not times: widen the window by a day each way.
@@ -228,6 +259,7 @@ impl Session {
                         end,
                         all_day: e.all_day,
                         color: cal.color,
+                        category: e.categories.first().map(|c| self.category_color_of(c)),
                         status: e.status.clone(),
                         needs_reply,
                     });
@@ -236,6 +268,17 @@ impl Session {
         }
         out.sort_by(|a, b| (b.all_day, a.start, &a.summary).cmp(&(a.all_day, b.start, &b.summary)));
         out
+    }
+
+    /// A category's colour by its name: the one made with that name (mail and events share
+    /// them), else one picked from the name (a category from the server MailCraft has no colour
+    /// for still gets the same one every time).
+    pub fn category_color_of(&self, name: &str) -> u8 {
+        if let Some(c) = self.prefs.categories.iter().find(|c| c.name.eq_ignore_ascii_case(name.trim())) {
+            return c.color;
+        }
+        let h = name.trim().to_lowercase().bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b));
+        u8::try_from(h % 8).unwrap_or(0)
     }
 
     /// The event (master, not an instance) with a uid, and its account.
@@ -565,13 +608,18 @@ impl Session {
         Ok(serde_json::json!({"uid": uid, "account": account}))
     }
 
+    /// Whether a person is in an address book that can't be changed here (an organisation's
+    /// shared contacts).
+    pub fn person_read_only(&self, uid: &str) -> bool {
+        self.pim.values().any(|p| p.cards.iter().any(|c| c.card.uid == uid && p.books.iter().any(|b| b.id == c.book && b.read_only)))
+    }
+
     pub fn update_card(&mut self, uid: &str, change: impl FnOnce(&mut Card)) -> CmdResult {
         let account = self.find_person(uid).map(|p| p.account).ok_or_else(|| CmdError::Params(format!("no contact `{uid}`")))?;
-        let p = self.pim_mut(&account);
-        // //// Neoffice — not in an address book that can't be changed (a server's read-only one).
-        if p.cards.iter().find(|c| c.card.uid == uid).is_some_and(|c| p.book_read_only(&c.book)) {
-            return Err(CmdError::Params("this address book can't be changed".into()));
+        if self.person_read_only(uid) {
+            return Err(CmdError::Disabled("this contact is in a shared address book that can't be changed here".into()));
         }
+        let p = self.pim_mut(&account);
         let Some(c) = p.cards.iter_mut().find(|c| c.card.uid == uid) else { return Err(CmdError::Params(format!("no contact `{uid}`"))) };
         let mut card = c.card.clone();
         change(&mut card);
@@ -585,14 +633,13 @@ impl Session {
 
     pub fn delete_card(&mut self, uid: &str) -> CmdResult {
         let account = self.find_person(uid).map(|p| p.account).ok_or_else(|| CmdError::Params(format!("no contact `{uid}`")))?;
-        let p = self.pim_mut(&account);
-        // //// Neoffice — nothing goes out of an address book that can't be changed (a server's read-only one), nor out of one
-        // whose cards the person may not delete.
-        if p.cards.iter().any(|c| c.card.uid == uid && p.book_read_only(&c.book)) {
-            return Err(CmdError::Params("this address book can't be changed".into()));
+        if self.person_read_only(uid) {
+            return Err(CmdError::Disabled("this contact is in a shared address book that can't be changed here".into()));
         }
+        let p = self.pim_mut(&account);
+        // //// Neoffice — nor out of a book whose cards the person may not delete (a JMAP book's rights: Pim::no_delete_books).
         if p.cards.iter().any(|c| c.card.uid == uid && p.no_delete_books.contains(&c.book)) {
-            return Err(CmdError::Params("your rights do not let you delete this contact".into()));
+            return Err(CmdError::Disabled("your rights do not let you delete this contact".into()));
         }
         let mut remote = false;
         for c in p.cards.iter().filter(|c| c.card.uid == uid && !c.href.is_empty()) {
@@ -680,7 +727,13 @@ impl Session {
                     .map(|n| NoteRef { account: a.clone(), note: n.note.clone() })
             })
             .collect();
-        out.sort_by(|a, b| b.note.modified.cmp(&a.note.modified).then_with(|| a.note.uid.cmp(&b.note.uid)));
+        // A note's title is its first line, compared without case.
+        let title = |n: &NoteRef| n.note.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_lowercase();
+        match self.prefs.notes_order {
+            super::NotesOrder::Modified => out.sort_by(|a, b| b.note.modified.cmp(&a.note.modified).then_with(|| a.note.uid.cmp(&b.note.uid))),
+            super::NotesOrder::Title => out.sort_by_cached_key(|n| (title(n), n.note.uid.clone())),
+            super::NotesOrder::Color => out.sort_by_cached_key(|n| (n.note.color, title(n), n.note.uid.clone())),
+        }
         out
     }
 
