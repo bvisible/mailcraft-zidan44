@@ -184,9 +184,10 @@ impl SnoozeUntil {
 
     /// When, in Unix seconds, for a user at `clock` (local time).
     pub fn at(self, clock: &Clock) -> i64 {
-        let local = clock.now + i64::from(clock.offset);
+        // //// Neoffice — 8:00 by the offset of that day itself (Clock::zone: daylight saving), not today's.
+        let local = clock.local(clock.now);
         let day = local.div_euclid(86_400);
-        let morning = |d: i64| d * 86_400 + 8 * 3600 - i64::from(clock.offset);
+        let morning = |d: i64| clock.utc(d * 86_400 + 8 * 3600);
         // 1970-01-01 was a Thursday: 0 = Monday … 6 = Sunday.
         let weekday = (day + 3).rem_euclid(7);
         match self {
@@ -276,6 +277,19 @@ mod tests {
         assert_eq!(date_of(SnoozeUntil::NextWeek.at(&sunday).div_euclid(86_400)), (2026, 10, 19));
         assert_eq!(date_of(SnoozeUntil::Weekend.at(&sunday).div_euclid(86_400)), (2026, 10, 24));
         assert_eq!(SnoozeUntil::from_code("NEXTWEEK"), Some(SnoozeUntil::NextWeek));
+    }
+
+    // //// Neoffice — the morning a snooze wakes at is 8:00 on that day's own offset (daylight saving).
+    #[test]
+    fn snooze_mornings_are_eight_o_clock_across_a_change_of_offset() {
+        use crate::dates::{Zone, civil};
+        let zone = Zone::from_offsets(1_760_000_000, 1_820_000_000, crate::dates::zurich);
+        // Saturday 2026-10-24 12:00 UTC, summer time (+2); the clocks go back on the 25th.
+        let clock = Clock::new(1_792_843_200, 7200).with_zone(zone);
+        let t = SnoozeUntil::Tomorrow.at(&clock);
+        let c = civil(t, &clock);
+        assert_eq!((c.day, c.hour, c.minute), (25, 8, 0), "8:00 winter time");
+        assert_eq!(t, 1_792_911_600, "07:00 UTC");
     }
 
     #[test]

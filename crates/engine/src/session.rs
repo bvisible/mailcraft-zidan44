@@ -761,7 +761,14 @@ impl Session {
     }
 
     pub fn set_clock(&mut self, now: i64, offset: i32) {
-        self.clock = Clock::new(now, offset);
+        // //// Neoffice — keeping the zone's rules (Clock::zone, set_zone).
+        self.clock = Clock::new(now, offset).with_zone(self.clock.zone);
+    }
+
+    // //// Neoffice — the local zone's rules (daylight saving), from the app (the browser's, the system's): every date is
+    // shown, and every local time read, by the offset of its own date.
+    pub fn set_zone(&mut self, zone: mailcraft_model::dates::Zone) {
+        self.clock.zone = zone;
     }
 
     pub fn notice(&mut self, text: impl Into<String>, error: bool) {

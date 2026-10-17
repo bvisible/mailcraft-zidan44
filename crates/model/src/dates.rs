@@ -11,15 +11,118 @@ pub struct Clock {
     pub now: i64,
     /// Local offset from UTC in seconds (east positive).
     pub offset: i32,
+    // //// Neoffice — the local zone's changes of offset around now (daylight saving), from the time-zone rules the app
+    // has (the browser's, the system's), so that a time is shown, and a local time read, with the offset of its own date
+    // rather than today's: a meeting at 10:00 shows 10:00 on both sides of a change. Without them, today's offset, as
+    // before.
+    #[serde(default)]
+    pub zone: Zone,
+}
+
+// //// Neoffice — see `Clock::zone`.
+/// The most changes of offset a [`Zone`] holds: the thirteen years the apps ask for (three back, ten ahead) of two a
+/// year, with room.
+pub const ZONE_CHANGES: usize = 32;
+
+/// The local zone's offsets over a span of years (the apps ask for three years back and ten ahead): from each instant
+/// (`at`, Unix seconds) the offset (seconds east of UTC) until the next. Outside the span, the offset of its nearest end:
+/// one offset, without its changes. Built by [`Zone::from_offsets`] from the app's time-zone rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Zone {
+    pub len: u8,
+    pub at: [i64; ZONE_CHANGES],
+    pub offset: [i32; ZONE_CHANGES],
+}
+
+impl Zone {
+    /// The changes of `offset` (an instant's offset by the rules) from `from` to `to`, found a day at a time and then
+    /// to the second; at most [`ZONE_CHANGES`].
+    pub fn from_offsets(from: i64, to: i64, offset: impl Fn(i64) -> i32) -> Zone {
+        let mut zone = Zone::default();
+        let clamp = |o: i32| o.clamp(-14 * 3600, 14 * 3600);
+        let push = |zone: &mut Zone, at: i64, o: i32| {
+            let n = usize::from(zone.len);
+            if let (Some(a), Some(off)) = (zone.at.get_mut(n), zone.offset.get_mut(n)) {
+                (*a, *off) = (at, o);
+                zone.len = zone.len.saturating_add(1);
+            }
+        };
+        let (mut t, mut was) = (from, clamp(offset(from)));
+        push(&mut zone, i64::MIN, was);
+        while t < to && usize::from(zone.len) < ZONE_CHANGES {
+            let next = t.saturating_add(86_400);
+            let now = clamp(offset(next));
+            if now != was {
+                // The first second with the new offset.
+                let (mut lo, mut hi) = (t, next);
+                while hi - lo > 1 {
+                    let mid = lo + (hi - lo) / 2;
+                    if clamp(offset(mid)) == was {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                push(&mut zone, hi, now);
+                was = now;
+            }
+            t = next;
+        }
+        zone
+    }
 }
 
 impl Clock {
     pub fn new(now: i64, offset: i32) -> Clock {
-        Clock { now, offset: offset.clamp(-14 * 3600, 14 * 3600) }
+        Clock { now, offset: offset.clamp(-14 * 3600, 14 * 3600), zone: Zone::default() }
+    }
+
+    // //// Neoffice — see `Clock::zone`.
+    /// This clock with the zone's rules.
+    pub fn with_zone(mut self, zone: Zone) -> Clock {
+        self.zone = zone;
+        self
+    }
+
+    /// The offset of an instant: by the zone's rules, else today's.
+    pub fn offset_at(&self, t: i64) -> i32 {
+        let n = usize::from(self.zone.len).min(ZONE_CHANGES);
+        let mut found = None;
+        for (at, offset) in self.zone.at.iter().zip(self.zone.offset.iter()).take(n) {
+            if *at > t {
+                break;
+            }
+            found = Some(*offset);
+        }
+        found.or_else(|| self.zone.offset.first().copied().filter(|_| n > 0)).unwrap_or(self.offset)
+    }
+
+    /// An instant as local time (seconds, as if UTC).
+    pub fn local(&self, t: i64) -> i64 {
+        t.saturating_add(i64::from(self.offset_at(t)))
+    }
+
+    /// The instant a local time (seconds, as if UTC) is, by the offset of its own date, whatever today's is: in the hour
+    /// a change repeats, its first; in the hour a change skips, moved forward by the gap (02:30 becomes 03:30).
+    pub fn utc(&self, local: i64) -> i64 {
+        // The offsets on either side of that time (a change of offset is never within a day of another).
+        let before = i64::from(self.offset_at(local.saturating_sub(86_400)));
+        let after = i64::from(self.offset_at(local.saturating_add(86_400)));
+        let is = |offset: i64| {
+            let t = local.saturating_sub(offset);
+            (self.local(t) == local).then_some(t)
+        };
+        match (is(before), is(after)) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(t), None) | (None, Some(t)) => t,
+            // Skipped: the instant the offset before it would have given, which the offset after shows the gap later.
+            (None, None) => local.saturating_sub(before),
+        }
     }
 
     fn local_day(&self, t: i64) -> i64 {
-        t.saturating_add(i64::from(self.offset)).div_euclid(86_400)
+        // //// Neoffice — the offset of its own date (`Clock::zone`).
+        self.local(t).div_euclid(86_400)
     }
 }
 
@@ -62,7 +165,8 @@ pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// Split a time into local calendar parts.
 pub fn civil(t: i64, clock: &Clock) -> Civil {
-    let local = t.saturating_add(i64::from(clock.offset));
+    // //// Neoffice — with the offset of its own date (`Clock::zone`).
+    let local = clock.local(t);
     let days = local.div_euclid(86_400);
     let secs = local.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
@@ -239,6 +343,19 @@ pub fn day_label(day: i64) -> String {
     format!("{weekday} {y:04}-{m:02}-{d:02}")
 }
 
+// //// Neoffice — see `Clock::zone`.
+/// Europe/Zurich's rules, for the tests: CEST (+2) from the last Sunday of March, 01:00 UTC, to the last Sunday of
+/// October, 01:00 UTC; CET (+1) otherwise.
+#[cfg(test)]
+pub(crate) fn zurich(t: i64) -> i32 {
+    let (y, _, _) = civil_from_days(t.div_euclid(86_400));
+    let last_sunday = |m: u32| {
+        let end = days_from_civil(y, m, 31);
+        (end - (end - 3).rem_euclid(7)) * 86_400 + 3600
+    };
+    if t >= last_sunday(3) && t < last_sunday(10) { 7200 } else { 3600 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +411,62 @@ mod tests {
         let t = NOW - 12 * 3600 - 1800;
         assert_eq!(DateGroup::of(t, &Clock::new(NOW, 0)), DateGroup::Yesterday);
         assert_eq!(DateGroup::of(t, &Clock::new(NOW, 7200)), DateGroup::Today);
+    }
+
+    // //// Neoffice — a time is shown, and a local time read, with the offset of its own date (daylight saving), not today's.
+    #[test]
+    fn a_time_shows_with_the_offset_of_its_own_date() {
+        let at = |y: i64, m: u32, d: u32, h: i64| days_from_civil(y, m, d) * 86_400 + h * 3600;
+        let zone = Zone::from_offsets(NOW - 5 * 366 * 86_400, NOW + 10 * 366 * 86_400, super::zurich);
+        // Today, 14 October 2026, is summer time (+2).
+        let clock = Clock::new(NOW, 7200).with_zone(zone);
+        // 10:00 in Zurich, before and after the change of 25 October 2026 (01:00 UTC), and of 29 March 2026.
+        for (utc, day) in [(at(2026, 10, 20, 8), 20), (at(2026, 10, 27, 9), 27)] {
+            let c = civil(utc, &clock);
+            assert_eq!((c.month, c.day, c.hour, c.minute), (10, day, 10, 0), "October {day}");
+            assert_eq!(clock.utc(clock.local(utc)), utc, "and back");
+        }
+        for (utc, day) in [(at(2026, 3, 28, 9), 28), (at(2026, 3, 30, 8), 30)] {
+            let c = civil(utc, &clock);
+            assert_eq!((c.month, c.day, c.hour), (3, day, 10), "March {day}");
+        }
+        // A local time read as the instant it is on its own date.
+        assert_eq!(clock.utc(days_from_civil(2026, 10, 27) * 86_400 + 10 * 3600), at(2026, 10, 27, 9));
+        assert_eq!(clock.utc(days_from_civil(2026, 10, 20) * 86_400 + 10 * 3600), at(2026, 10, 20, 8));
+        // Exactly at the change.
+        let change = at(2026, 10, 25, 1);
+        assert_eq!((clock.offset_at(change - 1), clock.offset_at(change)), (7200, 3600));
+        assert_eq!(list_time(at(2026, 10, 27, 9), &Clock::new(at(2026, 10, 27, 12), 3600).with_zone(zone)), "10:00");
+        // Without the rules, today's offset for every date, as before.
+        assert_eq!(civil(at(2026, 10, 27, 9), &Clock::new(NOW, 7200)).hour, 11);
+        // A zone without changes, and hostile values.
+        let fixed = Zone::from_offsets(0, 10 * 366 * 86_400, |_| 3600);
+        assert_eq!(Clock::new(NOW, 3600).with_zone(fixed).offset_at(NOW), 3600);
+        let _ = Clock::new(NOW, 0).with_zone(zone).utc(i64::MAX);
+        let _ = civil(i64::MIN, &Clock::new(NOW, 0).with_zone(zone));
+    }
+
+    // //// Neoffice — the hour a change of offset skips, and the one it repeats, read the same whatever today's offset is.
+    #[test]
+    fn a_skipped_or_repeated_local_time_is_read_the_same_whatever_today_is() {
+        let at = |y: i64, m: u32, d: u32, h: i64, mi: i64| days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60;
+        let zone = Zone::from_offsets(NOW - 2 * 366 * 86_400, NOW + 2 * 366 * 86_400, super::zurich);
+        for today in [3600, 7200] {
+            let clock = Clock::new(NOW, today).with_zone(zone);
+            // 02:30 on 29 March 2026 doesn't exist (02:00 → 03:00): forward by the gap, to 03:30 summer time.
+            let skipped = clock.utc(at(2026, 3, 29, 2, 30));
+            assert_eq!((skipped, civil(skipped, &clock).hour, civil(skipped, &clock).minute), (at(2026, 3, 29, 1, 30), 3, 30), "today {today}");
+            // 02:30 on 25 October 2026 happens twice (03:00 → 02:00): the first, summer time.
+            assert_eq!(clock.utc(at(2026, 10, 25, 2, 30)), at(2026, 10, 25, 0, 30), "today {today}");
+            // Elsewhere, the one instant there is.
+            assert_eq!(clock.utc(at(2026, 10, 27, 10, 0)), at(2026, 10, 27, 9, 0));
+        }
+        // A zone that changes at midnight (00:00 → 01:00): a day's midnight is on that day, never the evening before.
+        let change = days_from_civil(2026, 9, 6) * 86_400 - 3 * 3600;
+        let midnight = Zone::from_offsets(change - 30 * 86_400, change + 30 * 86_400, |t| if t < change { 3 * 3600 } else { 4 * 3600 });
+        let clock = Clock::new(change, 3 * 3600).with_zone(midnight);
+        let day = days_from_civil(2026, 9, 6);
+        assert_eq!(clock.local(clock.utc(day * 86_400)).div_euclid(86_400), day);
     }
 
     #[test]

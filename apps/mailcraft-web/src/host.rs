@@ -12,7 +12,8 @@
 //!   session: "https://…",        // its JMAP session URL
 //!   username: "jane@example.com",
 //!   secret: "<token>",           // kept in this tab's memory only, never stored
-//!   scheme: "bearer"             // or "basic"
+//!   scheme: "bearer",            // or "basic"
+//!   signature: { html: "…", text: "…" }  // optional: the mailbox's signature in Neoffice, its default here
 //! }], language: "fr",           // the person's language: MailCraft draws in it for « Automatic »
 //!   product: "NeoMail" };        // the name the person reads, shown wherever MailCraft names itself
 //! ```
@@ -33,7 +34,8 @@
 //!
 //! It is read on this page, or on the page that frames it when that one is of the same origin (reading another
 //! origin's window throws, which reads as nothing). Nothing secret travels in the address. With host accounts,
-//! MailCraft keeps nothing between visits: the mail is in this tab's memory, as with the sample mailbox.
+//! MailCraft keeps no mail, account or secret between visits (the mail is in this tab's memory, as with the sample
+//! mailbox), only the settings and the signatures made here (kept.rs).
 
 use std::collections::HashMap;
 
@@ -44,6 +46,8 @@ use wasm_bindgen_futures::JsFuture;
 
 /// The longest name of the signed-in person taken from the address.
 const MAX_AUTHOR_CHARS: usize = 128;
+/// The longest signature taken from the page.
+const MAX_SIGNATURE_CHARS: usize = 10_000;
 
 /// A mailbox the page handed over.
 #[derive(Clone, Debug)]
@@ -54,6 +58,8 @@ pub struct HostAccount {
     pub username: String,
     pub secret: String,
     pub bearer: bool,
+    /// Its signature in Neoffice, as text (empty: none given).
+    pub signature: String,
 }
 
 fn get(target: &JsValue, key: &str) -> Option<JsValue> {
@@ -174,6 +180,7 @@ fn parse(host: &JsValue) -> Vec<HostAccount> {
             username: text(&item, "username"),
             secret: text(&item, "secret"),
             bearer: text(&item, "scheme").eq_ignore_ascii_case("bearer"),
+            signature: get(&item, "signature").map(|s| signature(&s)).unwrap_or_default(),
         };
         let complete = account.email.contains('@') && account.session.starts_with("https://") && !account.secret.is_empty();
         if complete && !out.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
@@ -181,6 +188,18 @@ fn parse(host: &JsValue) -> Vec<HostAccount> {
         }
     }
     out
+}
+
+/// A mailbox's signature as the page gives it (`{ html, text }`), as text: its text, else its HTML made text (MailCraft's
+/// signatures are text), at most MAX_SIGNATURE_CHARS characters.
+fn signature(given: &JsValue) -> String {
+    let plain = get(given, "text").and_then(|v| v.as_string()).unwrap_or_default();
+    let plain = if plain.trim().is_empty() {
+        get(given, "html").and_then(|v| v.as_string()).map(|h| mailcraft_engine::mime::html_to_text(&h)).unwrap_or_default()
+    } else {
+        plain
+    };
+    plain.trim().chars().take(MAX_SIGNATURE_CHARS).collect()
 }
 
 /// The product's name the person reads (Neoffice's "NeoMail"), if the page gives one.
@@ -195,18 +214,21 @@ pub fn language() -> Option<String> {
     Some(text(&host, "language")).filter(|tag| !tag.is_empty() && tag.len() <= 35)
 }
 
-/// A store in memory holding these mailboxes' accounts (`a1`, `a2`…), before the session opens it, so each starts once.
-pub fn store(accounts: &[HostAccount]) -> Store {
+/// A store in memory holding these mailboxes' accounts (`a1`, `a2`…), before the session opens it, so each starts once;
+/// each with the page's signature and name, or the ones made here that replaced them (`signatures`, `names`, by address
+/// in lower case).
+pub fn store(accounts: &[HostAccount], signatures: &HashMap<String, crate::kept::Kept>, names: &HashMap<String, crate::kept::Kept>) -> Store {
     let store = Store::memory();
     let configs: Vec<AccountConfig> = accounts
         .iter()
         .enumerate()
         .map(|(i, a)| AccountConfig {
             id: format!("a{}", i + 1),
-            name: a.name.clone(),
+            name: crate::kept::chosen(&a.name, names.get(&a.email.to_lowercase())),
             email: a.email.clone(),
             username: if a.username.is_empty() { a.email.clone() } else { a.username.clone() },
             jmap: Some(a.session.clone()),
+            signature: crate::kept::chosen(&a.signature, signatures.get(&a.email.to_lowercase())),
             ..AccountConfig::default()
         })
         .collect();
@@ -214,6 +236,60 @@ pub fn store(accounts: &[HostAccount]) -> Store {
         log::error!("the mailboxes of the page couldn't be set up: {e}");
     }
     store
+}
+
+/// The browser's time zone, by its IANA name (`Intl.DateTimeFormat().resolvedOptions().timeZone`): new and changed times
+/// of events are written in it (mailcraft-jmap's calendars.rs). Empty when the browser doesn't say.
+pub fn time_zone() -> String {
+    let format = js_sys::Intl::DateTimeFormat::new(&js_sys::Array::new(), &js_sys::Object::new());
+    get(&format.resolved_options(), "timeZone").and_then(|z| z.as_string()).unwrap_or_default()
+}
+
+/// The local time (seconds, as if UTC) of the instant `t` in a zone, the browser's for `None`, by the browser's time-zone
+/// rules (MailCraft has none); `None` for a zone the browser doesn't know.
+pub fn local_time(zone: Option<&str>, t: i64) -> Option<i64> {
+    let date = js_sys::Date::new(&JsValue::from_f64(t as f64 * 1000.0));
+    let Some(zone) = zone else {
+        // Minutes behind UTC.
+        let offset = date.get_timezone_offset();
+        return (!offset.is_nan()).then(|| t - offset as i64 * 60);
+    };
+    let options = js_sys::Object::new();
+    for (key, value) in [
+        ("timeZone", zone),
+        ("hourCycle", "h23"),
+        ("year", "numeric"),
+        ("month", "2-digit"),
+        ("day", "2-digit"),
+        ("hour", "2-digit"),
+        ("minute", "2-digit"),
+        ("second", "2-digit"),
+    ] {
+        js_sys::Reflect::set(&options, &JsValue::from_str(key), &JsValue::from_str(value)).ok()?;
+    }
+    let intl = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("Intl")).ok()?;
+    let make = js_sys::Reflect::get(&intl, &JsValue::from_str("DateTimeFormat")).ok()?.dyn_into::<js_sys::Function>().ok()?;
+    // A zone the browser doesn't know throws (a RangeError): caught, as none.
+    let format = js_sys::Reflect::construct(&make, &js_sys::Array::of2(&JsValue::from_str("en-US"), &options)).ok()?;
+    let parts = get(&format, "formatToParts")?.dyn_into::<js_sys::Function>().ok()?.call1(&format, &date).ok()?;
+    let mut civil = [0i64; 6];
+    for part in js_sys::Array::from(&parts).iter() {
+        let at = match text(&part, "type").as_str() {
+            "year" => 0,
+            "month" => 1,
+            "day" => 2,
+            "hour" => 3,
+            "minute" => 4,
+            "second" => 5,
+            _ => continue,
+        };
+        if let Some(slot) = civil.get_mut(at) {
+            *slot = text(&part, "value").parse().ok()?;
+        }
+    }
+    let [year, month, day, hour, minute, second] = civil;
+    let days = mailcraft_engine::model::dates::days_from_civil(year, u32::try_from(month).ok()?, u32::try_from(day).ok()?);
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// What each mailbox signs in with: its address (lower case) → (secret, Bearer rather than Basic).

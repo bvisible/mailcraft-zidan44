@@ -23,6 +23,38 @@ pub fn translate(text: &str) -> String {
     if let Some(reason) = text.strip_prefix("a contact was not deleted: ") {
         return tf!("a contact was not deleted: {reason}", reason = t(reason));
     }
+    // A change of an event or a contact the server refused, or could not take: its title as it is, the reason in words
+    // (mailcraft-jmap's `refusal_words`), the server's own words as they are.
+    if let Some(what) = text.strip_prefix("an event was not saved: ") {
+        return match what.rsplit_once(" — ") {
+            Some((event, reason)) => tf!("an event was not saved: {event} — {reason}", event = event, reason = t(reason)),
+            None => tf!("an event was not saved: {event} — {reason}", event = what, reason = tl!("refused by the server")),
+        };
+    }
+    if let Some(what) = text.strip_prefix("a contact was not saved: ") {
+        return match what.rsplit_once(" — ") {
+            Some((contact, reason)) => tf!("a contact was not saved: {contact} — {reason}", contact = contact, reason = t(reason)),
+            None => tf!("a contact was not saved: {contact} — {reason}", contact = what, reason = tl!("refused by the server")),
+        };
+    }
+    if let Some(reason) = text.strip_prefix("an event was not deleted: ") {
+        return tf!("an event was not deleted: {reason}", reason = t(reason));
+    }
+    match text {
+        "not found" => return tl!("not found").to_string(),
+        "not allowed" => return tl!("not allowed").to_string(),
+        "too many changes at once" => return tl!("too many changes at once").to_string(),
+        "refused by the server" => return tl!("refused by the server").to_string(),
+        // A change the server could not take for the time being (mailcraft-jmap's `FAILED_FOR_NOW`), sent again later.
+        "the server failed; tried again at the next sync" => return tl!("the server failed; tried again at the next sync").to_string(),
+        _ => {}
+    }
+    if let Some(said) = text.strip_prefix("not allowed: ") {
+        return tf!("not allowed: {reason}", reason = said);
+    }
+    if let Some(said) = text.strip_prefix("refused by the server: ") {
+        return tf!("refused by the server: {reason}", reason = said);
+    }
     if let Some(contact) = text.strip_suffix(": its address book can't be changed any more, so the change made here was undone") {
         return tf!("{contact}: its address book can't be changed any more, so the change made here was undone", contact = contact);
     }
@@ -92,6 +124,20 @@ mod tests {
         assert!(undone.contains("Ann Lee") && !undone.contains("can't be changed"), "{undone}");
         let linked = translate("calendars and contacts: a contact was not deleted: Ce contact est lié à des documents");
         assert!(linked.ends_with("Ce contact est lié à des documents") && !linked.contains("was not deleted"), "{linked}");
+        // A refusal in words, its kind translated, the title and the server's own words as they are.
+        let event = translate("calendars and contacts: an event was not saved: Revue: budget — not found");
+        assert!(event.contains("Revue: budget") && !event.contains("was not saved") && !event.contains("not found"), "{event}");
+        let gone = translate("calendars and contacts: an event was not deleted: not allowed: Lié à un projet");
+        assert!(gone.ends_with("Lié à un projet") && !gone.contains("was not deleted") && !gone.contains("not allowed"), "{gone}");
+        let card = translate("calendars and contacts: a contact was not saved: Jeanne Muster — too many changes at once");
+        assert!(card.contains("Jeanne Muster") && !card.contains("was not saved") && !card.contains("too many"), "{card}");
+        let other = translate("calendars and contacts: a contact was not saved: Jeanne Muster — refused by the server: invalidProperties");
+        assert!(other.ends_with("invalidProperties") && !other.contains("refused by the server"), "{other}");
+        // A change the server could not take for now, sent again at the next sync.
+        let later = translate("calendars and contacts: an event was not saved: Revue — the server failed; tried again at the next sync");
+        assert!(later.contains("Revue") && !later.contains("the server failed") && !later.contains("next sync"), "{later}");
+        let later = translate("calendars and contacts: a contact was not deleted: the server failed; tried again at the next sync");
+        assert!(!later.contains("the server failed") && !later.contains("was not deleted"), "{later}");
         assert_eq!(translate("something else entirely"), "something else entirely", "an unknown message as written");
         // In English, as written.
         set_current(Lang::EN);

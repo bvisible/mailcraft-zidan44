@@ -191,6 +191,13 @@ fn tile(ui: &mut Ui, t: &Tokens, icon: Icon, label: &str, title: &str, about: &s
     out.unwrap_or_else(|| ui.label(""))
 }
 
+// //// Neoffice — a tile shown only where `shown` (its response otherwise is never clicked): Info's automatic replies
+// aren't offered in a hosting page whose server offers none.
+#[allow(clippy::too_many_arguments)]
+fn tile_if(shown: bool, ui: &mut Ui, t: &Tokens, icon: Icon, label: &str, title: &str, about: &str, extra: impl FnOnce(&mut Ui)) -> egui::Response {
+    if shown { tile(ui, t, icon, label, title, about, extra) } else { ui.allocate_response(egui::Vec2::ZERO, Sense::hover()) }
+}
+
 fn info(s: &Session, t: &Tokens, has_files: bool, ui: &mut Ui, b: &mut Backstage, acts: &mut Vec<Action>) {
     heading(ui, t, "Account information");
     let Some(a) = b.account.as_deref().and_then(|id| s.account(id)).or_else(|| s.accounts.first()) else {
@@ -211,7 +218,8 @@ fn info(s: &Session, t: &Tokens, has_files: bool, ui: &mut Ui, b: &mut Backstage
                 }
             }
         });
-        if widgets::pill_button(ui, Icon::Plus, "Add account…", t).clicked() {
+        // //// Neoffice — not in a hosting page, which hands the mailboxes over itself.
+        if !s.hosted() && widgets::pill_button(ui, Icon::Plus, "Add account…", t).clicked() {
             acts.push(Action::Dialog(Dialog::add_account()));
         }
     });
@@ -248,18 +256,39 @@ fn info(s: &Session, t: &Tokens, has_files: bool, ui: &mut Ui, b: &mut Backstage
             smtp_port = a.config.smtp.port
         )
     };
+    // //// Neoffice — in a hosting page, only what is the person's: the name shown on their mail and their signature (the
+    // servers and the sign-in are the page's: hosted.rs).
+    let hosted = s.hosted();
     let r = tile(
         ui,
         t,
         Icon::Person,
         "Account settings",
         "Account settings",
-        "Change this account's name, servers and sign-in, or its signature.",
+        // //// Neoffice — see `hosted` above.
+        if hosted {
+            "Change the name shown on mail you send, or your signature."
+        } else {
+            "Change this account's name, servers and sign-in, or its signature."
+        },
         |ui| {
-            ui.label(RichText::new(servers).color(t.faint).small());
+            // //// Neoffice — see `hosted` above.
+            if !hosted {
+                ui.label(RichText::new(servers).color(t.faint).small());
+            }
         },
     );
     egui::Popup::menu(&r).show(|ui| {
+        // //// Neoffice — see `hosted` above.
+        if hosted {
+            if ui.button(tl!("Your name…")).clicked() {
+                acts.push(Action::Dialog(Dialog::AccountName { account: id.clone(), name: a.config.name.clone() }));
+            }
+            if ui.button(tl!("Signature…")).clicked() {
+                acts.push(Action::Dialog(Dialog::Signature { account: id.clone(), text: a.config.signature.clone(), insert: false }));
+            }
+            return;
+        }
         if !a.is_local() && a.config.graph.is_none() && ui.button(tl!("Server settings…")).clicked() {
             acts.push(Action::Dialog(Dialog::edit_account(&a.config)));
         }
@@ -290,9 +319,15 @@ fn info(s: &Session, t: &Tokens, has_files: bool, ui: &mut Ui, b: &mut Backstage
             },
         ),
         VacationState::Loaded(_) => (t.dim, tl!("Off").to_string()),
-        VacationState::Failed(e) => (t.warn, tf!("Not available: {error}", error = tl!(e))),
+        // //// Neoffice — what the server said in the interface's language (messages.rs).
+        VacationState::Failed(e) => (t.warn, tf!("Not available: {error}", error = crate::messages::translate(e))),
     };
-    let r = tile(
+    // //// Neoffice — none in a hosting page where the server offers none.
+    let none = matches!(&a.vacation, VacationState::Failed(e) if e.contains("doesn't offer automatic replies"));
+    let offered = !(s.hosted() && none);
+    // //// Neoffice — see `offered` above.
+    let r = tile_if(
+        offered,
         ui,
         t,
         Icon::Away,
@@ -555,7 +590,14 @@ fn options(s: &Session, st: &UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
         check(ui, s.prefs.show_html, "Show HTML mail formatted (otherwise as plain text)", "view.html", acts);
     });
     // How much mail is kept on this computer, as Outlook's "Mail to keep offline".
-    group(ui, "Mail kept on this computer", &mut |ui| {
+    // //// Neoffice — not in the browser build, which keeps a window of each folder of its own (mailcraft-web's
+    // backend.rs) and nothing between visits: the setting would do nothing there.
+    let kept_here = |ui: &mut Ui, title: &str, body: &mut dyn FnMut(&mut Ui)| {
+        if !s.jmap_only {
+            group(ui, title, body);
+        }
+    };
+    kept_here(ui, "Mail kept on this computer", &mut |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(tl!("Of each folder, keep"));
             for (n, label) in [(1000u32, "the newest 1,000"), (5000, "5,000"), (20000, "20,000"), (0, "all")] {

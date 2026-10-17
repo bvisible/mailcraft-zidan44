@@ -104,7 +104,9 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                                 egui::Frame::new().fill(color.gamma_multiply(0.18)).corner_radius(10).inner_margin(Margin::symmetric(8, 2)).show(
                                     ui,
                                     |ui| {
-                                        ui.label(RichText::new(&c.name).color(color).small());
+                                        // //// Neoffice — the categories made at first in the interface language, as the
+                                        // Categorize menu shows them.
+                                        ui.label(RichText::new(tl!(&c.name)).color(color).small());
                                     },
                                 );
                             }
@@ -364,11 +366,9 @@ fn invite_card(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, act
             ui.vertical(|ui| {
                 ui.label(RichText::new(&e.summary).font(theme::bold(15.0)).color(t.text));
                 let when = if e.all_day {
-                    crate::i18n::date(&dates::full_time(e.start - i64::from(s.clock.offset), &s.clock))
-                        .split(' ')
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    // //// Neoffice — its day as it is (`Fri 2026-10-16`), not through a time by today's offset (nor by its own:
+                    // where the clock changes at midnight, the day's midnight is no time on it).
+                    crate::i18n::date(&dates::day_label(e.start.div_euclid(86_400)))
                 } else {
                     format!("{} – {}", crate::i18n::date(&dates::full_time(e.start, &s.clock)), crate::calendar::hm(e.end, s))
                 };
@@ -1616,7 +1616,8 @@ const CHIP_H: f32 = 42.0;
 /// own, or at once again.
 fn delay_menu(ui: &mut Ui, t: &Tokens, c: &mut mailcraft_engine::Compose, clock: &dates::Clock) {
     let today = dates::today(clock);
-    let at = |day: i64, minutes: i64| day.saturating_mul(86_400) - i64::from(clock.offset) + minutes * 60;
+    // //// Neoffice — by that day's own offset (Clock::zone: daylight saving).
+    let at = |day: i64, minutes: i64| clock.utc(day.saturating_mul(86_400) + minutes * 60);
     let weekday = (today + 3).rem_euclid(7);
     let presets = [
         ("In 1 hour", (clock.now + 3600) / 60 * 60),

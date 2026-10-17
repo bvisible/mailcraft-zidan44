@@ -21,7 +21,8 @@ pub fn color(i: u8, t: &Tokens) -> Color32 {
 }
 
 fn today(s: &Session) -> i64 {
-    s.clock.now.saturating_add(i64::from(s.clock.offset)).div_euclid(86_400)
+    // //// Neoffice — by the offset of its own date (Clock::zone: daylight saving).
+    s.clock.local(s.clock.now).div_euclid(86_400)
 }
 
 /// `HH:MM`, local.
@@ -32,7 +33,25 @@ pub fn hm(t: i64, s: &Session) -> String {
 
 /// The local day a time falls on.
 fn day_of(t: i64, s: &Session) -> i64 {
-    t.saturating_add(i64::from(s.clock.offset)).div_euclid(86_400)
+    // //// Neoffice — by the offset of its own date (Clock::zone: daylight saving).
+    s.clock.local(t).div_euclid(86_400)
+}
+
+// //// Neoffice — the days an item is drawn on: a day-long event's own (AgendaItem::days), not through its times (which a
+// clock changing at midnight would put on the evening before), else the days its times fall on.
+/// The first and the last local day of an item.
+fn days_of(it: &AgendaItem, s: &Session) -> (i64, i64) {
+    match it.days {
+        Some((first, after)) => (first, (after - 1).max(first)),
+        None => (day_of(it.start, s), day_of(it.end.max(it.start + 1) - 1, s)),
+    }
+}
+
+// //// Neoffice — where in its day's column a time is drawn: by the clock on the wall (the offset of its own date), so
+// that on the day of a change of offset (a day of 23 or 25 hours) a meeting at 10:00 is still drawn at 10:00.
+/// Hours since the local midnight of `day`, as the wall clock shows them, within that day.
+fn wall_hours(t: i64, day: i64, s: &Session) -> f32 {
+    ((s.clock.local(t) - day.saturating_mul(86_400)).clamp(0, 86_400) as f32) / 3600.0
 }
 
 /// `October 2026`, `12 – 18 October 2026`, `Monday, 12 October 2026`.
@@ -371,8 +390,14 @@ fn month(s: &Session, t: &Tokens, ui: &mut Ui, items: &[AgendaItem], d0: i64, ac
                 },
             );
             let bg = ui.interact(r, ui.id().with(("month-day", d)), Sense::click());
-            let todays: Vec<&AgendaItem> =
-                items.iter().filter(|it| day_of(it.start, s) <= d && day_of(it.end.max(it.start + 1) - 1, s) >= d).collect();
+            // //// Neoffice — its days (days_of).
+            let todays: Vec<&AgendaItem> = items
+                .iter()
+                .filter(|it| {
+                    let (first, last) = days_of(it, s);
+                    (first..=last).contains(&d)
+                })
+                .collect();
             let fit = ((rh - 26.0) / 19.0).floor().max(0.0) as usize;
             let shown = if todays.len() > fit { fit.saturating_sub(1) } else { todays.len() };
             for (k, it) in todays.iter().take(shown).enumerate() {
@@ -395,9 +420,9 @@ fn month(s: &Session, t: &Tokens, ui: &mut Ui, items: &[AgendaItem], d0: i64, ac
                     acts.push(Action::Run("calendar.goto", json!({"date": format!("{y:04}-{mm:02}-{ddd:02}")})));
                 }
             }
-            // //// Neoffice — not where there is nowhere to add one (read_only.rs).
+            // //// Neoffice — not where there is nowhere to add one (read_only.rs); at 9:00 by that day's own offset.
             if bg.double_clicked() && s.can_add_events() {
-                acts.push(Action::Dialog(Dialog::new_event(s, Some(s.local_midnight(d) + 9 * 3600))));
+                acts.push(Action::Dialog(Dialog::new_event(s, Some(s.clock.utc(d.saturating_mul(86_400) + 9 * 3600)))));
             }
         }
     }
@@ -462,7 +487,9 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
         let mut lanes: Vec<Vec<(i64, i64)>> = Vec::new();
         let mut placed: Vec<(usize, &AgendaItem)> = Vec::new();
         for it in &all_day {
-            let (a, b) = (day_of(it.start, s).max(d0), day_of(it.end.max(it.start + 1) - 1, s).min(d1 - 1));
+            // //// Neoffice — its days (days_of).
+            let (a, b) = days_of(it, s);
+            let (a, b) = (a.max(d0), b.min(d1 - 1));
             let lane = lanes.iter().position(|l| l.iter().all(|(x, y)| b < *x || a > *y)).unwrap_or(lanes.len());
             if lane == lanes.len() {
                 lanes.push(Vec::new());
@@ -475,7 +502,9 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
         let (strip, _) = ui.allocate_exact_size(vec2(full.width(), 20.0 * lanes.len().min(4) as f32 + 6.0), Sense::hover());
         ui.painter().text(pos2(strip.min.x + gutter - 6.0, strip.min.y + 10.0), Align2::RIGHT_CENTER, tl!("All day"), theme::regular(11.0), t.faint);
         for (lane, it) in placed.into_iter().filter(|(l, _)| *l < 4) {
-            let (a, b) = (day_of(it.start, s).max(d0), day_of(it.end.max(it.start + 1) - 1, s).min(d1 - 1));
+            // //// Neoffice — its days (days_of).
+            let (a, b) = days_of(it, s);
+            let (a, b) = (a.max(d0), b.min(d1 - 1));
             // Side by side, a day at a time in its calendar's column; else across its days.
             let spans: Vec<(i64, i64)> = if k > 1 { (a..=b).map(|d| (d, d)).collect() } else { vec![(a, b)] };
             for (a, b) in spans {
@@ -544,7 +573,8 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
                 && let Some(p) = r.interact_pointer_pos()
             {
                 let half = ((p.y - grid.min.y) / (HOUR / 2.0)).floor().clamp(0.0, 47.0) as i64;
-                acts.push(Action::Dialog(Dialog::new_event(s, Some(s.local_midnight(d0 + i) + half * 1800))));
+                // //// Neoffice — the half hour on the wall clock of that day (wall_hours).
+                acts.push(Action::Dialog(Dialog::new_event(s, Some(s.clock.utc((d0 + i).saturating_mul(86_400) + half * 1800)))));
             }
         }
         // Events, side by side when they overlap (each calendar in its own column, side by side).
@@ -569,8 +599,9 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
             }
             let width = (sub - 6.0) / lane_end.len().max(1) as f32;
             for (it, lane) in todays.iter().zip(lanes) {
-                let top = ((it.start.max(day0) - day0) as f32 / 3600.0) * HOUR;
-                let bottom = ((it.end.min(day1) - day0) as f32 / 3600.0) * HOUR;
+                // //// Neoffice — by the wall clock (wall_hours).
+                let top = wall_hours(it.start.max(day0), d, s) * HOUR;
+                let bottom = if it.end >= day1 { 24.0 * HOUR } else { wall_hours(it.end, d, s) * HOUR };
                 let r = Rect::from_min_size(
                     pos2(grid.min.x + gutter + cw * i as f32 + sub * j as f32 + 3.0 + width * lane as f32, grid.min.y + top + 1.0),
                     vec2(width - 2.0, (bottom - top - 2.0).max(18.0)),
@@ -594,7 +625,8 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
         // Now.
         let n_day = today(s);
         if n_day >= d0 && n_day < d1 {
-            let y = grid.min.y + ((s.clock.now - s.local_midnight(n_day)) as f32 / 3600.0) * HOUR;
+            // //// Neoffice — by the wall clock (wall_hours).
+            let y = grid.min.y + wall_hours(s.clock.now, n_day, s) * HOUR;
             let x0 = grid.min.x + gutter + cw * (n_day - d0) as f32;
             ui.painter().line_segment([pos2(x0, y), pos2(x0 + cw, y)], egui::Stroke::new(2.0, t.danger));
             ui.painter().circle_filled(pos2(x0, y), 4.0, t.danger);

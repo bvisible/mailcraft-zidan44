@@ -19,6 +19,10 @@ const LOADING_ID: &str = "mailcraft_loading";
 /// Where the account list and settings are kept without IndexedDB (no passwords, no mail).
 const FILES_KEY: &str = "mailcraft.files";
 const UI_KEY: &str = "mailcraft.ui";
+// //// Neoffice — the signatures and the names shown on mail made here for a hosting page's mailboxes, by address, with the
+// page's each replaced (kept.rs).
+const SIGNATURES_KEY: &str = "mailcraft.signatures";
+const NAMES_KEY: &str = "mailcraft.names";
 /// Most bytes kept in local storage (browsers allow about 5 MB a site).
 const MAX_KEPT: usize = 3 << 20;
 
@@ -83,9 +87,9 @@ pub fn start() {
                             log::error!("the sample mailbox couldn't be made: {e}");
                         }
                         s
-                    // //// Neoffice — the host's mailboxes, in memory (host.rs).
+                    // //// Neoffice — the host's mailboxes, in memory (host.rs), signing with what was made here (kept.rs).
                     } else if hosted {
-                        crate::host::store(&host)
+                        crate::host::store(&host, &kept_texts(cc.storage, SIGNATURES_KEY), &kept_texts(cc.storage, NAMES_KEY))
                     } else if !kept.is_empty() {
                         Store::memory_from(kept)
                     } else {
@@ -117,7 +121,8 @@ pub fn start() {
                         .or_else(|| crate::nora::offered().then(String::new))
                         .map(|origin| crate::nora::Nora::new(origin, cc.egui_ctx.clone()));
                     let hosted_mail = host.iter().map(|a| a.email.to_lowercase()).collect();
-                    let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora, hosted: hosted_mail, store: store.clone() };
+                    let services =
+                        WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora, hosted: hosted_mail, store: store.clone(), zone: None };
                     let mut app = MailApp::new(session, Box::new(backend), Box::new(services));
                     if sample {
                         app.ui.title_base = "MailCraft – Sample mailbox".into();
@@ -130,14 +135,19 @@ pub fn start() {
                     // show them: their initials at the right end of the top bar (host.rs).
                     app.ui.signed_in = crate::host::author();
                     if let Some(v) = cc.storage.and_then(|s| s.get_string(UI_KEY)).and_then(|j| serde_json::from_str(&j).ok()) {
+                        // //// Neoffice — with the host's mailboxes, each mailbox's settings by its address (hosted.rs).
+                        let v = if hosted { mailcraft_ui_egui::hosted::restored_settings(v, &ids(&app.session)) } else { v };
                         app.restore_state(&v);
                     }
                     // A message's own window (opened from a message's pop-out).
                     if let Some(key) = param("open") {
                         app.show_message_page(&key);
                     }
-                    // //// Neoffice — with the host's mailboxes, as with the sample one, nothing is kept between visits.
-                    Ok(Box::new(WebShell { app, store, sample: sample || hosted, db }))
+                    // //// Neoffice — with the host's mailboxes, the settings only (kept.rs), and what the page gave each
+                    // mailbox for a signature and a name, to tell one made here.
+                    let page_signatures = host.iter().map(|a| (a.email.to_lowercase(), a.signature.clone())).collect();
+                    let page_names = host.iter().map(|a| (a.email.to_lowercase(), a.name.clone())).collect();
+                    Ok(Box::new(WebShell { app, store, sample, hosted, page_signatures, page_names, db }))
                 }),
             )
             .await;
@@ -161,6 +171,16 @@ fn param(name: &str) -> Option<String> {
     js_sys::decode_uri_component(raw).ok().map(String::from)
 }
 
+// //// Neoffice — the browser's offset of an instant (its time-zone rules), and its rules from three years back to ten ahead
+// (Services::zone: every date by its own offset, daylight saving), worked out once a day.
+fn browser_offset(t: i64) -> i32 {
+    -(js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(t as f64 * 1000.0)).get_timezone_offset() as i32) * 60
+}
+
+fn browser_zone(now: i64) -> mailcraft_engine::model::dates::Zone {
+    mailcraft_engine::model::dates::Zone::from_offsets(now - 3 * 366 * 86_400, now + 10 * 366 * 86_400, browser_offset)
+}
+
 /// Unix seconds and the local UTC offset in seconds.
 fn clock() -> (i64, i32) {
     let d = js_sys::Date::new_0();
@@ -174,6 +194,11 @@ struct WebShell {
     app: MailApp,
     store: Store,
     sample: bool,
+    // //// Neoffice — a hosting page's mailboxes: the settings are kept, and the signatures made here; never mail,
+    // accounts or secrets (kept.rs). What the page gave each for a signature (by address, lower case).
+    hosted: bool,
+    page_signatures: std::collections::HashMap<String, String>,
+    page_names: std::collections::HashMap<String, String>,
     /// Where the cache is kept between visits.
     db: Option<web_sys::IdbDatabase>,
 }
@@ -195,11 +220,27 @@ impl eframe::App for WebShell {
     /// Keep the settings, and without IndexedDB the account and folder lists (not mail, never
     /// passwords).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        if self.sample {
+        // //// Neoffice — what is kept depends on the mailboxes (kept.rs): with a hosting page's, the settings only.
+        let keeps = crate::kept::keeps(self.sample, self.hosted);
+        if !keeps.settings {
             return;
         }
-        if let Ok(j) = serde_json::to_string(&self.app.saved_state()) {
+        // //// Neoffice — with the host's mailboxes, the interface's only, each mailbox's by its address (hosted.rs).
+        let state = if self.hosted {
+            mailcraft_ui_egui::hosted::saved_settings(self.app.saved_state(), &ids(&self.app.session))
+        } else {
+            self.app.saved_state()
+        };
+        if let Ok(j) = serde_json::to_string(&state) {
             storage.set_string(UI_KEY, j);
+        }
+        // //// Neoffice — and the signatures and names made here (kept.rs), not the mail, the accounts or their secrets.
+        if self.hosted {
+            save_kept(storage, SIGNATURES_KEY, &self.app.session, &self.page_signatures, |c| &c.signature);
+            save_kept(storage, NAMES_KEY, &self.app.session, &self.page_names, |c| &c.name);
+        }
+        if !keeps.files {
+            return;
         }
         if self.db.is_some() {
             storage.remove_string(FILES_KEY);
@@ -225,6 +266,46 @@ impl eframe::App for WebShell {
     }
 }
 
+// //// Neoffice — each account's id and address, which what is a mailbox's is kept by (hosted.rs).
+fn ids(session: &Session) -> Vec<(String, String)> {
+    session.accounts.iter().map(|a| (a.config.id.clone(), a.config.email.to_lowercase())).collect()
+}
+
+// //// Neoffice — the signatures (or names) made here for a hosting page's mailboxes (kept.rs), as kept under `key`: by
+// address, `{ text, base }`.
+fn kept_texts(storage: Option<&dyn eframe::Storage>, key: &str) -> std::collections::HashMap<String, crate::kept::Kept> {
+    let Some(v) = storage.and_then(|s| s.get_string(key)).and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok()) else {
+        return Default::default();
+    };
+    let text = |e: &serde_json::Value, key: &str| e.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    v.as_object()
+        .map(|m| m.iter().map(|(email, e)| (email.to_lowercase(), crate::kept::Kept { text: text(e, "text"), base: text(e, "base") })).collect())
+        .unwrap_or_default()
+}
+
+// //// Neoffice — see `kept_texts`: each hosted mailbox's signature (or name: `of`) made here, none while it is the page's.
+fn save_kept(
+    storage: &mut dyn eframe::Storage,
+    key: &str,
+    session: &Session,
+    page: &std::collections::HashMap<String, String>,
+    of: impl Fn(&mailcraft_engine::model::AccountConfig) -> &String,
+) {
+    let mut kept = serde_json::Map::new();
+    for a in &session.accounts {
+        let email = a.config.email.to_lowercase();
+        let Some(given) = page.get(&email) else { continue };
+        if let Some(k) = crate::kept::keep(given, of(&a.config)) {
+            kept.insert(email, serde_json::json!({"text": k.text, "base": k.base}));
+        }
+    }
+    if kept.is_empty() {
+        storage.remove_string(key);
+    } else if let Ok(j) = serde_json::to_string(&kept) {
+        storage.set_string(key, j);
+    }
+}
+
 /// Files chosen in the picker: (purpose, name, bytes).
 type Picked = Rc<RefCell<Vec<(String, String, Vec<u8>)>>>;
 
@@ -236,11 +317,22 @@ struct WebServices {
     nora: Option<crate::nora::Nora>,
     hosted: std::collections::HashSet<String>,
     store: Store,
+    // //// Neoffice — the browser's time-zone rules (browser_zone) and the day they were worked out on.
+    zone: Option<(i64, mailcraft_engine::model::dates::Zone)>,
 }
 
 impl Services for WebServices {
     fn clock(&self) -> (i64, i32) {
         clock()
+    }
+    // //// Neoffice — see `WebServices::zone`.
+    fn zone(&mut self) -> Option<mailcraft_engine::model::dates::Zone> {
+        let (now, _) = clock();
+        let day = now.div_euclid(86_400);
+        if self.zone.is_none_or(|(d, _)| d != day) {
+            self.zone = Some((day, browser_zone(now)));
+        }
+        self.zone.map(|(_, z)| z)
     }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         Vec::new()

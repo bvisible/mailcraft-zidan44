@@ -16,11 +16,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mailcraft_model::pim::{BookInfo, DavSync, LOCAL, Pim, StoredCard};
+use mailcraft_model::ical::CalEvent;
+use mailcraft_model::pim::{BookInfo, DavSync, LOCAL, Pim, StoredCard, StoredEvent};
 use mailcraft_model::vcard::{Card, Typed};
 use serde_json::{Map, Value, json};
 
-use crate::{CORE, Client, Http, Result, list, query_page};
+use crate::{CORE, Client, Error, Http, Result, list, query_page};
 
 /// The capability, and the type of the account that holds the address books.
 pub const CONTACTS: &str = "urn:ietf:params:jmap:contacts";
@@ -45,21 +46,42 @@ impl<H: Http> Client<H> {
     /// `notes`: the server keeps the cards' notes), then the address books and every card in them, as a sync to merge
     /// (`None` when the session offers none). What could not be sent is said in the sync's errors and stays to be sent:
     /// the books are read all the same. When they can't be read, what was sent is handed over all the same, the books
-    /// unread (`None`).
+    /// unread (`None`). A token the server refuses ([`Error::Auth`]) stops the sync as such, for the mailbox to sign in
+    /// again: what it sent before goes again then, which the server recognises (a card's uid, a deletion done).
     pub async fn sync_contacts(&self, pim: &Pim, notes: bool, now: i64) -> Result<Option<DavSync>> {
         let Some(account) = self.contacts.as_deref() else { return Ok(None) };
-        let (pushed, errors, deleted) = self.push_cards(account, pim, notes).await;
+        let sent = self.push_cards(account, pim, notes).await?;
         let mut sync = match self.read_books(account, now).await {
             Ok(sync) => sync,
+            Err(e @ Error::Auth(_)) => return Err(e),
             Err(e) => {
                 log::warn!("the address books were not read: {e}");
                 DavSync { carddav_home: Some("jmap".into()), checked: now, ..Default::default() }
             }
         };
-        sync.pushed_cards = pushed;
-        sync.errors = errors;
-        sync.deleted = deleted;
+        sync.pushed_cards = sent.pushed;
+        sync.errors = sent.errors;
+        sync.deleted = sent.deleted;
+        sync.refused_cards = sent.refused;
+        sync.refused_deletions = sent.refused_deletions;
         Ok(Some(sync))
+    }
+
+    /// What was made, changed or deleted here, sent, without reading the address books again: a sync of what is left to
+    /// send (the books stay as the engine has them, `None`).
+    pub async fn send_contacts(&self, pim: &Pim, notes: bool, now: i64) -> Result<Option<DavSync>> {
+        let Some(account) = self.contacts.as_deref() else { return Ok(None) };
+        let sent = self.push_cards(account, pim, notes).await?;
+        Ok(Some(DavSync {
+            carddav_home: Some("jmap".into()),
+            checked: now,
+            pushed_cards: sent.pushed,
+            errors: sent.errors,
+            deleted: sent.deleted,
+            refused_cards: sent.refused,
+            refused_deletions: sent.refused_deletions,
+            ..Default::default()
+        }))
     }
 
     /// The address books and every card in them.
@@ -93,29 +115,16 @@ impl<H: Http> Client<H> {
 
     /// Sends what was made, changed or deleted here in the server's books, as many at a time as the server takes: the
     /// cards it stored (with their ids), the deletions it is done with (made, or refused and said: the card comes back at
-    /// the next read), and why the others were not (by card: refused, or the call failed). Those stay to be sent next
-    /// time. Not the cards of a book the server no longer lets the person write: the engine lets their change go.
-    async fn push_cards(&self, account: &str, pim: &Pim, notes: bool) -> (Vec<StoredCard>, Vec<String>, Vec<String>) {
-        let (mut pushed, mut errors, mut deleted) = (Vec::new(), Vec::new(), Vec::new());
+    /// the next read), the cards whose change it refused for good (said once: the change goes), and why the others were
+    /// not (the call failed, or the server failed for the time being: they stay to be sent next time). Not the cards of a
+    /// book the server no longer lets the person write: the engine lets their change go. A token the server refuses stops
+    /// it (`Err`).
+    async fn push_cards(&self, account: &str, pim: &Pim, notes: bool) -> Result<CardsSent> {
+        let mut out = CardsSent::default();
         if pim.carddav_home.as_deref() != Some("jmap") {
-            return (pushed, errors, deleted);
+            return Ok(out);
         }
-        /// One change to send.
-        enum Change<'a> {
-            Card(&'a StoredCard),
-            /// A card deleted here: its address there (`jmap:<id>`).
-            Gone(&'a str),
-        }
-        // New ones (no address yet) and the server's own (`jmap:<id>`); a card with another address is not this server's.
-        let cards = pim
-            .cards
-            .iter()
-            .filter(|c| c.dirty && c.book != LOCAL && (c.href.is_empty() || c.href.starts_with(HREF_PREFIX)))
-            .filter(|c| !pim.book_read_only(&c.book))
-            .map(Change::Card);
-        // A card's tombstone names no calendar (an event's does).
-        let gone = pim.deleted.iter().filter(|t| t.href.starts_with(HREF_PREFIX) && t.calendar.is_empty()).map(|t| Change::Gone(t.href.as_str()));
-        let changes: Vec<Change> = cards.chain(gone).take(MAX_CARDS).collect();
+        let changes: Vec<Change> = card_changes(pim).take(MAX_CARDS).collect();
         for chunk in changes.chunks(self.max_set.max(1)) {
             let (mut create, mut update, mut destroy) = (Map::new(), Map::new(), Vec::new());
             for (n, change) in chunk.iter().enumerate() {
@@ -147,10 +156,11 @@ impl<H: Http> Client<H> {
             }
             let answer = match self.call(&[CORE, CONTACTS], vec![("ContactCard/set", args)]).await {
                 Ok(r) => r.into_iter().next().unwrap_or(Value::Null),
+                Err(e @ Error::Auth(_)) => return Err(e),
                 Err(e) => {
                     for change in chunk {
-                        errors.push(match change {
-                            Change::Card(c) => format!("{}: {e}", c.card.display()),
+                        out.errors.push(match change {
+                            Change::Card(c) => format!("a contact was not saved: {} — {e}", c.card.display()),
                             Change::Gone(_) => format!("a contact was not deleted: {e}"),
                         });
                     }
@@ -164,13 +174,20 @@ impl<H: Http> Client<H> {
                         let id = href.strip_prefix(HREF_PREFIX).unwrap_or(href);
                         let done = answer.get("destroyed").and_then(Value::as_array).is_some_and(|d| d.iter().any(|x| x.as_str() == Some(id)));
                         let refused = answer.get("notDestroyed").and_then(|m| m.get(id));
-                        if done {
-                            deleted.push((*href).to_string());
-                        } else if let Some(e) = refused {
+                        // Already gone there (deleted by a sync whose answer was lost, or by someone else): done.
+                        let gone = refused.and_then(|e| e.get("type")).and_then(Value::as_str) == Some("notFound");
+                        match refused.map(Refusal::of) {
+                            _ if done || gone => out.deleted.push((*href).to_string()),
+                            // Not taken for now: it stays to be sent, said where the server failed.
+                            Some(Refusal::Wait) => {}
+                            Some(Refusal::Failed) => out.errors.push(format!("a contact was not deleted: {FAILED_FOR_NOW}")),
                             // Said once; the card is the server's still, and comes back at the next read.
-                            let why = e.get("description").or_else(|| e.get("type")).and_then(Value::as_str).unwrap_or("refused");
-                            errors.push(format!("a contact was not deleted: {why}"));
-                            deleted.push((*href).to_string());
+                            Some(Refusal::Refused) => {
+                                out.errors.push(format!("a contact was not deleted: {}", refusal_words(refused)));
+                                out.deleted.push((*href).to_string());
+                                out.refused_deletions.push((*href).to_string());
+                            }
+                            None => {}
                         }
                         continue;
                     }
@@ -191,7 +208,7 @@ impl<H: Http> Client<H> {
                     }
                 };
                 match id {
-                    Some(id) => pushed.push(StoredCard {
+                    Some(id) => out.pushed.push(StoredCard {
                         book: c.book.clone(),
                         href: format!("{HREF_PREFIX}{id}"),
                         etag: String::new(),
@@ -199,51 +216,224 @@ impl<H: Http> Client<H> {
                         dirty: false,
                     }),
                     None => {
-                        let why = ["notCreated", "notUpdated"]
-                            .iter()
-                            .find_map(|k| answer.get(*k).and_then(|m| m.get(&key)))
-                            .and_then(|e| e.get("description").or_else(|| e.get("type")))
-                            .and_then(Value::as_str)
-                            .unwrap_or("refused");
-                        errors.push(format!("{}: {why}", c.card.display()));
+                        // Refused for good: said once, and the change goes (the card follows the server again); for the
+                        // time being, said, or not where the server asked to wait: it stays to be sent.
+                        let refusal = ["notCreated", "notUpdated"].iter().find_map(|k| answer.get(*k).and_then(|m| m.get(&key)));
+                        let why = match refusal.map(Refusal::of) {
+                            Some(Refusal::Wait) => continue,
+                            Some(Refusal::Failed) => FAILED_FOR_NOW.to_string(),
+                            Some(Refusal::Refused) => {
+                                out.refused.push((*c).clone());
+                                refusal_words(refusal)
+                            }
+                            None => refusal_words(refusal),
+                        };
+                        out.errors.push(format!("a contact was not saved: {} — {why}", c.card.display()));
                     }
                 }
             }
         }
-        (pushed, errors, deleted)
+        Ok(out)
     }
 }
 
+/// A refusal of a `/set` (a SetError, RFC 8620 §5.3) in words the interface translates (messages.rs in the interface):
+/// « not found », « not allowed » with the server's reason, « too many changes at once », else « refused by the server »
+/// with what it said.
+pub(crate) fn refusal_words(refusal: Option<&Value>) -> String {
+    let kind = refusal.and_then(|r| r.get("type")).and_then(Value::as_str).unwrap_or_default();
+    let said = refusal.and_then(|r| r.get("description")).and_then(Value::as_str).map(str::trim).filter(|d| !d.is_empty());
+    match (kind, said) {
+        ("notFound", _) => "not found".into(),
+        ("forbidden", Some(d)) => format!("not allowed: {d}"),
+        ("forbidden", None) => "not allowed".into(),
+        ("requestTooLarge" | "tooManyChanges", _) => "too many changes at once".into(),
+        (_, Some(d)) => format!("refused by the server: {d}"),
+        ("", None) => "refused by the server".into(),
+        (k, None) => format!("refused by the server: {k}"),
+    }
+}
+
+/// What a change the server didn't make is said with where it failed for the time being (Refusal::Failed).
+pub(crate) const FAILED_FOR_NOW: &str = "the server failed; tried again at the next sync";
+
+/// What the server's answer to a change it didn't make (a SetError, RFC 8620 §5.3) means for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// It asked to wait (`rateLimit`): sent again at the next sync, nothing said.
+    Wait,
+    /// It failed for the time being (`serverFail`, `serverUnavailable`, `serverPartialFail`; Neoffice's when the mail
+    /// server doesn't answer): sent again at the next sync, said ([`FAILED_FOR_NOW`]).
+    Failed,
+    /// It refused the change (`forbidden`, `invalidProperties`, `notFound`…): said in words ([`refusal_words`]).
+    Refused,
+}
+
+impl Refusal {
+    pub(crate) fn of(refusal: &Value) -> Refusal {
+        match refusal.get("type").and_then(Value::as_str) {
+            Some("rateLimit") => Refusal::Wait,
+            Some("serverFail" | "serverUnavailable" | "serverPartialFail") => Refusal::Failed,
+            _ => Refusal::Refused,
+        }
+    }
+}
+
+/// What a send of the cards did (push_cards).
+#[derive(Default)]
+struct CardsSent {
+    /// The cards stored, with their addresses.
+    pushed: Vec<StoredCard>,
+    errors: Vec<String>,
+    /// The deletions done with (made, or refused and said).
+    deleted: Vec<String>,
+    /// The cards whose change the server refused for good.
+    refused: Vec<StoredCard>,
+    /// The deletions the server refused for good.
+    refused_deletions: Vec<String>,
+}
+
+/// One change of a card to send.
+enum Change<'a> {
+    Card(&'a StoredCard),
+    /// A card deleted here: its address there (`jmap:<id>`).
+    Gone(&'a str),
+}
+
+/// What was made, changed or deleted here in the server's books: new cards (no address yet) and the server's own
+/// (`jmap:<id>`, a card with another address is not this server's) in a book the person may still write, and their
+/// deletions (a card's tombstone names no calendar, an event's does).
+fn card_changes(pim: &Pim) -> impl Iterator<Item = Change<'_>> {
+    let cards = pim
+        .cards
+        .iter()
+        .filter(|c| c.dirty && c.book != LOCAL && (c.href.is_empty() || c.href.starts_with(HREF_PREFIX)))
+        .filter(|c| !pim.book_read_only(&c.book))
+        .map(Change::Card);
+    let gone = pim.deleted.iter().filter(|t| t.href.starts_with(HREF_PREFIX) && t.calendar.is_empty()).map(|t| Change::Gone(t.href.as_str()));
+    cards.chain(gone)
+}
+
+/// Whether a sync that only sent (`send_contacts`, `send_calendars`: nothing read) must be followed by a read: the server
+/// refused something for good (a change, or a deletion: what was refused shows again as the server has it), not a failure
+/// for the time being nor a call that failed (what they left is sent again).
+pub fn read_after(sync: &DavSync) -> bool {
+    !sync.refused_events.is_empty() || !sync.refused_cards.is_empty() || !sync.refused_deletions.is_empty()
+}
+
+/// Whether something made, changed or deleted here waits to be sent to the server's address books or calendars, as
+/// their next sync would send it (`pim` as [`Sent::resume`] leaves it). A sync of the mail syncs them then, rather than
+/// at its own pace: a change the server could not take for the time being goes again at the next sync, as said.
+pub fn waiting(pim: &Pim) -> bool {
+    (pim.carddav_home.as_deref() == Some("jmap") && card_changes(pim).next().is_some()) || crate::calendars::waiting(pim)
+}
+
 /// What syncs did on the server that the engine may not have taken in when the next sync starts (it can start before):
-/// the cards they stored, and the deletions they are done with. Kept by the caller from one sync to the next, so that a
-/// card is never made twice, nor a deletion sent twice.
+/// the cards and events they stored, the changes the server refused for good (said once), and the deletions they are done
+/// with. Kept by the caller from one sync to the next, so that nothing is made twice, nor a deletion sent twice, nor a
+/// refusal said twice; let go of once the engine has taken in the last sync recorded (`recorded`), so that a change made
+/// since (an edit after a refusal, a deletion tried again) goes. A card or an event stored or refused is known by its
+/// content too: one changed since is a new change, sent whatever was recorded.
 #[derive(Clone, Debug, Default)]
 pub struct Sent {
     /// The cards stored: their uid here → their address there.
     pub created: HashMap<String, String>,
-    /// The deletions done with (made, or refused and said), by address.
+    /// The cards' deletions done with (made, or refused and said), by address.
     pub deleted: HashSet<String>,
+    /// The cards stored, as they were sent, by their address there.
+    pub cards_sent: HashMap<String, Card>,
+    /// The cards whose change the server refused for good (said once), as they were sent: by address, or by uid for one
+    /// never stored.
+    pub cards_refused: HashMap<String, Card>,
+    /// The events made here and stored there: their uid → their address there (calendars.rs).
+    pub events_created: HashMap<String, String>,
+    /// The events stored, as they were sent, by their address there.
+    pub events_sent: HashMap<String, CalEvent>,
+    /// The events whose change the server refused (said once), as they were sent: by address, or by uid for one never
+    /// stored.
+    pub events_refused: HashMap<String, CalEvent>,
+    /// The events' deletions done with, by address.
+    pub events_deleted: HashSet<String>,
+    /// The last sync recorded (its `checked`, which the caller makes grow from one sync to the next): once the engine has
+    /// taken it in (`Pim::dav_checked`), all of the above is let go of.
+    pub recorded: Option<i64>,
+}
+
+/// What a refused event is known by: its address there, or its uid for one never stored.
+fn refused_key(e: &StoredEvent) -> String {
+    if e.href.is_empty() { format!("uid:{}", e.event.uid) } else { e.href.clone() }
+}
+
+/// What a refused card is known by, likewise.
+fn refused_card_key(c: &StoredCard) -> String {
+    if c.href.is_empty() { format!("uid:{}", c.card.uid) } else { c.href.clone() }
 }
 
 impl Sent {
-    /// What `sync` sent, kept until the engine has taken it in.
+    /// What `sync` (the address books') sent, refused and deleted, kept until the engine has taken it in.
     pub fn record(&mut self, sync: &DavSync) {
         self.created.extend(sync.pushed_cards.iter().filter(|c| !c.card.uid.is_empty()).map(|c| (c.card.uid.clone(), c.href.clone())));
+        self.cards_sent.extend(sync.pushed_cards.iter().filter(|c| !c.href.is_empty()).map(|c| (c.href.clone(), c.card.clone())));
+        self.cards_refused.extend(sync.refused_cards.iter().map(|c| (refused_card_key(c), c.card.clone())));
         self.deleted.extend(sync.deleted.iter().cloned());
+        self.recorded = self.recorded.max(Some(sync.checked));
     }
 
-    /// `pim` (a copy of the engine's) as the server has it now: the cards stored but not yet taken in, addressed as
-    /// stored (this sync updates them rather than making them again), and the deletions done no longer to be sent.
-    /// What the engine has taken in, or is gone, is let go of.
+    /// What `sync` (the calendars', calendars.rs) sent, refused and deleted, kept until the engine has taken it in.
+    pub fn record_events(&mut self, sync: &DavSync) {
+        let made = sync.pushed_events.iter().filter(|e| e.event.recurrence_id.is_none() && !e.event.uid.is_empty());
+        self.events_created.extend(made.map(|e| (e.event.uid.clone(), e.href.clone())));
+        self.events_sent.extend(sync.pushed_events.iter().filter(|e| !e.href.is_empty()).map(|e| (e.href.clone(), e.event.clone())));
+        self.events_refused.extend(sync.refused_events.iter().map(|e| (refused_key(e), e.event.clone())));
+        self.events_deleted.extend(sync.deleted.iter().cloned());
+        self.recorded = self.recorded.max(Some(sync.checked));
+    }
+
+    /// `pim` (a copy of the engine's) as the server has it now: the cards and events stored but not yet taken in,
+    /// addressed as stored (this sync updates them rather than making them again), the refused changes no longer to be
+    /// sent, and the deletions done no longer to be sent. What the engine has taken in, or is gone, is let go of. A
+    /// card's tombstone names no calendar, an event's does.
     pub fn resume(&mut self, pim: &mut Pim) {
+        // The engine has taken in the last sync recorded: nothing it did is to be told again.
+        if self.recorded.is_some_and(|last| pim.dav_checked.is_some_and(|taken| taken >= last)) {
+            *self = Sent::default();
+        }
         self.created.retain(|uid, _| pim.cards.iter().any(|c| &c.card.uid == uid && c.href.is_empty()));
         for c in pim.cards.iter_mut().filter(|c| c.href.is_empty()) {
             if let Some(href) = self.created.get(&c.card.uid) {
                 c.href.clone_from(href);
             }
         }
-        self.deleted.retain(|href| pim.deleted.iter().any(|t| &t.href == href));
-        pim.deleted.retain(|t| !self.deleted.contains(&t.href));
+        // A card stored, or refused for good, as it still is here: not to be sent again. What no change waits for any more
+        // is let go of.
+        self.cards_sent.retain(|href, _| pim.cards.iter().any(|c| c.dirty && &c.href == href));
+        self.cards_refused.retain(|k, _| pim.cards.iter().any(|c| c.dirty && &refused_card_key(c) == k));
+        for c in pim.cards.iter_mut().filter(|c| c.dirty) {
+            let sent = self.cards_sent.get(&c.href).is_some_and(|x| !c.href.is_empty() && *x == c.card);
+            if sent || self.cards_refused.get(&refused_card_key(c)).is_some_and(|x| *x == c.card) {
+                c.dirty = false;
+            }
+        }
+        self.deleted.retain(|href| pim.deleted.iter().any(|t| t.calendar.is_empty() && &t.href == href));
+        pim.deleted.retain(|t| !t.calendar.is_empty() || !self.deleted.contains(&t.href));
+        // The events', likewise.
+        self.events_created.retain(|uid, _| pim.events.iter().any(|e| &e.event.uid == uid && e.href.is_empty()));
+        for e in pim.events.iter_mut().filter(|e| e.href.is_empty() && e.event.recurrence_id.is_none()) {
+            if let Some(href) = self.events_created.get(&e.event.uid) {
+                e.href.clone_from(href);
+            }
+        }
+        // An event stored, or refused (said once), as it still is here: not to be sent again; one changed since goes.
+        self.events_sent.retain(|href, _| pim.events.iter().any(|e| e.dirty && &e.href == href));
+        self.events_refused.retain(|k, _| pim.events.iter().any(|e| e.dirty && &refused_key(e) == k));
+        for e in pim.events.iter_mut().filter(|e| e.dirty) {
+            let sent = self.events_sent.get(&e.href).is_some_and(|x| !e.href.is_empty() && *x == e.event);
+            if sent || self.events_refused.get(&refused_key(e)).is_some_and(|x| *x == e.event) {
+                e.dirty = false;
+            }
+        }
+        self.events_deleted.retain(|href| pim.deleted.iter().any(|t| !t.calendar.is_empty() && &t.href == href));
+        pim.deleted.retain(|t| t.calendar.is_empty() || !self.events_deleted.contains(&t.href));
     }
 }
 
@@ -526,7 +716,8 @@ mod tests {
     }
 
     /// A server that answers each method call with `answer(name, args)` (`{"error": …}` is a method error,
-    /// `{"transport": …}` a network failure of the whole request), and keeps the calls in order.
+    /// `{"transport": …}` a network failure of the whole request, `{"status": 401}` that HTTP status for it), and keeps
+    /// the calls in order.
     struct Server<F: Fn(&str, &Value) -> Value> {
         session: Value,
         answer: F,
@@ -546,6 +737,9 @@ mod tests {
                 let r = (self.answer)(&name, &call[1]);
                 if let Some(why) = r.get("transport") {
                     return Err(crate::Error::Io(why.to_string()));
+                }
+                if let Some(status) = r.get("status").and_then(Value::as_u64).and_then(|s| u16::try_from(s).ok()) {
+                    return Ok(crate::Response { status, body: b"{}".to_vec() });
                 }
                 responses.push(match r.get("error") {
                     Some(e) => json!(["error", e, call[2]]),
@@ -795,9 +989,24 @@ mod tests {
         };
         let client = connect(json!({}), refusing);
         let sync = crate::block_on(client.sync_contacts(&pim, false, 9)).unwrap().unwrap();
-        assert_eq!(sync.errors, vec!["Jeanne Muster: Your rights do not allow it.", "Paul Exemple: notFound"]);
+        // In words the interface translates, not the server's kinds of error.
+        assert_eq!(
+            sync.errors,
+            vec![
+                "a contact was not saved: Jeanne Muster — not allowed: Your rights do not allow it.",
+                "a contact was not saved: Paul Exemple — not found"
+            ]
+        );
         assert!(sync.pushed_cards.is_empty(), "nothing stored: both stay to be sent");
         assert_eq!((sync.cards.len(), sync.synced_books.len()), (2, 1), "the book is read all the same");
+        // Not taken for now (the server failed, or asked to wait): they stay to be sent, said where it failed only.
+        let busy = |name: &str, args: &Value| match name {
+            "ContactCard/set" => json!({"notCreated": {"k0": {"type": "serverUnavailable"}}, "notUpdated": {"C7": {"type": "rateLimit"}}}),
+            _ => writable(name, args),
+        };
+        let sync = crate::block_on(connect(json!({}), busy).sync_contacts(&pim, false, 9)).unwrap().unwrap();
+        assert_eq!(sync.errors, vec!["a contact was not saved: Jeanne Muster — the server failed; tried again at the next sync"]);
+        assert!(sync.pushed_cards.is_empty(), "both stay to be sent");
 
         // The set fails as a whole (a method error, or the network): said for each card, and the book is still read.
         for failure in [json!({"error": {"type": "invalidArguments"}}), json!({"transport": "reset"})] {
@@ -805,7 +1014,7 @@ mod tests {
             let client = connect(json!({}), failing);
             let sync = crate::block_on(client.sync_contacts(&pim, false, 9)).unwrap().unwrap();
             assert_eq!(sync.errors.len(), 2, "{:?}", sync.errors);
-            assert!(sync.errors[0].starts_with("Jeanne Muster: "), "{:?}", sync.errors);
+            assert!(sync.errors[0].starts_with("a contact was not saved: Jeanne Muster — "), "{:?}", sync.errors);
             assert!(sync.pushed_cards.is_empty());
             assert_eq!(sync.cards.len(), 2, "the books are read after a push that failed");
         }
@@ -883,14 +1092,22 @@ mod tests {
         assert_eq!(sync.pushed_cards.iter().map(|c| c.href.as_str()).collect::<Vec<_>>(), ["jmap:N7"]);
         assert!(sync.errors.is_empty(), "{:?}", sync.errors);
 
-        // Synced again before the engine took that in: in its copy the card is still new, and it is updated, not made.
+        // Synced again before the engine took that in: in its copy the card is still new; it is neither made nor sent again,
+        // and a change made to it since goes as a change of the card made, not as a new card.
         let mut sent = Sent::default();
         sent.record(&sync);
         let mut copy = pim.clone();
         sent.resume(&mut copy);
-        assert_eq!(copy.cards[0].href, "jmap:N7");
+        assert_eq!((copy.cards[0].href.as_str(), copy.cards[0].dirty), ("jmap:N7", false));
         let client = connect(json!({}), writable);
         crate::block_on(client.sync_contacts(&copy, false, 9)).unwrap();
+        assert!(calls(&client, "ContactCard/set").is_empty(), "nothing left to send");
+        let mut changed = pim.clone();
+        changed.cards[0].card.title = "Head of site".into();
+        sent.resume(&mut changed);
+        assert_eq!((changed.cards[0].href.as_str(), changed.cards[0].dirty), ("jmap:N7", true));
+        let client = connect(json!({}), writable);
+        crate::block_on(client.sync_contacts(&changed, false, 9)).unwrap();
         let set = calls(&client, "ContactCard/set").remove(0);
         assert!(set["create"].as_object().is_some_and(Map::is_empty) && set["update"].get("N7").is_some(), "{set}");
         // Once the engine has it (its address), or it is gone, it is let go of.
@@ -913,6 +1130,47 @@ mod tests {
         // Once the engine has let the tombstone go, so does the record.
         sent.resume(&mut kept(Vec::new()));
         assert!(sent.deleted.is_empty());
+    }
+
+    #[test]
+    fn what_a_sync_did_to_the_events_is_not_done_twice() {
+        use mailcraft_model::ical::CalEvent;
+        use mailcraft_model::pim::StoredEvent;
+        let event = |href: &str, uid: &str, dirty: bool| StoredEvent {
+            calendar: "K1".into(),
+            href: href.into(),
+            etag: String::new(),
+            event: CalEvent { uid: uid.into(), summary: uid.into(), ..Default::default() },
+            dirty,
+        };
+        let mut pim = kept(Vec::new());
+        pim.events = vec![event("", "made", true), event("jmap:E2", "refused", true)];
+        pim.deleted = vec![
+            Tombstone { href: "jmap:E3".into(), calendar: "K1".into(), ..Default::default() },
+            // A card's, with the same id: not the event's.
+            Tombstone { href: "jmap:E3".into(), ..Default::default() },
+        ];
+        // What the calendars' sync did: one made (E1), one refused (said), one deleted.
+        let sync = DavSync {
+            pushed_events: vec![event("jmap:E1", "made", false)],
+            refused_events: vec![event("jmap:E2", "refused", true)],
+            deleted: vec!["jmap:E3".into()],
+            ..Default::default()
+        };
+        let mut sent = Sent::default();
+        sent.record_events(&sync);
+        // Synced again before the engine took that in: the event made is updated, not made again; the refusal is not
+        // sent again (nor said); the deletion not sent again; the card's tombstone stays.
+        let mut copy = pim.clone();
+        sent.resume(&mut copy);
+        assert_eq!(copy.events[0].href, "jmap:E1");
+        assert!(!copy.events[1].dirty);
+        assert_eq!(copy.deleted, vec![Tombstone { href: "jmap:E3".into(), ..Default::default() }]);
+        // Once the engine has taken it all in, it is let go of.
+        let mut taken = kept(Vec::new());
+        taken.events = vec![event("jmap:E1", "made", false)];
+        sent.resume(&mut taken);
+        assert!(sent.events_created.is_empty() && sent.events_refused.is_empty() && sent.events_deleted.is_empty());
     }
 
     #[test]
@@ -1010,6 +1268,23 @@ mod tests {
     }
 
     #[test]
+    fn a_token_refused_during_the_sync_is_said_as_such() {
+        // The server refuses the token while the address books are read (it expired, or died with the desk's session):
+        // said as a refused sign-in, so that the mailbox signs in again, rather than swallowed with the books unread.
+        let refused_read = |name: &str, args: &Value| if name == "ContactCard/get" { json!({"status": 401}) } else { writable(name, args) };
+        let client = connect(json!({}), refused_read);
+        let r = crate::block_on(client.sync_contacts(&kept(Vec::new()), false, 9));
+        assert!(matches!(r, Err(crate::Error::Auth(_))), "{r:?}");
+        // Likewise while what changed here is sent: the change stays to be sent once signed in again.
+        let pim = kept(vec![stored("B1", "", named("u1", "Jeanne Muster", "jeanne@example.ch"), true)]);
+        let refused_push = |name: &str, args: &Value| if name == "ContactCard/set" { json!({"status": 401}) } else { writable(name, args) };
+        let client = connect(json!({}), refused_push);
+        let r = crate::block_on(client.sync_contacts(&pim, false, 9));
+        assert!(matches!(r, Err(crate::Error::Auth(_))), "{r:?}");
+        assert!(calls(&client, "ContactCard/get").is_empty(), "nothing more asked with a refused token");
+    }
+
+    #[test]
     fn a_deletion_the_server_refuses_is_said_once_and_the_card_comes_back() {
         let mut pim = kept(Vec::new());
         pim.deleted = vec![Tombstone { href: "jmap:C1".into(), ..Default::default() }, Tombstone { href: "jmap:C7".into(), ..Default::default() }];
@@ -1024,13 +1299,30 @@ mod tests {
         let sync = crate::block_on(client.sync_contacts(&pim, false, 9)).unwrap().unwrap();
         assert_eq!(calls(&client, "ContactCard/set")[0]["destroy"], json!(["C1", "C7"]));
         assert_eq!(sync.deleted, vec!["jmap:C1", "jmap:C7"], "both done with: one deleted, one refused");
-        assert_eq!(sync.errors, vec!["a contact was not deleted: This contact is linked to documents"], "the refusal said once");
+        assert_eq!(sync.errors, vec!["a contact was not deleted: not allowed: This contact is linked to documents"], "the refusal said once");
+        assert_eq!(sync.refused_deletions, vec!["jmap:C1"], "refused for good: read after a send alone (read_after)");
+        // One already gone there (its deletion sent before, its answer lost on the way): done, nothing said.
+        let gone = |name: &str, args: &Value| match name {
+            "ContactCard/set" => json!({"destroyed": ["C7"], "notDestroyed": {"C1": {"type": "notFound"}}}),
+            _ => writable(name, args),
+        };
+        let again = crate::block_on(connect(json!({}), gone).sync_contacts(&pim, false, 9)).unwrap().unwrap();
+        assert_eq!((again.deleted.len(), again.errors.len()), (2, 0), "{:?}", again.errors);
         assert!(sync.cards.iter().any(|c| c.href == "jmap:C1"), "the card refused is read back");
         // A call that fails keeps the deletions for the next sync.
         let failing = |name: &str, args: &Value| if name == "ContactCard/set" { json!({"transport": "reset"}) } else { writable(name, args) };
         let client = connect(json!({}), failing);
         let sync = crate::block_on(client.sync_contacts(&pim, false, 9)).unwrap().unwrap();
         assert!(sync.deleted.is_empty() && sync.errors.len() == 2, "{:?}", sync.errors);
+        assert!(sync.refused_deletions.is_empty(), "a call that failed refuses nothing for good");
+        // So does one the server could not take for now (it failed, or asked to wait): said where it failed.
+        let busy = |name: &str, args: &Value| match name {
+            "ContactCard/set" => json!({"notDestroyed": {"C1": {"type": "serverFail"}, "C7": {"type": "rateLimit"}}}),
+            _ => writable(name, args),
+        };
+        let sync = crate::block_on(connect(json!({}), busy).sync_contacts(&pim, false, 9)).unwrap().unwrap();
+        assert!(sync.deleted.is_empty() && sync.refused_deletions.is_empty(), "both stay to be sent");
+        assert_eq!(sync.errors, vec!["a contact was not deleted: the server failed; tried again at the next sync"]);
     }
 
     #[test]
@@ -1047,5 +1339,136 @@ mod tests {
         ];
         let sync = contacts_sync(&books, &[], 1);
         assert_eq!(sync.no_delete_books, vec!["B2", "B4", "B5"], "mayWrite decides, mayRemoveItems narrows it; mayDelete (the book) doesn't count");
+    }
+
+    #[test]
+    fn a_change_waits_to_be_sent_until_it_goes() {
+        use mailcraft_model::ical::CalEvent;
+        let event = |calendar: &str, href: &str| StoredEvent {
+            calendar: calendar.into(),
+            href: href.into(),
+            etag: String::new(),
+            event: CalEvent { uid: "u1".into(), summary: "Point chantier".into(), ..Default::default() },
+            dirty: true,
+        };
+        let jeanne = |dirty: bool| stored("B1", "jmap:C1", named("c1", "Jeanne Muster", "jeanne@example.ch"), dirty);
+        let clean = kept(vec![jeanne(false)]);
+        assert!(!waiting(&clean), "nothing changed here");
+        // A card changed in a book the person may write waits; in a book now read-only it doesn't (the engine lets it go).
+        let changed = kept(vec![jeanne(true)]);
+        assert!(waiting(&changed));
+        let mut locked = changed.clone();
+        locked.books[0].read_only = true;
+        assert!(!waiting(&locked));
+        // Nor before the books were found on this server (a CardDAV server's).
+        let mut elsewhere = changed.clone();
+        elsewhere.carddav_home = Some("https://dav.example.ch/".into());
+        assert!(!waiting(&elsewhere));
+        // A card deleted here waits (its tombstone names no calendar).
+        let mut gone = clean.clone();
+        gone.deleted = vec![Tombstone { href: "jmap:C1".into(), ..Default::default() }];
+        assert!(waiting(&gone));
+        // An event changed or deleted in one of the server's calendars waits; one in a calendar kept here only doesn't.
+        let mut calendars = clean.clone();
+        calendars.caldav_home = Some("jmap".into());
+        calendars.events = vec![event("K1", "jmap:E1")];
+        assert!(waiting(&calendars));
+        calendars.events = vec![event(LOCAL, "")];
+        assert!(!waiting(&calendars));
+        calendars.deleted = vec![Tombstone { href: "jmap:E3".into(), calendar: "K1".into(), ..Default::default() }];
+        assert!(waiting(&calendars));
+        // What a sync sent that the engine hasn't taken in yet doesn't wait any more: a refused change, said once.
+        calendars.deleted.clear();
+        calendars.events = vec![event("K1", "jmap:E2")];
+        let mut sent = Sent::default();
+        sent.record_events(&DavSync { refused_events: vec![event("K1", "jmap:E2")], ..Default::default() });
+        sent.resume(&mut calendars);
+        assert!(!waiting(&calendars));
+    }
+
+    /// A change the server refused is not sent again before the engine has taken the refusal in; a change made since goes,
+    /// and so does everything once the engine has taken in the last sync recorded (a deletion tried again too).
+    #[test]
+    fn a_change_made_after_a_refusal_goes() {
+        use mailcraft_model::ical::CalEvent;
+        let event = |summary: &str| StoredEvent {
+            calendar: "K1".into(),
+            href: "jmap:E1".into(),
+            etag: String::new(),
+            event: CalEvent { uid: "u1".into(), summary: summary.into(), ..Default::default() },
+            dirty: true,
+        };
+        let mut pim = kept(Vec::new());
+        pim.caldav_home = Some("jmap".into());
+        pim.events = vec![event("Refused title")];
+        let mut sent = Sent::default();
+        sent.record_events(&DavSync { checked: 10, refused_events: vec![event("Refused title")], ..Default::default() });
+        let mut copy = pim.clone();
+        sent.resume(&mut copy);
+        assert!(!copy.events[0].dirty && !waiting(&copy), "not sent again before the engine takes the refusal in");
+        let mut changed = pim.clone();
+        changed.events[0].event.summary = "Corrected title".into();
+        sent.resume(&mut changed);
+        assert!(changed.events[0].dirty && waiting(&changed), "changed since: it goes");
+        let mut taken = pim.clone();
+        taken.dav_checked = Some(10);
+        sent.resume(&mut taken);
+        assert!(taken.events[0].dirty && waiting(&taken), "the engine took the refusal in: the change made since goes");
+        assert!(sent.recorded.is_none() && sent.events_refused.is_empty());
+
+        // A card refused for good and a deletion done with, likewise.
+        let mut cards = kept(vec![stored("B1", "jmap:C1", named("c1", "Jeanne Muster", "jeanne@example.ch"), true)]);
+        cards.deleted = vec![Tombstone { href: "jmap:C2".into(), ..Default::default() }];
+        let mut sent = Sent::default();
+        sent.record(&DavSync { checked: 20, refused_cards: vec![cards.cards[0].clone()], deleted: vec!["jmap:C2".into()], ..Default::default() });
+        let mut copy = cards.clone();
+        sent.resume(&mut copy);
+        assert!(!copy.cards[0].dirty && copy.deleted.is_empty() && !waiting(&copy), "not sent again before the engine takes them in");
+        let mut taken = cards.clone();
+        taken.dav_checked = Some(20);
+        sent.resume(&mut taken);
+        assert!(taken.cards[0].dirty && taken.deleted.len() == 1 && waiting(&taken), "tried again after the engine took them in: they go");
+    }
+
+    /// A card's change the server refuses for good is said once and handed over as refused (the change goes); one it
+    /// could not take for the time being stays to be sent. A send alone reads no address book.
+    #[test]
+    fn a_card_refused_for_good_goes_and_a_send_reads_nothing() {
+        let pim = kept(vec![
+            stored("B1", "jmap:C1", named("c1", "Jeanne Muster", "jeanne@example.ch"), true),
+            stored("B1", "jmap:C7", named("c7", "Paul Exemple", "paul@example.ch"), true),
+        ]);
+        let refusing = |name: &str, args: &Value| match name {
+            "ContactCard/set" => json!({"notUpdated": {
+                "C1": {"type": "invalidProperties", "description": "phone"},
+                "C7": {"type": "serverFail"}
+            }}),
+            _ => writable(name, args),
+        };
+        let client = connect(json!({}), refusing);
+        let sync = crate::block_on(client.send_contacts(&pim, false, 9)).unwrap().unwrap();
+        assert_eq!(sync.refused_cards.iter().map(|c| c.href.as_str()).collect::<Vec<_>>(), ["jmap:C1"], "only the refusal for good");
+        assert_eq!(sync.errors.len(), 2, "{:?}", sync.errors);
+        assert!(sync.books.is_none() && sync.synced_books.is_empty() && sync.cards.is_empty(), "the books stay as the engine has them");
+        let asked: Vec<String> = client.http.asked.borrow().iter().map(|(name, _)| name.clone()).collect();
+        assert!(asked.iter().all(|name| name == "ContactCard/set"), "{asked:?}");
+    }
+
+    #[test]
+    fn a_send_alone_is_read_after_only_a_refusal_for_good() {
+        let quiet = DavSync { errors: vec![format!("an event was not saved: Weekly — {FAILED_FOR_NOW}")], ..Default::default() };
+        assert!(!read_after(&quiet), "for the time being: sent again, nothing to read");
+        let down = DavSync { errors: vec!["an event was not saved: Weekly — network: offline".into()], ..Default::default() };
+        assert!(!read_after(&down), "a call that failed: sent again, nothing to read");
+        let deletion = DavSync {
+            errors: vec!["a contact was not deleted: Ce contact est lié à des documents".into()],
+            deleted: vec!["jmap:C1".into()],
+            refused_deletions: vec!["jmap:C1".into()],
+            ..Default::default()
+        };
+        assert!(read_after(&deletion), "a deletion refused: the contact comes back");
+        let card = DavSync { refused_cards: vec![stored("B1", "jmap:C1", named("c1", "Jeanne", "jeanne@example.ch"), true)], ..Default::default() };
+        assert!(read_after(&card));
+        assert!(!read_after(&DavSync::default()));
     }
 }

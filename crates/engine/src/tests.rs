@@ -1066,6 +1066,57 @@ fn calendar_events_on_this_computer() {
     done(s);
 }
 
+// //// Neoffice — a CalDAV event kept at one address with its exceptions: a change waiting here on one part of it (the
+// event itself, or one exception) holds back that part only, and the server's other parts come as it has them, so that
+// the next write of the address keeps them; an exception for a date taken out here stays out.
+#[test]
+fn a_change_waiting_on_one_part_of_a_caldav_event_leaves_its_other_parts_as_the_server_has_them() {
+    use mailcraft_model::ical::CalEvent;
+    use mailcraft_model::pim::{CalendarInfo, DavSync, StoredEvent};
+    let mut s = Session::open(Some(temp("dav-parts")), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id = s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    let cal = "https://dav.example.org/cal/work/".to_string();
+    let href = format!("{cal}w.ics");
+    let (one, two) = (NOW + 3600 + 7 * 86_400, NOW + 3600 + 14 * 86_400);
+    let part = |rid: Option<i64>, summary: &str| {
+        let start = rid.unwrap_or(NOW + 3600);
+        let event = CalEvent {
+            uid: "w".into(),
+            summary: summary.into(),
+            start,
+            end: start + 3600,
+            rrule: rid.is_none().then(|| "FREQ=WEEKLY".to_string()),
+            recurrence_id: rid,
+            ..Default::default()
+        };
+        StoredEvent { calendar: cal.clone(), href: href.clone(), etag: "\"1\"".into(), event, dirty: false }
+    };
+    let read = |parts: Vec<StoredEvent>| DavSync {
+        caldav_home: Some("https://dav.example.org/cal/".into()),
+        calendars: Some(vec![CalendarInfo { id: cal.clone(), name: "Work".into(), ..Default::default() }]),
+        events: parts,
+        synced_calendars: vec![cal.clone()],
+        checked: NOW,
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(read(vec![part(None, "Weekly"), part(Some(one), "Moved"), part(Some(two), "Other")])),
+    });
+    // Renamed here, and one occurrence taken out; meanwhile the server's exception changed (the address is read again).
+    s.run("event.update", &json!({"uid": "w", "summary": "Weekly, renamed"})).unwrap();
+    s.run("event.delete", &json!({"uid": "w", "occurrence": two})).unwrap();
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(read(vec![part(None, "Weekly"), part(Some(one), "Moved later"), part(Some(two), "Other")])),
+    });
+    let mut parts: Vec<(Option<i64>, String, bool)> =
+        s.pim[&id].events.iter().filter(|e| e.event.uid == "w").map(|e| (e.event.recurrence_id, e.event.summary.clone(), e.dirty)).collect();
+    parts.sort();
+    assert_eq!(parts, vec![(None, "Weekly, renamed".to_string(), true), (Some(one), "Moved later".to_string(), false)]);
+    done(s);
+}
+
 #[test]
 fn people_in_the_address_book() {
     let mut s = sample_session("people");
@@ -2671,4 +2722,619 @@ fn shared_contacts_are_read_only() {
     // New contacts go to a book that can take them.
     let made = s.run("contact.create", &json!({"name": "New one"})).unwrap();
     assert!(!s.person_read_only(made["uid"].as_str().unwrap()));
+}
+
+// //// Neoffice — the same meeting in a colleague's read-only calendar, listed before the person's own copy: changing it
+// changes the person's own copy, as answering and deleting do, and leaves the colleague's as it is.
+#[test]
+fn a_read_only_copy_listed_first_does_not_block_changing_the_own_one() {
+    use mailcraft_model::pim::{CalendarInfo, LOCAL};
+    let mut s = sample_session("shared-first");
+    let uid = "mix@sample.mailcraft";
+    let p = s.pim_mut("sample");
+    p.calendars.push(CalendarInfo { id: "shared:ana@soundlab.example".into(), name: "Ana".into(), read_only: true, ..Default::default() });
+    let mut theirs = p.events.iter().find(|e| e.event.uid == uid).cloned().unwrap();
+    (theirs.calendar, theirs.href) = ("shared:ana@soundlab.example".into(), "S1".into());
+    p.events.insert(0, theirs.clone());
+    s.run("event.update", &json!({"uid": uid, "summary": "Sound mix, moved"})).unwrap();
+    let own = s.pim["sample"].events.iter().find(|e| e.event.uid == uid && e.calendar == LOCAL).unwrap();
+    assert_eq!(own.event.summary, "Sound mix, moved");
+    assert!(s.pim["sample"].events.contains(&theirs), "the colleague's copy as it was");
+    done(s);
+}
+
+/// A JMAP account (`zoe@example.org`) whose server calendar K1, writable, holds three occurrences of the series B1 the
+/// server expanded (E1, E2, E3, a week apart), organized by the person with a guest.
+#[cfg(test)]
+fn expanded_series(name: &str) -> (Session, String, Vec<i64>) {
+    use mailcraft_model::ical::{Attendee, CalEvent};
+    use mailcraft_model::pim::{CalendarInfo, DavSync, SERIES_LINE, SERIES_RULE_LINE, StoredEvent};
+    let mut s = Session::open(Some(temp(name)), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id =
+        s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let starts: Vec<i64> = (1..=3).map(|n| NOW + n * 7 * 86_400).collect();
+    let occurrence = |n: usize, start: i64| StoredEvent {
+        calendar: "K1".into(),
+        href: format!("jmap:E{}", n + 1),
+        etag: String::new(),
+        event: CalEvent {
+            uid: "w1".into(),
+            summary: "Weekly".into(),
+            start,
+            end: start + 3600,
+            recurrence_id: Some(start),
+            organizer: Some(Attendee { email: "zoe@example.org".into(), ..Default::default() }),
+            attendees: vec![Attendee { email: "ana@example.org".into(), partstat: "ACCEPTED".into(), ..Default::default() }],
+            extra: vec![format!("{SERIES_LINE}jmap:B1"), format!("{SERIES_RULE_LINE}FREQ=WEEKLY")],
+            ..Default::default()
+        },
+        dirty: false,
+    };
+    let sync = DavSync {
+        caldav_home: Some("jmap".into()),
+        checked: NOW,
+        calendars: Some(vec![CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: false, ..Default::default() }]),
+        synced_calendars: vec!["K1".into()],
+        events: starts.iter().enumerate().map(|(n, t)| occurrence(n, *t)).collect(),
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(sync) });
+    s.take_jobs();
+    (s, id, starts)
+}
+
+// //// Neoffice — occurrences of a series a server expanded (no event of the series here) are changed one by one, or as
+// the whole series through one of them, and deleted one by one or as the series (its base event there).
+#[test]
+fn occurrences_a_server_expanded_are_changed_and_deleted_one_by_one_or_as_a_series() {
+    use mailcraft_model::pim::{SERIES_CHANGE, SERIES_CHANGE_LINE, SERIES_CHANGE_RULE, SERIES_RULE_LINE, Tombstone, series_line};
+    let (mut s, id, starts) = expanded_series("expanded-series");
+    let occurrence = |s: &Session, n: usize| s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[n])).cloned().unwrap();
+    // This occurrence: only it changes.
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "summary": "Weekly, this once"})).unwrap();
+    let (one, two) = (occurrence(&s, 0), occurrence(&s, 1));
+    assert_eq!((two.event.summary.as_str(), two.dirty, series_line(&two.event, SERIES_CHANGE_LINE)), ("Weekly, this once", true, None));
+    assert_eq!((one.event.summary.as_str(), one.dirty), ("Weekly", false), "the others as they were");
+    assert!(two.event.rrule.is_none() && two.event.recurrence_id == Some(starts[1]), "still that occurrence");
+    // The whole series, an hour later: the occurrence carries it for the series; the others show it at once.
+    let later = starts[2] + 3600;
+    s.run(
+        "event.update",
+        &json!({"uid": "w1", "occurrence": starts[2], "series": true, "summary": "Weekly, later", "start": later, "end": later + 3600}),
+    )
+    .unwrap();
+    let three = occurrence(&s, 2);
+    assert_eq!((three.dirty, series_line(&three.event, SERIES_CHANGE_LINE)), (true, Some(SERIES_CHANGE)));
+    let one = occurrence(&s, 0);
+    assert_eq!((one.event.summary.as_str(), one.event.start, one.dirty), ("Weekly, later", starts[0] + 3600, false), "shown at once, sent once");
+    assert!(s.take_jobs().iter().all(|j| !matches!(j, Job::Send { .. })), "the server tells the guest, not MailCraft");
+    // And its rule.
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[2], "series": true, "repeat": "daily"})).unwrap();
+    let three = occurrence(&s, 2);
+    assert_eq!(series_line(&three.event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE_RULE));
+    assert_eq!((series_line(&three.event, SERIES_RULE_LINE), three.event.rrule.as_deref()), (Some("FREQ=DAILY"), None), "no rule of its own");
+    // This occurrence deleted: it goes, by its own address there.
+    s.run("event.delete", &json!({"uid": "w1", "occurrence": starts[0]})).unwrap();
+    assert_eq!(s.pim[&id].events.len(), 2);
+    assert_eq!(s.pim[&id].deleted, vec![Tombstone { href: "jmap:E1".into(), etag: String::new(), calendar: "K1".into() }]);
+    // The series deleted: all of it goes, once, by its base event.
+    s.run("event.delete", &json!({"uid": "w1"})).unwrap();
+    assert!(s.pim[&id].events.is_empty());
+    assert_eq!(s.pim[&id].deleted.iter().map(|t| t.href.as_str()).collect::<Vec<_>>(), vec!["jmap:E1", "jmap:B1"]);
+    assert!(s.take_jobs().iter().all(|j| !matches!(j, Job::Send { .. })), "no cancellation mailed by MailCraft either");
+    done(s);
+}
+
+// //// Neoffice — the person's answer to a series a server expanded goes once, for the series, and the organizer is told
+// once, by mail, as for any other calendar.
+#[test]
+fn an_answer_to_a_series_a_server_expanded_goes_once() {
+    use mailcraft_model::ical::Attendee;
+    use mailcraft_model::pim::{SERIES_CHANGE, SERIES_CHANGE_LINE, series_line};
+    let (mut s, id, _) = expanded_series("expanded-answer");
+    for e in &mut s.pim_mut(&id).events {
+        e.event.organizer = Some(Attendee { email: "boss@example.org".into(), ..Default::default() });
+        e.event.attendees = vec![Attendee { email: "zoe@example.org".into(), partstat: "NEEDS-ACTION".into(), rsvp: true, ..Default::default() }];
+    }
+    s.run("event.respond", &json!({"uid": "w1", "answer": "accepted"})).unwrap();
+    let events = &s.pim[&id].events;
+    assert!(events.iter().all(|e| e.event.attendees.iter().all(|a| a.partstat == "ACCEPTED")), "shown on each");
+    let sent: Vec<_> = events.iter().filter(|e| e.dirty).collect();
+    assert_eq!(sent.len(), 1, "sent once");
+    assert_eq!(series_line(&sent[0].event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE), "for the series");
+    let replies: Vec<String> = s
+        .take_jobs()
+        .into_iter()
+        .filter_map(|j| if let Job::Send { raw, .. } = j { Some(String::from_utf8_lossy(&raw).to_string()) } else { None })
+        .collect();
+    assert_eq!(replies.len(), 1, "one reply, for the series");
+    assert!(replies[0].contains("METHOD:REPLY") && replies[0].contains("UID:w1"), "the reply, as written");
+    assert!(!replies[0].contains("X-MAILCRAFT") && !replies[0].contains("RECURRENCE-ID"), "the series', nothing of MailCraft's own");
+    done(s);
+}
+
+// //// Neoffice — an answer to a series a server expanded goes with an occurrence that has no change of its own waiting
+// (that change stays the occurrence's), and keeps a change of the series' rule waiting one.
+#[test]
+fn an_answer_to_a_series_goes_with_an_occurrence_with_nothing_of_its_own_waiting() {
+    use mailcraft_model::ical::Attendee;
+    use mailcraft_model::pim::{SERIES_CHANGE_LINE, SERIES_CHANGE_RULE, series_line};
+    let (mut s, id, starts) = expanded_series("answer-carrier");
+    for e in &mut s.pim_mut(&id).events {
+        e.event.organizer = Some(Attendee { email: "boss@example.org".into(), ..Default::default() });
+        e.event.attendees = vec![Attendee { email: "zoe@example.org".into(), partstat: "NEEDS-ACTION".into(), rsvp: true, ..Default::default() }];
+    }
+    let occurrence = |s: &Session, n: usize| s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[n])).cloned().unwrap();
+    // The first occurrence has a change of its own waiting: the answer goes with the second.
+    if let Some(e) = s.pim_mut(&id).events.iter_mut().find(|e| e.event.recurrence_id == Some(starts[0])) {
+        e.event.location = "Room 2".into();
+        e.dirty = true;
+    }
+    s.run("event.respond", &json!({"uid": "w1", "answer": "accepted"})).unwrap();
+    assert_eq!(series_line(&occurrence(&s, 0).event, SERIES_CHANGE_LINE), None, "its own change stays its own");
+    assert!(series_line(&occurrence(&s, 1).event, SERIES_CHANGE_LINE).is_some() && occurrence(&s, 1).dirty, "the series' answer");
+    // A change of the series' rule waiting on the carrier stays one.
+    let (mut s2, id2, starts2) = expanded_series("answer-rule");
+    for e in &mut s2.pim_mut(&id2).events {
+        e.event.organizer = Some(Attendee { email: "boss@example.org".into(), ..Default::default() });
+        e.event.attendees = vec![Attendee { email: "zoe@example.org".into(), partstat: "NEEDS-ACTION".into(), rsvp: true, ..Default::default() }];
+    }
+    s2.run("event.update", &json!({"uid": "w1", "occurrence": starts2[0], "series": true, "repeat": "daily"})).unwrap();
+    s2.run("event.respond", &json!({"uid": "w1", "answer": "accepted"})).unwrap();
+    let first = s2.pim[&id2].events.iter().find(|e| e.event.recurrence_id == Some(starts2[0])).cloned().unwrap();
+    assert_eq!(series_line(&first.event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE_RULE));
+    done(s2);
+    done(s);
+}
+
+// //// Neoffice — a stored event whose change the server refused shows again as it was read before the change, until the
+// next read brings the server's.
+#[test]
+fn a_refused_change_shows_the_event_as_it_was_read() {
+    use mailcraft_model::pim::DavSync;
+    let (mut s, id, starts) = expanded_series("refused-shows-as-read");
+    let read = s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[0])).cloned().unwrap();
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "summary": "Refused", "location": "Room 9"})).unwrap();
+    let refused: Vec<_> = s.pim[&id].events.iter().filter(|e| e.dirty).cloned().collect();
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(DavSync { caldav_home: Some("jmap".into()), refused_events: refused, ..Default::default() }),
+    });
+    let now = s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[0])).cloned().unwrap();
+    assert_eq!(
+        (now.event.summary.as_str(), now.event.location.as_str(), now.dirty),
+        (read.event.summary.as_str(), read.event.location.as_str(), false)
+    );
+    assert!(s.pim[&id].originals.is_empty());
+    done(s);
+}
+
+// //// Neoffice — the form's time compared as it shows it (to the minute): an event with seconds in its time is not
+// « changed meanwhile ».
+#[test]
+fn an_event_with_seconds_in_its_time_is_not_said_moved() {
+    let (mut s, id, starts) = expanded_series("seconds");
+    if let Some(e) = s.pim_mut(&id).events.iter_mut().find(|e| e.event.recurrence_id == Some(starts[0])) {
+        e.event.start += 30;
+        e.event.end += 30;
+    }
+    let shown = |t: i64| {
+        let local = s.clock.local(t);
+        let (d, m) = (local.div_euclid(86_400), local.rem_euclid(86_400) / 60);
+        let (y, mo, da) = mailcraft_model::dates::civil_from_days(d);
+        format!("{y:04}-{mo:02}-{da:02}T{:02}:{:02}", m / 60, m % 60)
+    };
+    let was = json!({"start": shown(starts[0] + 30), "end": shown(starts[0] + 3630), "allDay": false});
+    s.run(
+        "event.update",
+        &json!({"uid": "w1", "occurrence": starts[0], "start": shown(starts[0] + 30), "end": shown(starts[0] + 5400), "allDay": false, "was": was}),
+    )
+    .unwrap();
+    // The start the form left as it showed it keeps its exact instant (its seconds); the end changed is the form's.
+    let first = s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[0])).cloned().unwrap();
+    assert_eq!((first.event.start, first.event.end), (starts[0] + 30, starts[0] + 5400));
+    done(s);
+}
+
+// //// Neoffice — a change made here to a JMAP server's event keeps the copy it started from, as read, until it is sent
+// (Pim::originals): what goes is what the person changed since, made to the server's copy as it is then (calendars.rs in
+// mailcraft-jmap), so that what someone else changed meanwhile stays.
+#[test]
+fn a_change_keeps_the_copy_it_started_from_until_it_is_sent() {
+    use mailcraft_model::pim::{DavSync, StoredEvent};
+    let (mut s, id, starts) = expanded_series("as-read");
+    let copy = |s: &Session, n: usize| s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[n])).cloned().unwrap();
+    let read = copy(&s, 0);
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "summary": "Weekly, once"})).unwrap();
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "location": "Room 2"})).unwrap();
+    assert_eq!(s.pim[&id].originals.get("jmap:E1"), Some(&read.event), "the copy as read, not the first change");
+    assert_eq!(s.pim[&id].originals.len(), 1, "only what was changed");
+    // Sent, and changed again before the engine took the sync in: the next change starts from what was sent.
+    let sent = copy(&s, 0);
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "summary": "Weekly, twice"})).unwrap();
+    let pushed = |e: &StoredEvent| DavSync {
+        caldav_home: Some("jmap".into()),
+        pushed_events: vec![StoredEvent { dirty: false, ..e.clone() }],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(pushed(&sent)) });
+    assert!(copy(&s, 0).dirty);
+    assert_eq!(s.pim[&id].originals.get("jmap:E1"), Some(&sent.event));
+    // Sent as it is: let go of.
+    let now = copy(&s, 0);
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(pushed(&now)) });
+    assert!(!copy(&s, 0).dirty && s.pim[&id].originals.is_empty());
+    // A whole series changed from one of its occurrences keeps that occurrence's (what the form showed); refused, let go of.
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "series": true, "summary": "Weekly, all"})).unwrap();
+    assert_eq!(s.pim[&id].originals.keys().collect::<Vec<_>>(), vec!["jmap:E2"]);
+    let refused = vec![copy(&s, 1)];
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(DavSync { caldav_home: Some("jmap".into()), refused_events: refused, ..Default::default() }),
+    });
+    assert!(s.pim[&id].originals.is_empty());
+    done(s);
+}
+
+// //// Neoffice — one occurrence of a series a server expanded changed here, its change not yet sent: a read of the calendar
+// leaves the others of the series as the server has them (each is the server's own event), whole or in part.
+#[test]
+fn a_change_waiting_on_one_occurrence_leaves_the_others_of_its_series_shown() {
+    use mailcraft_model::pim::{CalendarInfo, DavSync, StoredEvent};
+    let (mut s, id, starts) = expanded_series("one-waiting");
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "summary": "Weekly, this once"})).unwrap();
+    let server = |title: &str, s: &Session| -> Vec<StoredEvent> {
+        let mut all: Vec<StoredEvent> = s.pim[&id].events.iter().map(|e| StoredEvent { dirty: false, ..e.clone() }).collect();
+        for e in &mut all {
+            e.event.summary = title.into();
+        }
+        all
+    };
+    let read = |events: Vec<StoredEvent>, whole: bool| DavSync {
+        caldav_home: Some("jmap".into()),
+        checked: NOW,
+        calendars: Some(vec![CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: false, ..Default::default() }]),
+        synced_calendars: if whole { vec!["K1".into()] } else { Vec::new() },
+        partial_calendars: if whole { Vec::new() } else { vec!["K1".into()] },
+        events,
+        ..Default::default()
+    };
+    let shown = |s: &Session| -> Vec<(i64, String, bool)> {
+        let mut all: Vec<_> = s.pim[&id].events.iter().map(|e| (e.event.start, e.event.summary.clone(), e.dirty)).collect();
+        all.sort();
+        all
+    };
+    for (whole, title) in [(true, "Weekly, renamed in the desk"), (false, "Weekly, again")] {
+        let events = server(title, &s);
+        s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read(events, whole)) });
+        assert_eq!(
+            shown(&s),
+            vec![(starts[0], title.to_string(), false), (starts[1], "Weekly, this once".to_string(), true), (starts[2], title.to_string(), false)],
+            "read whole: {whole}"
+        );
+    }
+    done(s);
+}
+
+// //// Neoffice — an invitation to a series already in a calendar a server expanded (JMAP: its occurrences, no event of the
+// series here) is answered on the series there: accepted, its occurrences show it and it goes once, for the series (no
+// event made); declined, the series goes, once, by its base event. The organizer hears of it by mail, as elsewhere.
+/// The sample mailbox with its invitation's event (`mix@sample.mailcraft`) in a calendar a server expanded (JMAP): three
+/// weekly occurrences there (`jmap:E0`…), of the series `jmap:B1`, no event of the series here; and that event.
+#[cfg(test)]
+fn sample_with_an_expanded_series(name: &str) -> (Session, mailcraft_model::ical::CalEvent) {
+    use mailcraft_model::pim::{CalendarInfo, SERIES_LINE, StoredEvent};
+    let mut s = sample_session(name);
+    let uid = "mix@sample.mailcraft";
+    let master = s.find_event(uid).unwrap().1.event.clone();
+    let p = s.pim_mut("sample");
+    p.caldav_home = Some("jmap".into());
+    p.calendars.push(CalendarInfo { id: "K1".into(), name: "Agenda".into(), read_only: false, ..Default::default() });
+    p.events.retain(|e| e.event.uid != uid);
+    for n in 0..3 {
+        let start = master.start + n * 7 * 86_400;
+        let mut e = master.clone();
+        (e.start, e.end, e.recurrence_id, e.rrule) = (start, start + (master.end - master.start), Some(start), None);
+        e.extra = vec![format!("{SERIES_LINE}jmap:B1")];
+        p.events.push(StoredEvent { calendar: "K1".into(), href: format!("jmap:E{n}"), etag: String::new(), event: e, dirty: false });
+    }
+    (s, master)
+}
+
+/// A message carrying `event` as a calendar (`method`: REPLY, CANCEL…) from Ana, in the sample's inbox, opened.
+#[cfg(test)]
+fn deliver_calendar(s: &mut Session, method: &str, event: mailcraft_model::ical::CalEvent, uid: u32) {
+    let ics = mailcraft_model::ical::write(&[event], Some(method), NOW);
+    let d = mailcraft_mime::Draft {
+        to: vec![mailcraft_model::EmailAddress::new("Riley", "riley@studio.example")],
+        subject: format!("{method}: Sound mix playback"),
+        body: "See the calendar.".into(),
+        attachments: vec![mailcraft_mime::OutAttachment {
+            name: "invite.ics".into(),
+            mime: format!("text/calendar; method={method}"),
+            data: ics.into_bytes(),
+        }],
+        ..Default::default()
+    };
+    let raw =
+        mailcraft_mime::build(&d, &mailcraft_model::EmailAddress::new("Ana Lima", "ana@soundlab.example"), NOW, &format!("<m{uid}@x>")).unwrap();
+    let store = s.store.clone().unwrap();
+    let mut inbox = store.load_folder("sample", "INBOX").unwrap();
+    let key = mailcraft_model::MessageKey { account: "sample".into(), folder: "INBOX".into(), validity: inbox.validity, uid };
+    inbox.messages.insert(0, mailcraft_mime::summary_from_full(&raw, key.clone(), mailcraft_model::Flags::default(), 0, NOW));
+    store.save_folder("sample", "INBOX", &inbox).unwrap();
+    store.write_body(&key, &raw).unwrap();
+    s.apply(Event::FolderChanged { account: "sample".into(), folder: "INBOX".into() });
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    s.run("list.open", &json!({"key": key.to_id()})).unwrap();
+}
+
+#[test]
+fn an_invitation_to_a_series_a_server_expanded_is_answered_on_the_series() {
+    use mailcraft_model::pim::{SERIES_CHANGE, SERIES_CHANGE_LINE, StoredEvent, series_line};
+    let (mut s, _) = sample_with_an_expanded_series("invite-series");
+    let uid = "mix@sample.mailcraft";
+    let k = s.list.iter().find(|m| m.subject == "Sound mix, version 3").map(|m| m.key.clone()).unwrap();
+    s.run("list.open", &json!({"key": k.to_id()})).unwrap();
+    assert!(s.invite().unwrap().in_calendar, "in the calendar: its occurrences");
+    s.run("invite.respond", &json!({"answer": "accepted"})).unwrap();
+    let copies: Vec<StoredEvent> = s.pim["sample"].events.iter().filter(|e| e.event.uid == uid).cloned().collect();
+    assert_eq!(copies.len(), 3, "its occurrences, no event made");
+    assert!(copies.iter().all(|e| e.href.starts_with("jmap:E")), "the server's");
+    assert!(copies.iter().all(|e| e.event.attendees.iter().any(|a| a.email == "riley@studio.example" && a.partstat == "ACCEPTED")), "shown on each");
+    let carried: Vec<&StoredEvent> = copies.iter().filter(|e| e.dirty).collect();
+    assert_eq!(carried.len(), 1, "sent once");
+    assert_eq!(series_line(&carried[0].event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE), "for the series");
+    assert_eq!(s.invite().unwrap().answer, "ACCEPTED");
+    assert_eq!(sent_calendar(&s, "Sent", "Accepted: Sound mix playback").0, "REPLY");
+    // Declined: the series goes, once, by its base event.
+    s.run("invite.respond", &json!({"answer": "declined"})).unwrap();
+    assert!(s.pim["sample"].events.iter().all(|e| e.event.uid != uid));
+    assert_eq!(s.pim["sample"].deleted.iter().map(|t| t.href.as_str()).collect::<Vec<_>>(), vec!["jmap:B1"]);
+    assert_eq!(sent_calendar(&s, "Sent", "Declined: Sound mix playback").0, "REPLY");
+    done(s);
+}
+
+// //// Neoffice — the organizer's cancellation, and a guest's answer, of a series a server expanded, taken in from the mail
+// (« Remove from calendar », « Record the answer »): the series goes once, by its base event there, or that occurrence
+// alone; the answer shows on its occurrences.
+#[test]
+fn a_cancelled_or_answered_series_a_server_expanded_is_taken_in_on_the_series() {
+    use mailcraft_model::ical::Attendee;
+    let (mut s, master) = sample_with_an_expanded_series("cancel-series");
+    let uid = "mix@sample.mailcraft";
+    // A guest answers the whole series.
+    let mut reply = master.clone();
+    reply.attendees = vec![Attendee { email: "ana@soundlab.example".into(), partstat: "TENTATIVE".into(), ..Default::default() }];
+    deliver_calendar(&mut s, "REPLY", reply, 996);
+    assert!(s.invite().unwrap().in_calendar, "in the calendar: its occurrences");
+    s.run("invite.apply", &json!({})).unwrap();
+    let answered: Vec<bool> = s.pim["sample"]
+        .events
+        .iter()
+        .filter(|e| e.event.uid == uid)
+        .map(|e| e.event.attendees.iter().any(|a| a.email == "ana@soundlab.example" && a.partstat == "TENTATIVE"))
+        .collect();
+    assert_eq!(answered, vec![true, true, true], "on each occurrence");
+    assert!(
+        s.pim["sample"].events.iter().filter(|e| e.event.uid == uid).all(|e| !e.dirty),
+        "nothing of it sent: the server keeps its guests' answers (and would invite one it doesn't list)"
+    );
+    // One occurrence cancelled: it alone goes, by its own address there.
+    let mut one = master.clone();
+    (one.recurrence_id, one.rrule, one.start) = (Some(master.start + 7 * 86_400), None, master.start + 7 * 86_400);
+    deliver_calendar(&mut s, "CANCEL", one, 995);
+    s.run("invite.apply", &json!({})).unwrap();
+    assert_eq!(s.pim["sample"].events.iter().filter(|e| e.event.uid == uid).count(), 2);
+    assert_eq!(s.pim["sample"].deleted.iter().map(|t| t.href.as_str()).collect::<Vec<_>>(), vec!["jmap:E1"]);
+    // The whole series cancelled: it goes, once, by its base event there.
+    deliver_calendar(&mut s, "CANCEL", master, 994);
+    s.run("invite.apply", &json!({})).unwrap();
+    assert!(s.pim["sample"].events.iter().all(|e| e.event.uid != uid));
+    assert_eq!(s.pim["sample"].deleted.iter().map(|t| t.href.as_str()).collect::<Vec<_>>(), vec!["jmap:E1", "jmap:B1"]);
+    done(s);
+}
+
+// //// Neoffice — what the server refused (said in the sync's errors) goes: an event never stored there goes, one stored
+// there follows the server again.
+#[test]
+fn changes_the_server_refused_go() {
+    use mailcraft_model::pim::DavSync;
+    let (mut s, id, starts) = expanded_series("refused-events");
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "summary": "Refused"})).unwrap();
+    let made = s.run("event.create", &json!({"summary": "New", "start": NOW + 3600, "account": id, "calendar": "K1"})).unwrap();
+    let uid = made["uid"].as_str().unwrap().to_string();
+    let refused: Vec<_> = s.pim[&id].events.iter().filter(|e| e.dirty).cloned().collect();
+    assert_eq!(refused.len(), 2);
+    let sync = DavSync {
+        caldav_home: Some("jmap".into()),
+        refused_events: refused,
+        errors: vec!["an event was not saved: New — not allowed".into()],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(sync) });
+    assert!(s.pim[&id].events.iter().all(|e| e.event.uid != uid), "never stored there: gone");
+    assert!(s.pim[&id].events.iter().all(|e| !e.dirty), "the other follows the server again");
+    assert!(s.notices.iter().any(|n| n.text.ends_with("an event was not saved: New — not allowed")), "said");
+    done(s);
+}
+
+// //// Neoffice — a change the server refused that the person changed again meanwhile stays, to be sent; a card's change
+// the server refused for good goes as an event's does: one stored there follows the server again, one never stored goes.
+#[test]
+fn a_change_made_again_after_a_refusal_stays_and_a_refused_card_goes() {
+    use mailcraft_model::pim::{BookInfo, DavSync, StoredCard};
+    use mailcraft_model::vcard::{Card, Typed};
+    let (mut s, id, starts) = expanded_series("refused-again");
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "summary": "Refused"})).unwrap();
+    let refused: Vec<_> = s.pim[&id].events.iter().filter(|e| e.dirty).cloned().collect();
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "summary": "Corrected"})).unwrap();
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(DavSync { caldav_home: Some("jmap".into()), refused_events: refused, ..Default::default() }),
+    });
+    let first = s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[0])).cloned().unwrap();
+    assert_eq!((first.event.summary.as_str(), first.dirty), ("Corrected", true), "changed again meanwhile: it goes");
+
+    let card = |uid: &str, name: &str| Card {
+        uid: uid.into(),
+        name: name.into(),
+        emails: vec![Typed { value: format!("{uid}@example.ch"), kind: String::new() }],
+        ..Default::default()
+    };
+    let read = DavSync {
+        carddav_home: Some("jmap".into()),
+        books: Some(vec![BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() }]),
+        synced_books: vec!["B1".into()],
+        cards: vec![
+            StoredCard { book: "B1".into(), href: "jmap:C1".into(), card: card("c1", "Jeanne Muster"), ..Default::default() },
+            StoredCard { book: "B1".into(), href: "jmap:C2".into(), card: card("c2", "Paul Exemple"), ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    s.apply(Event::DavSynced { account: id.clone(), sync: Box::new(read) });
+    s.run("contact.update", &json!({"uid": "c1", "title": "+41 79 (priv.)"})).unwrap();
+    s.run("contact.update", &json!({"uid": "c2", "title": "Refused"})).unwrap();
+    let mira = s.run("contact.create", &json!({"name": "Mira Chen", "emails": "mira@example.ch"})).unwrap()["uid"].as_str().unwrap().to_string();
+    let refused: Vec<StoredCard> = s.pim[&id].cards.iter().filter(|c| c.dirty).cloned().collect();
+    assert_eq!(refused.len(), 3);
+    s.run("contact.update", &json!({"uid": "c2", "title": "Corrected"})).unwrap();
+    s.apply(Event::DavSynced {
+        account: id.clone(),
+        sync: Box::new(DavSync { carddav_home: Some("jmap".into()), refused_cards: refused, ..Default::default() }),
+    });
+    let state = |uid: &str| s.pim[&id].cards.iter().find(|c| c.card.uid == uid).map(|c| (c.card.title.clone(), c.dirty));
+    assert_eq!(state("c1"), Some(("+41 79 (priv.)".into(), false)), "stored there: it follows the server again");
+    assert_eq!(state("c2"), Some(("Corrected".into(), true)), "changed again meanwhile: it goes");
+    assert_eq!(state(&mira), None, "never stored there: gone");
+    done(s);
+}
+
+// //// Neoffice — an occurrence's change not sent yet keeps its scope: a change for the other scope waits until it has
+// gone; a change of the series' rule waiting stays one; this occurrence alone carries no scope left from a series change.
+#[test]
+fn an_occurrence_s_change_waiting_keeps_its_scope() {
+    use mailcraft_model::pim::{SERIES_CHANGE, SERIES_CHANGE_LINE, SERIES_CHANGE_RULE, series_line};
+    let (mut s, id, starts) = expanded_series("scope-waiting");
+    let occurrence = |s: &Session, n: usize| s.pim[&id].events.iter().find(|e| e.event.recurrence_id == Some(starts[n])).cloned().unwrap();
+    // A change of the whole series waiting: one for this occurrence alone is refused, and nothing changes.
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "series": true, "repeat": "daily"})).unwrap();
+    assert_eq!(series_line(&occurrence(&s, 1).event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE_RULE));
+    let refused = s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "summary": "Only this once"})).unwrap_err();
+    assert!(refused.to_string().contains(crate::session::pim::CHANGE_NOT_SENT), "{refused}");
+    assert_eq!(occurrence(&s, 1).event.summary, "Weekly");
+    // Another change of the series meanwhile, its rule untouched: the rule's change waiting stays one.
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "series": true, "summary": "Weekly, renamed"})).unwrap();
+    assert_eq!(series_line(&occurrence(&s, 1).event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE_RULE));
+    // This occurrence alone waiting: a change of the series is refused.
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[2], "summary": "Weekly, this once"})).unwrap();
+    let refused = s.run("event.update", &json!({"uid": "w1", "occurrence": starts[2], "series": true, "summary": "All"})).unwrap_err();
+    assert!(refused.to_string().contains(crate::session::pim::CHANGE_NOT_SENT), "{refused}");
+    // Sent (the engine takes it in), a series change's scope left on the occurrence doesn't make a later change of it
+    // alone one of the series.
+    if let Some(x) = s.pim.get_mut(&id).and_then(|p| p.events.iter_mut().find(|e| e.event.recurrence_id == Some(starts[1]))) {
+        x.dirty = false;
+    }
+    assert_eq!(series_line(&occurrence(&s, 1).event, SERIES_CHANGE_LINE), Some(SERIES_CHANGE_RULE));
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "summary": "Only this once"})).unwrap();
+    assert_eq!(series_line(&occurrence(&s, 1).event, SERIES_CHANGE_LINE), None);
+    let _ = SERIES_CHANGE;
+    done(s);
+}
+
+// //// Neoffice — the form changes an event's time from what it showed when it opened: an event moved elsewhere
+// meanwhile (and read since) is not moved back over that; its other fields go as they are.
+#[test]
+fn an_event_moved_meanwhile_is_not_moved_back() {
+    let (mut s, _id, starts) = expanded_series("moved-meanwhile");
+    let opened = json!({"start": starts[0], "end": starts[0] + 3600, "allDay": false});
+    let refused = s
+        .run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "end": starts[0] + 5400, "was": {"start": starts[0] - 7200, "end": starts[0] - 3600, "allDay": false}}))
+        .unwrap_err();
+    assert!(refused.to_string().contains(crate::cmd::MOVED_MEANWHILE), "{refused}");
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[0], "end": starts[0] + 5400, "was": opened})).unwrap();
+    s.run("event.update", &json!({"uid": "w1", "occurrence": starts[1], "summary": "Renamed", "was": {"start": 0, "end": 1, "allDay": false}}))
+        .unwrap();
+    done(s);
+}
+
+// //// Neoffice — daylight saving: every date of the calendar by the offset of its own date. Europe/Zurich's rules, as
+// the browser or the system gives them: CEST (+2) from the last Sunday of March, 01:00 UTC, to the last Sunday of
+// October, 01:00 UTC; CET (+1) otherwise.
+#[cfg(test)]
+fn zurich(t: i64) -> i32 {
+    use mailcraft_model::dates::{civil_from_days, days_from_civil};
+    let (y, _, _) = civil_from_days(t.div_euclid(86_400));
+    let last_sunday = |m: u32| {
+        let end = days_from_civil(y, m, 31);
+        (end - (end - 3).rem_euclid(7)) * 86_400 + 3600
+    };
+    if t >= last_sunday(3) && t < last_sunday(10) { 7200 } else { 3600 }
+}
+
+/// Unix seconds of a UTC date and hour.
+#[cfg(test)]
+fn utc_at(y: i64, m: u32, d: u32, h: i64) -> i64 {
+    mailcraft_model::dates::days_from_civil(y, m, d) * 86_400 + h * 3600
+}
+
+#[cfg(test)]
+fn zurich_session(name: &str, now: i64) -> Session {
+    let zone = mailcraft_model::dates::Zone::from_offsets(now - 3 * 366 * 86_400, now + 5 * 366 * 86_400, zurich);
+    let mut s = Session::open(Some(temp(name)), mailcraft_model::dates::Clock::new(now, zurich(now)).with_zone(zone));
+    s.set_clock(now, zurich(now));
+    s
+}
+
+#[test]
+fn the_calendar_s_days_and_times_follow_each_date_s_offset() {
+    use mailcraft_model::dates::{civil, days_from_civil};
+    // Saturday 17 October 2026, summer time; the clocks go back on the 25th. And 1 March, before the change of the 29th.
+    for (now, before, after, change) in
+        [(utc_at(2026, 10, 17, 9), (2026, 10, 20), (2026, 10, 27), "October"), (utc_at(2026, 3, 1, 9), (2026, 3, 24), (2026, 3, 31), "March")]
+    {
+        let mut s = zurich_session(&format!("dst-{change}"), now);
+        assert!(s.clock.zone.len > 1, "the zone's rules kept by each frame's clock");
+        let id = s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw", "jmap": "https://jmap.example.org/session"})).unwrap()
+            ["account"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.take_jobs();
+        for (y, m, d) in [before, after] {
+            let day = days_from_civil(y, m, d);
+            // A day starts at its own local midnight.
+            assert_eq!(s.local_midnight(day), day * 86_400 - i64::from(zurich(day * 86_400)), "{change} {d}: midnight");
+            // A time typed for that day is that day's 10:00.
+            let made =
+                s.run("event.create", &json!({"summary": format!("Typed {d}"), "start": format!("{y}-{m:02}-{d:02}T10:00"), "account": id})).unwrap();
+            let typed = s.find_event(made["uid"].as_str().unwrap()).unwrap().1.event.start;
+            assert_eq!(civil(typed, &s.clock).hour, 10, "{change} {d}: typed");
+            assert_eq!(typed, s.clock.utc(day * 86_400 + 10 * 3600));
+        }
+        // A weekly event made on the first date keeps its hour on the second, past the change.
+        let (y, m, d) = before;
+        s.run("event.create", &json!({"summary": "Weekly", "start": format!("{y}-{m:02}-{d:02}T10:00"), "repeat": "weekly", "account": id})).unwrap();
+        let (ya, ma, da) = after;
+        let next = days_from_civil(ya, ma, da);
+        let shown = s.agenda(s.local_midnight(next), s.local_midnight(next + 1));
+        let weekly = shown.iter().find(|i| i.summary == "Weekly").unwrap();
+        assert_eq!(civil(weekly.start, &s.clock).hour, 10, "{change}: the weekly one, a week later, at 10:00");
+        done(s);
+    }
+}
+
+// //// Neoffice — an invitation's time named in a zone it doesn't describe (an Olson name, as many senders write) is read
+// by the offset of its own date.
+#[test]
+fn an_invitation_s_time_is_read_by_its_own_date_s_offset() {
+    let mut s = zurich_session("dst-invite", utc_at(2026, 10, 17, 9));
+    let ics = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:m1\r\nDTSTART;TZID=Europe/Zurich:20261027T100000\r\nDTEND;TZID=Europe/Zurich:20261027T110000\r\nSUMMARY:After the change\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let cal = s.read_calendar(ics.as_bytes());
+    assert_eq!(cal.events[0].start, utc_at(2026, 10, 27, 9), "10:00 winter time");
+    s.set_clock(utc_at(2026, 10, 17, 9), 7200);
+    done(s);
 }

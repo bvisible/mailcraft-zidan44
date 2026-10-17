@@ -42,6 +42,9 @@ mod people;
 mod pim_dialogs;
 // //// Neoffice — what isn't offered on read-only cards, or with nowhere to add a contact or an event, and why.
 mod read_only;
+// //// Neoffice — what the browser build keeps of its settings with a hosting page's mailboxes (its web.rs), and the
+// account settings it offers there.
+pub mod hosted;
 mod reading;
 mod rich_edit;
 pub mod theme;
@@ -206,6 +209,12 @@ pub trait Services {
     /// The Neoffice server's own id of a message of a mailbox the hosting page handed over (its JMAP email id): Nora
     /// reads the message there by this key, and no text of it goes from here. `None` for any other message.
     fn nora_message(&self, _key: &MessageKey) -> Option<String> {
+        None
+    }
+    // //// Neoffice — the local zone's rules (daylight saving), from the app's time-zone rules (the browser's, the
+    // system's): every date is shown, and every local time read, by the offset of its own date (Clock::zone). `None`:
+    // today's offset for every date, as before.
+    fn zone(&mut self) -> Option<mailcraft_engine::model::dates::Zone> {
         None
     }
 }
@@ -381,6 +390,8 @@ pub struct UiState {
     web_pictures: HashMap<String, Option<egui::TextureHandle>>,
     pub toast: Option<(String, bool, f64)>,
     seen_notices: usize,
+    // //// Neoffice — the newest notice seen (when, what): see `toasts`.
+    seen_newest: Option<(i64, String)>,
     scroll_to_focus: bool,
     /// The named font families the UI uses are registered (`install_fonts`).
     fonts_ready: bool,
@@ -459,6 +470,8 @@ pub struct MailApp {
 impl MailApp {
     pub fn new(session: Session, backend: Box<dyn Backend>, mut services: Box<dyn Services>) -> MailApp {
         let seen = session.notices.len();
+        // //// Neoffice — see `toasts`.
+        let seen_newest = session.notices.last().map(|n| (n.at, n.text.clone()));
         let has_files = !services.downloads();
         let (data_folder, pending_move) = (services.data_folder(), services.pending_data_move());
         let mut session = session;
@@ -495,6 +508,8 @@ impl MailApp {
                 web_pictures: HashMap::new(),
                 toast: None,
                 seen_notices: seen,
+                // //// Neoffice — see `toasts`.
+                seen_newest,
                 scroll_to_focus: false,
                 fonts_ready: false,
                 compose_shown: None,
@@ -606,6 +621,10 @@ impl MailApp {
     fn pump(&mut self) {
         let (now, offset) = self.services.clock();
         self.session.set_clock(now, offset);
+        // //// Neoffice — and the zone's rules (Services::zone).
+        if let Some(zone) = self.services.zone() {
+            self.session.set_zone(zone);
+        }
         for e in self.backend.poll() {
             self.session.apply(e);
         }
@@ -1739,7 +1758,9 @@ impl MailApp {
                     let picked = self.ui.person.as_deref().and_then(|u| s.find_person(u));
                     // Someone in a shared (read-only) address book can't be changed here.
                     let picked = picked.filter(|p| !s.person_read_only(&p.card.uid));
-                    if widgets::tool_button(ui, Icon::Drafts, "Edit", &t, picked.is_some()).clicked()
+                    // //// Neoffice — greyed for that, Edit and Delete say why on hover (read_only.rs).
+                    let locked = read_only::no_change(s, self.ui.person.as_deref());
+                    if read_only::why(widgets::tool_button(ui, Icon::Drafts, "Edit", &t, picked.is_some()), locked).clicked()
                         && let Some(p) = &picked
                     {
                         acts.push(Action::Dialog(Dialog::edit_contact(&p.card)));
@@ -1747,11 +1768,15 @@ impl MailApp {
                     // //// Neoffice — Delete also greyed, with why, where the book's rights don't let the person delete its cards
                     // (a JMAP book's, read_only.rs).
                     let undeletable = picked.as_ref().and_then(|p| read_only::no_delete(s, p));
-                    if read_only::why(widgets::tool_button(ui, Icon::Delete, "Delete", &t, picked.is_some() && undeletable.is_none()), undeletable)
-                        .clicked()
+                    if read_only::why(
+                        widgets::tool_button(ui, Icon::Delete, "Delete", &t, picked.is_some() && undeletable.is_none()),
+                        undeletable.or(locked),
+                    )
+                    .clicked()
                         && let Some(p) = &picked
                     {
-                        acts.push(Action::Run("contact.delete", json!({"uid": p.card.uid})));
+                        // //// Neoffice — asked first in a hosting page (read_only.rs).
+                        acts.push(read_only::delete(s, p));
                     }
                     // Outlook's Change View: the list with a card, business cards, a phone list.
                     widgets::group_sep(ui, &t);
@@ -2110,6 +2135,14 @@ impl MailApp {
         if self.session.notices.len() < self.ui.seen_notices {
             self.ui.seen_notices = 0;
         }
+        // //// Neoffice — at the engine's cap (NOTICE_MAX) the list keeps its length as each new notice comes (the oldest
+        // goes): counting them showed none any more, a server's refusal included. A newest one other than the one last
+        // seen is new all the same.
+        let newest = self.session.notices.last().map(|n| (n.at, n.text.clone()));
+        if newest != self.ui.seen_newest && self.session.notices.len() == self.ui.seen_notices {
+            self.ui.seen_notices = self.ui.seen_notices.saturating_sub(1);
+        }
+        self.ui.seen_newest = newest;
         if let Some(n) = self.session.notices.get(self.ui.seen_notices..).and_then(|v| v.last()) {
             self.ui.toast = Some((n.text.clone(), n.error, now));
         }

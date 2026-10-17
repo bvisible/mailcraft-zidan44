@@ -366,6 +366,15 @@ fn person(l: &Line) -> Attendee {
 
 /// Read a calendar file. `local_offset` (seconds east of UTC) places floating times.
 pub fn parse(text: &str, local_offset: i64) -> ICalendar {
+    // //// Neoffice — parse_floating, with one offset for every date.
+    parse_floating(text, &|t| t - local_offset)
+}
+
+// //// Neoffice — floating times, and those named in a zone the file doesn't describe (an Olson name, as many senders
+// write), placed by `floating` (a local time, seconds as if UTC → the instant it is): by the offset of their own date,
+// where the caller knows the local zone's rules (daylight saving), rather than one offset for every date.
+/// Read a calendar file, placing floating times with `floating`.
+pub fn parse_floating(text: &str, floating: &dyn Fn(i64) -> i64) -> ICalendar {
     let all = lines(text);
     let mut cal = ICalendar::default();
     // Zones first: events can come before the zones they use.
@@ -437,9 +446,11 @@ pub fn parse(text: &str, local_offset: i64) -> ICalendar {
                 Some(z) => z.offset_at(t),
                 // A zone named but not given (common for UTC and Olson names).
                 None if id.eq_ignore_ascii_case("UTC") || id.eq_ignore_ascii_case("Etc/UTC") || id.eq_ignore_ascii_case("GMT") => 0,
-                None => local_offset,
+                // //// Neoffice — see `parse_floating`.
+                None => return Some((floating(t), false)),
             },
-            None => local_offset,
+            // //// Neoffice — see `parse_floating`.
+            None => return Some((floating(t), false)),
         };
         Some((t - off, false))
     };

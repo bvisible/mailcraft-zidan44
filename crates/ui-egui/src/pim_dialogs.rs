@@ -45,6 +45,18 @@ pub struct EventForm {
     pub categories: Vec<String>,
     pub all_categories: Vec<(String, u8)>,
     pub error: Option<String>,
+    // //// Neoffice — an occurrence of a series a server expanded (JMAP: no event of the series here), saved alone or for
+    // the whole series (`whole_series`), whose repeat is known when the server gave the series' rule; and why the
+    // categories can't be picked, if so (read_only.rs: Neoffice keeps none on its events).
+    pub instance: bool,
+    pub whole_series: bool,
+    pub repeat_known: bool,
+    pub no_categories: Option<&'static str>,
+    // //// Neoffice — deleting it asks first (read_only.rs, `delete_event`): an event of a Neoffice calendar in a hosting page.
+    pub asks_before_delete: bool,
+    // //// Neoffice — an event opened: what the form showed then (its `params`), so that saving it sends what the person
+    // changed only, and what was changed elsewhere and read meanwhile (someone moving it in the desk) stays.
+    pub opened: Option<Value>,
 }
 
 fn local_date(t: i64, s: &Session) -> String {
@@ -86,39 +98,56 @@ impl EventForm {
             end: local_time(start + 3600, s),
             can_invite: true,
             all_categories: all_categories(s, &[]),
+            // //// Neoffice — see `no_categories`: the calendars offered are the server's where nothing here is kept.
+            no_categories: crate::read_only::no_categories(s, None),
             ..Default::default()
         }
     }
 
     /// An existing event, opened at one of its occurrences.
     pub fn open(s: &Session, uid: &str, occurrence: i64) -> Option<EventForm> {
-        let (account, stored) = s.find_event(uid)?;
+        // //// Neoffice — the copy the person can change (another's read-only one may be listed first), or the occurrence of
+        // a series a server expanded, with no event of the series here (`instance`).
+        let found = s.find_event_to_change(uid);
+        let instance = found.is_none();
+        let (account, stored) = found.or_else(|| s.find_occurrence(uid, occurrence))?;
+        let series_rule = mailcraft_engine::model::pim::series_line(&stored.event, mailcraft_engine::model::pim::SERIES_RULE_LINE);
         let e = &stored.event;
         let calendars = writable_calendars(s);
         let read_only = s.pim.get(account).is_some_and(|p| p.calendars.iter().any(|c| c.id == stored.calendar && c.read_only));
         // A recurring event is edited as a series: its first occurrence's dates.
-        let (start, end) = if e.all_day {
-            let off = i64::from(s.clock.offset);
-            (e.start - off, e.end - off - 86_400)
+        // //// Neoffice — a day-long event's days as they are, from midnight, not through times by today's offset (nor by
+        // its days' own: where the clock changes at midnight, a day's midnight is no time on it); a timed one by the
+        // offset of its own date (Clock::zone: daylight saving).
+        let (date, start, end_date, end) = if e.all_day {
+            let first = e.start.div_euclid(86_400);
+            let last = (e.end - 86_400).div_euclid(86_400).max(first);
+            (dates::day_string(first), "00:00".to_string(), dates::day_string(last), "00:00".to_string())
         } else {
-            (e.start, e.end)
+            // //// Neoffice — see (date, start, end_date, end) above: the strings, the times shown by their own date's offset.
+            (local_date(e.start, s), local_time(e.start, s), local_date(e.end, s), local_time(e.end, s))
         };
         let mine: Vec<String> = s.accounts.iter().map(|a| a.config.email.to_ascii_lowercase()).collect();
-        Some(EventForm {
+        // //// Neoffice — kept as opened (`opened`, below).
+        let mut form = EventForm {
             uid: Some(uid.to_string()),
             occurrence: Some(occurrence),
-            recurring: e.rrule.is_some(),
+            // //// Neoffice — an occurrence of a series (`instance`) is one of a recurring event.
+            recurring: e.rrule.is_some() || instance,
             calendar: calendars.iter().position(|c| c.0 == account && c.1 == stored.calendar).unwrap_or(0),
             calendars,
             summary: e.summary.clone(),
             location: e.location.clone(),
             description: e.description.clone(),
-            date: local_date(start, s),
-            start: local_time(start, s),
-            end_date: local_date(end, s),
-            end: local_time(end, s),
+            // //// Neoffice — see (date, start, end_date, end) above.
+            date,
+            start,
+            end_date,
+            end,
             all_day: e.all_day,
-            repeat: match e.rrule.as_deref() {
+            // //// Neoffice — an occurrence repeats as its series does (`series_rule`; one the server didn't give shows as
+            // custom).
+            repeat: match e.rrule.as_deref().or(series_rule).or(instance.then_some("FREQ=")) {
                 None => String::new(),
                 Some(r) => match r.to_ascii_uppercase().as_str() {
                     "FREQ=DAILY" => "daily".into(),
@@ -142,7 +171,17 @@ impl EventForm {
             categories: e.categories.clone(),
             all_categories: all_categories(s, &e.categories),
             error: None,
-        })
+            // //// Neoffice — see `EventForm::instance`.
+            instance,
+            whole_series: false,
+            repeat_known: series_rule.is_some(),
+            no_categories: crate::read_only::no_categories(s, Some(&stored.calendar)),
+            asks_before_delete: crate::read_only::asks_before_delete(s, &stored.calendar),
+            opened: None,
+        };
+        // //// Neoffice — see `EventForm::opened`.
+        form.opened = Some(form.params());
+        Some(form)
     }
 
     pub(crate) fn params(&self) -> Value {
@@ -164,6 +203,17 @@ impl EventForm {
         if self.can_invite {
             p["attendees"] = json!(self.guests.trim());
         }
+        // //// Neoffice — an occurrence of a series a server expanded: that one, or the whole series; its repeat is the
+        // series', changed only for the whole series and where it is known.
+        if self.instance {
+            p["occurrence"] = json!(self.occurrence);
+            p["series"] = json!(self.whole_series);
+            if !(self.whole_series && self.repeat_known)
+                && let Some(m) = p.as_object_mut()
+            {
+                m.remove("repeat");
+            }
+        }
         match &self.uid {
             Some(u) => p["uid"] = json!(u),
             None => {
@@ -171,6 +221,21 @@ impl EventForm {
                     p["account"] = json!(a);
                     p["calendar"] = json!(c);
                 }
+            }
+        }
+        // //// Neoffice — an event opened: what the person changed only (`opened`), its time whole where any of it changed
+        // (its start, its end, whether it is all day: the engine reads them together).
+        if let (Some(was), Some(m)) = (&self.opened, p.as_object_mut()) {
+            let time = ["start", "end", "allDay"];
+            let moved = time.iter().any(|k| m.get(*k) != was.get(*k));
+            m.retain(|k, v| {
+                matches!(k.as_str(), "uid" | "occurrence" | "series") || if time.contains(&k.as_str()) { moved } else { was.get(k) != Some(v) }
+            });
+            // The time the form opened with: the engine refuses to move back an event moved elsewhere meanwhile.
+            if moved {
+                let opened: serde_json::Map<String, serde_json::Value> =
+                    time.iter().filter_map(|k| was.get(*k).map(|x| ((*k).to_string(), x.clone()))).collect();
+                m.insert("was".into(), serde_json::Value::Object(opened));
             }
         }
         p
@@ -309,6 +374,11 @@ pub fn event(ui: &mut Ui, f: &mut EventForm, t: &Tokens, acts: &mut Vec<Action>)
             }
         };
         form_row(ui, t, true, Some(Icon::Sync), "Repeat", |ui| {
+            // //// Neoffice — an occurrence of a series a server expanded repeats as the series: changed only for the whole
+            // series, where the server gave its rule (`EventForm::instance`).
+            if f.instance && !(f.whole_series && f.repeat_known) {
+                ui.disable();
+            }
             ui.allocate_ui_with_layout(vec2(200.0, FIELD_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("event-repeat").width(194.0).selected_text(label(&f.repeat)).show_ui(ui, |ui| {
                     for r in ["", "daily", "weekly", "monthly", "yearly"] {
@@ -321,24 +391,42 @@ pub fn event(ui: &mut Ui, f: &mut EventForm, t: &Tokens, acts: &mut Vec<Action>)
                 });
             });
         });
+        // //// Neoffice — see `EventForm::instance`.
+        if f.instance {
+            form_row(ui, t, true, None, "Apply to", |ui| {
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), FIELD_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.radio_value(&mut f.whole_series, false, tl!("This occurrence"));
+                    ui.radio_value(&mut f.whole_series, true, tl!("The whole series"));
+                });
+            });
+        }
         form_row(ui, t, true, Some(Icon::Location), "Location", |ui| {
             field(ui, &mut f.location, tl!("Add a place"), f32::INFINITY);
         });
         // Categories colour it in the calendar (Outlook's Categorize on an appointment).
         if !f.all_categories.is_empty() {
             form_row(ui, t, true, Some(Icon::Tag), "Categories", |ui| {
+                // //// Neoffice — greyed, each saying why, where the server keeps none (`EventForm::no_categories`).
+                let why = f.no_categories;
+                if why.is_some() {
+                    ui.disable();
+                }
                 ui.horizontal_wrapped(|ui| {
                     for (name, color) in f.all_categories.clone() {
                         let on = f.categories.iter().any(|c| c.eq_ignore_ascii_case(&name));
-                        let c = theme::category_color(color, t.dark);
-                        let text = RichText::new(format!("● {}", name)).color(if on { Color32::WHITE } else { c });
+                        // //// Neoffice — greyed as it acts (`why` above): its colour is the category's otherwise.
+                        let c = if why.is_some() { t.faint } else { theme::category_color(color, t.dark) };
+                        // //// Neoffice — the categories made at first in the interface language, as the Categorize menu
+                        // shows them.
+                        let text = RichText::new(format!("● {}", tl!(&name))).color(if on { Color32::WHITE } else { c });
                         let r = ui.add(
                             egui::Button::new(text)
                                 .fill(if on { c } else { Color32::TRANSPARENT })
                                 .stroke(egui::Stroke::new(1.0, c))
                                 .corner_radius(10),
                         );
-                        if r.clicked() {
+                        // //// Neoffice — see `why` above.
+                        if crate::read_only::why_disabled(r, why).clicked() {
                             if on {
                                 f.categories.retain(|x| !x.eq_ignore_ascii_case(&name));
                             } else {
@@ -368,7 +456,8 @@ pub fn event(ui: &mut Ui, f: &mut EventForm, t: &Tokens, acts: &mut Vec<Action>)
         }
         area(ui, &mut f.description, tl!("Notes"), 4);
     });
-    if f.recurring {
+    // //// Neoffice — not for an occurrence of a series a server expanded, saved as its « Apply to » says.
+    if f.recurring && !f.instance {
         ui.add_space(4.0);
         ui.label(RichText::new(tl!("Changes apply to every occurrence.")).color(t.faint).small());
     }
@@ -395,21 +484,27 @@ pub fn event(ui: &mut Ui, f: &mut EventForm, t: &Tokens, acts: &mut Vec<Action>)
     }
     if let Some(e) = &f.error {
         ui.add_space(6.0);
-        ui.label(RichText::new(e).color(t.danger));
+        // //// Neoffice — the engine's words in the interface language (messages.rs).
+        ui.label(RichText::new(crate::messages::translate(e)).color(t.danger));
     }
     footer_rule(ui, t);
     let mut keep = true;
     ui.horizontal(|ui| {
         if let Some(uid) = f.uid.clone().filter(|_| !f.read_only) {
+            // //// Neoffice — each asking first where it is an event of a Neoffice calendar (read_only.rs, `delete_event`).
+            use crate::read_only::{Deleting, delete_event};
             if f.recurring {
                 if ui.button(tl!("Delete this occurrence")).clicked() {
-                    acts.push(Action::Submit("event.delete", json!({"uid": uid, "occurrence": f.occurrence})));
+                    // //// Neoffice — see `delete_event` above.
+                    acts.push(delete_event(f, Deleting::Occurrence, json!({"uid": uid, "occurrence": f.occurrence})));
                 }
                 if ui.button(tl!("Delete the series")).clicked() {
-                    acts.push(Action::Submit("event.delete", json!({"uid": uid})));
+                    // //// Neoffice — see `delete_event` above.
+                    acts.push(delete_event(f, Deleting::Series, json!({"uid": uid})));
                 }
             } else if ui.button(tl!("Delete")).clicked() {
-                acts.push(Action::Submit("event.delete", json!({"uid": uid})));
+                // //// Neoffice — see `delete_event` above.
+                acts.push(delete_event(f, Deleting::Event, json!({"uid": uid})));
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -497,7 +592,8 @@ pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Acti
         crate::read_only::why_disabled(r, notes);
     });
     if let Some(e) = &f.error {
-        ui.label(RichText::new(e).color(t.danger));
+        // //// Neoffice — the engine's words in the interface language (messages.rs).
+        ui.label(RichText::new(crate::messages::translate(e)).color(t.danger));
     }
     footer_rule(ui, t);
     let mut keep = true;

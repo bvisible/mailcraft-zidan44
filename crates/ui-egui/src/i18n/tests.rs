@@ -36,10 +36,15 @@ pub(crate) fn interface_strings() -> BTreeSet<String> {
         include_str!("../nora.rs"),
         include_str!("../read_only.rs"),
         include_str!("../messages.rs"),
+        // //// Neoffice — and the account settings offered with a hosting page's mailboxes.
+        include_str!("../hosted.rs"),
         include_str!("../notes.rs"),
     ];
     // (prefix, which string literals after it are interface text)
-    let prefixes: [(&str, &[usize]); 20] = [
+    // //// Neoffice — and the labels of the event and contact forms' rows (pim_dialogs.rs, `form_row`): one of them, the
+    // fork's « Apply to », showed in English.
+    let prefixes: [(&str, &[usize]); 21] = [
+        ("form_row(ui, t, ", &[0]),
         ("tl!(", &[0]),
         ("tf!(", &[0]),
         ("tool_button(ui, Icon::", &[0]),

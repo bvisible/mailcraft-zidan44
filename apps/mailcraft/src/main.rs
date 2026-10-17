@@ -74,12 +74,34 @@ struct Desktop {
     base: Option<PathBuf>,
     /// How a move carried out at this start went (told once).
     moved: Option<Result<PathBuf, String>>,
+    // //// Neoffice — the system's time-zone rules around now (Services::zone), worked out once a day: (day, rules).
+    zone: Option<(i64, mailcraft_engine::model::dates::Zone)>,
+}
+
+// //// Neoffice — see `Desktop::zone`: the system's offset of an instant.
+fn system_offset(t: i64) -> i32 {
+    use chrono::TimeZone as _;
+    chrono::Local.timestamp_opt(t, 0).single().map_or_else(|| chrono::Local::now().offset().local_minus_utc(), |d| d.offset().local_minus_utc())
+}
+
+/// The system's time-zone rules from three years back to ten ahead.
+fn system_zone(now: i64) -> mailcraft_engine::model::dates::Zone {
+    mailcraft_engine::model::dates::Zone::from_offsets(now - 3 * 366 * 86_400, now + 10 * 366 * 86_400, system_offset)
 }
 
 impl Services for Desktop {
     fn clock(&self) -> (i64, i32) {
         let now = chrono::Local::now();
         (now.timestamp(), now.offset().local_minus_utc())
+    }
+    // //// Neoffice — see `Desktop::zone`.
+    fn zone(&mut self) -> Option<mailcraft_engine::model::dates::Zone> {
+        let now = chrono::Local::now().timestamp();
+        let day = now.div_euclid(86_400);
+        if self.zone.is_none_or(|(d, _)| d != day) {
+            self.zone = Some((day, system_zone(now)));
+        }
+        self.zone.map(|(_, z)| z)
     }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()

@@ -297,7 +297,8 @@ pub fn show(s: &Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action>) 
                             // cards (a JMAP book's, read_only.rs).
                             ui.add_enabled_ui(undeletable.is_none(), |ui| {
                                 if read_only::why_disabled(widgets::pill_button(ui, Icon::Delete, "Delete", &t), undeletable).clicked() {
-                                    acts.push(Action::Run("contact.delete", json!({"uid": c.uid})));
+                                    // //// Neoffice — asked first in a hosting page (read_only.rs).
+                                    acts.push(read_only::delete(s, &p));
                                 }
                             });
                         }

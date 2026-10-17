@@ -168,6 +168,11 @@ pub struct Pim {
     // Neoffice's facade says it from the person's rights), as the last read of the books said: the engine refuses it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_delete_books: Vec<String>,
+    // //// Neoffice — the copies of a JMAP server's events as they were read before the person changed them here (by
+    // their address there), kept until the change is sent: what goes is what the person changed since (Pim::keep_as_read),
+    // made to the server's copy as it is then, so that what someone else changed meanwhile stays.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub originals: std::collections::BTreeMap<String, CalEvent>,
 }
 
 // //// Neoffice — see `Pim::partial_misses`.
@@ -223,6 +228,44 @@ pub struct DavSync {
     /// Of `books`, those whose cards the person may not delete (`Pim::no_delete_books`).
     #[serde(default)]
     pub no_delete_books: Vec<String>,
+    /// Events whose change the server refused (said in `errors`): the change goes. One never stored there goes; one stored
+    /// there follows the server again (it comes back as the server has it).
+    #[serde(default)]
+    pub refused_events: Vec<StoredEvent>,
+    /// Cards whose change the server refused for good (said in `errors`), likewise.
+    #[serde(default)]
+    pub refused_cards: Vec<StoredCard>,
+    /// Deletions the server refused for good (said in `errors`; in `deleted` too: done with): what was deleted comes
+    /// back with the next read.
+    #[serde(default)]
+    pub refused_deletions: Vec<String>,
+}
+
+// //// Neoffice — an occurrence of a repeating event a server expanded (JMAP's, read one occurrence at a time: no event of
+// the series here) carries in its `extra` the address of its series there (the base event, changed or deleted for « the
+// whole series », where the occurrence's own address is for « this occurrence »), the series' rule when the server gives
+// it, and, when a change made here is for the whole series, that it is (SERIES_CHANGE_LINE + SERIES_CHANGE, or
+// SERIES_CHANGE_RULE when its rule changes too).
+/// The series an occurrence belongs to on the server: its base event's address there.
+pub const SERIES_LINE: &str = "X-MAILCRAFT-SERIES:";
+/// The series' rule, as an RRULE (`FREQ=WEEKLY;BYDAY=MO`).
+pub const SERIES_RULE_LINE: &str = "X-MAILCRAFT-SERIES-RULE:";
+/// A change made here for the whole series.
+pub const SERIES_CHANGE_LINE: &str = "X-MAILCRAFT-SERIES-CHANGE:";
+pub const SERIES_CHANGE: &str = "SERIES";
+pub const SERIES_CHANGE_RULE: &str = "RULE";
+
+/// One of the lines above of an event, without its name.
+pub fn series_line<'a>(e: &'a CalEvent, prefix: &str) -> Option<&'a str> {
+    e.extra.iter().find_map(|l| l.strip_prefix(prefix))
+}
+
+/// Set (or, with `None`, take out) one of the lines above.
+pub fn set_series_line(e: &mut CalEvent, prefix: &str, value: Option<&str>) {
+    e.extra.retain(|l| !l.starts_with(prefix));
+    if let Some(v) = value {
+        e.extra.push(format!("{prefix}{v}"));
+    }
 }
 
 impl Pim {
@@ -265,5 +308,17 @@ impl Pim {
     /// Every event and instance with this uid.
     pub fn event_indices(&self, uid: &str) -> Vec<usize> {
         self.events.iter().enumerate().filter(|(_, e)| e.event.uid == uid).map(|(i, _)| i).collect()
+    }
+
+    // //// Neoffice — see `Pim::originals`.
+    /// Before the event at `index` is changed here: its copy as read, when it is a JMAP server's not yet changed (one
+    /// changed already keeps the copy its first change started from).
+    pub fn keep_as_read(&mut self, index: usize) {
+        if self.caldav_home.as_deref() != Some("jmap") {
+            return;
+        }
+        if let Some(e) = self.events.get(index).filter(|e| !e.dirty && !e.href.is_empty() && e.calendar != LOCAL) {
+            self.originals.insert(e.href.clone(), e.event.clone());
+        }
     }
 }

@@ -4,6 +4,8 @@
 
 use mailcraft_model::ical::{self, Attendee, CalEvent, ICalendar};
 use mailcraft_model::pim::{LOCAL, StoredEvent, Tombstone};
+// //// Neoffice — the occurrences of a series a server expanded, answered on the series (respond_to_invite).
+use mailcraft_model::pim::{Pim, SERIES_CHANGE, SERIES_CHANGE_LINE, SERIES_CHANGE_RULE, SERIES_LINE, series_line, set_series_line};
 
 use super::*;
 
@@ -31,6 +33,18 @@ pub fn partstat(answer: &str) -> Option<&'static str> {
     }
 }
 
+// //// Neoffice — the occurrence of a series a server expanded that carries an answer for the whole series: the first of
+// `series` (indices in `p.events`) with no change of its own waiting (it would be sent for the series too); `None` when
+// each has one (Session::update_occurrence refuses likewise).
+fn series_carrier(p: &Pim, series: &[usize]) -> Option<usize> {
+    series.iter().copied().find(|&i| p.events.get(i).is_some_and(|e| !(e.dirty && series_line(&e.event, SERIES_CHANGE_LINE).is_none())))
+}
+
+// //// Neoffice — the series' change an answer marks its carrier with: a change of the series' rule waiting there stays one.
+fn series_change(e: &StoredEvent) -> &'static str {
+    if e.dirty && series_line(&e.event, SERIES_CHANGE_LINE) == Some(SERIES_CHANGE_RULE) { SERIES_CHANGE_RULE } else { SERIES_CHANGE }
+}
+
 impl Session {
     /// The user's addresses (lower case).
     fn my_addresses(&self) -> Vec<String> {
@@ -50,8 +64,24 @@ impl Session {
             .iter()
             .find(|a| a.mime.to_ascii_lowercase().starts_with("text/calendar") || a.name.to_ascii_lowercase().ends_with(".ics"))?;
         let data = mime::attachment_data(&raw, att.index)?;
-        let cal = ical::parse(&String::from_utf8_lossy(&data), i64::from(self.clock.offset));
+        // //// Neoffice — read_calendar.
+        let cal = self.read_calendar(&data);
         (!cal.events.is_empty()).then_some(cal)
+    }
+
+    // //// Neoffice — a calendar file, its floating times (and those named in a zone it doesn't describe) placed by the
+    // offset of their own date (Clock::zone: daylight saving), not today's.
+    pub fn read_calendar(&self, data: &[u8]) -> ICalendar {
+        let clock = self.clock;
+        ical::parse_floating(&String::from_utf8_lossy(data), &|t| clock.utc(t))
+    }
+
+    // //// Neoffice — the occurrences of a series a server expanded are its copy in the calendar (no event of the series
+    // here): the invitation is in the calendar (its answer shown, « Show in calendar »), and the cancellation or a guest's
+    // answer taken in (apply_invite).
+    /// The event with a uid, else the first of its occurrences, and its account.
+    fn find_in_calendar(&self, uid: &str) -> Option<(&str, &StoredEvent)> {
+        self.find_event(uid).or_else(|| self.pim.iter().find_map(|(a, p)| p.events.iter().find(|e| e.event.uid == uid).map(|e| (a.as_str(), e))))
     }
 
     /// The invitation in the open message.
@@ -64,7 +94,8 @@ impl Session {
         }
         let event = cal.events.iter().find(|e| e.recurrence_id.is_none()).or_else(|| cal.events.first())?.clone();
         let mine = self.my_addresses();
-        let stored = self.find_event(&event.uid).map(|(_, e)| e.event.clone());
+        // //// Neoffice — or one of the occurrences of a series a server expanded (find_in_calendar).
+        let stored = self.find_in_calendar(&event.uid).map(|(_, e)| e.event.clone());
         let answer = stored
             .as_ref()
             .unwrap_or(&event)
@@ -97,6 +128,9 @@ impl Session {
         // //// Neoffice — with no copy yet, into a calendar new events can go to: not the one on this computer where it
         // isn't kept (the browser build in a hosting page).
         let target = self.new_event_calendar(&account);
+        // //// Neoffice — see `in_place` below.
+        let mine = self.my_addresses();
+        let jmap = self.pim.get(&account).is_some_and(|p| p.caldav_home.as_deref() == Some("jmap"));
         let p = self.pim_mut(&account);
         // //// Neoffice — the copies in calendars that can be changed: one in a calendar that can't (a server's read-only
         // one, a colleague's shared one) stays as the server has it. With only such copies, or nowhere to keep one, only
@@ -112,6 +146,66 @@ impl Session {
         }
         // //// Neoffice — `target` rather than the first writable calendar (the same where the one here is kept).
         let calendar = existing.first().map(|e| e.calendar.clone()).or(target).unwrap_or_else(|| LOCAL.into());
+        // //// Neoffice — the copies a JMAP server holds (its events are changed as patches of what the person changed,
+        // calendars.rs in mailcraft-jmap) take the answer as they are, not the invitation's copy, which the organizer may
+        // have changed since there: as `event.respond` does, the occurrences of a series it expanded (no event of the
+        // series here) show it each and it goes once, for the series; declined, they go, a series once by its base event
+        // there, as `event.delete` does. Nothing is made.
+        let in_place = jmap && !existing.is_empty() && existing.iter().all(|e| e.calendar != LOCAL);
+        if in_place {
+            let expanded = !existing.iter().any(|e| e.event.recurrence_id.is_none());
+            let mut remote = false;
+            if stat == "DECLINED" {
+                for g in &existing {
+                    let href = match series_line(&g.event, SERIES_LINE) {
+                        Some(base) if expanded => base.to_string(),
+                        _ => g.href.clone(),
+                    };
+                    if href.is_empty() || p.deleted.iter().any(|t| t.href == href) {
+                        continue;
+                    }
+                    p.deleted.push(Tombstone { href, etag: g.etag.clone(), calendar: g.calendar.clone() });
+                    remote = true;
+                }
+                p.events.retain(|e| e.event.uid != uid || locked.contains(&e.calendar));
+            } else {
+                let copies: Vec<usize> =
+                    p.events.iter().enumerate().filter(|(_, e)| e.event.uid == uid && !locked.contains(&e.calendar)).map(|(i, _)| i).collect();
+                // //// Neoffice — the occurrence that carries the answer for the series (series_carrier).
+                let series: Vec<usize> = copies
+                    .iter()
+                    .copied()
+                    .filter(|&i| expanded && p.events.get(i).is_some_and(|e| series_line(&e.event, SERIES_LINE).is_some()))
+                    .collect();
+                let carrier = series_carrier(p, &series);
+                if !series.is_empty() && carrier.is_none() {
+                    return Err(CmdError::Params(super::pim::CHANGE_NOT_SENT.into()));
+                }
+                for i in copies {
+                    let of_series = series.contains(&i);
+                    let goes = !of_series || Some(i) == carrier;
+                    if goes {
+                        p.keep_as_read(i);
+                    }
+                    let Some(e) = p.events.get_mut(i) else { continue };
+                    set_answer(&mut e.event, &mine, &me, stat);
+                    if !goes {
+                        continue;
+                    }
+                    if of_series {
+                        let change = series_change(e);
+                        set_series_line(&mut e.event, SERIES_CHANGE_LINE, Some(change));
+                    }
+                    e.dirty = true;
+                    remote = true;
+                }
+            }
+            self.after_pim_change(&account, remote);
+            if let Some(master) = events.first().cloned() {
+                self.send_reply(&account, &master, stat)?;
+            }
+            return Ok(serde_json::json!({"answer": stat, "uid": uid}));
+        }
         // //// Neoffice — see `locked` above.
         p.events.retain(|e| e.event.uid != uid || locked.contains(&e.calendar));
         let mut remote = false;
@@ -143,7 +237,12 @@ impl Session {
     /// Answer an invitation already in the calendar (from the event form).
     pub fn respond_to_event(&mut self, uid: &str, answer: &str) -> CmdResult {
         let stat = partstat(answer).ok_or_else(|| CmdError::Params(format!("`{answer}`: answer accepted, tentative or declined")))?;
-        let account = self.find_event(uid).map(|(a, _)| a.to_string()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
+        // //// Neoffice — or the occurrences of a series a server expanded, with no event of the series here.
+        let account = self
+            .find_event(uid)
+            .map(|(a, _)| a.to_string())
+            .or_else(|| self.pim.iter().find(|(_, p)| p.events.iter().any(|e| e.event.uid == uid)).map(|(a, _)| a.clone()))
+            .ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
         let me = self.account(&account).map(|a| a.config.email.clone()).unwrap_or_default();
         let mine = self.my_addresses();
         let mut master = None;
@@ -161,9 +260,40 @@ impl Session {
             return Ok(serde_json::json!({"answer": stat, "uid": uid, "readOnly": true}));
         }
         let mut remote = false;
+        // //// Neoffice — the occurrences of a series a server expanded show the answer each, and it goes once, for the
+        // series, with the first of them that names it (SERIES_CHANGE_LINE); the reply to the organizer is the series'.
+        let expanded = !p.events.iter().any(|e| e.event.uid == uid && e.event.recurrence_id.is_none());
+        // //// Neoffice — the copies the answer goes with, as read before it (Pim::keep_as_read): each, but the occurrences
+        // of a series a server expanded, one of which carries it (series_carrier).
+        let copies: Vec<usize> =
+            p.events.iter().enumerate().filter(|(_, e)| e.event.uid == uid && !locked.contains(&e.calendar)).map(|(i, _)| i).collect();
+        let series: Vec<usize> =
+            copies.iter().copied().filter(|&i| expanded && p.events.get(i).is_some_and(|e| series_line(&e.event, SERIES_LINE).is_some())).collect();
+        let carrier = series_carrier(p, &series);
+        if !series.is_empty() && carrier.is_none() {
+            return Err(CmdError::Params(super::pim::CHANGE_NOT_SENT.into()));
+        }
+        for &i in &copies {
+            if !series.contains(&i) || Some(i) == carrier {
+                p.keep_as_read(i);
+            }
+        }
         // //// Neoffice — see `locked` above.
-        for e in p.events.iter_mut().filter(|e| e.event.uid == uid && !locked.contains(&e.calendar)) {
+        for i in copies {
+            let Some(e) = p.events.get_mut(i) else { continue };
             set_answer(&mut e.event, &mine, &me, stat);
+            // //// Neoffice — see `expanded` above.
+            let of_series = series.contains(&i);
+            if of_series && Some(i) != carrier {
+                continue;
+            }
+            if of_series {
+                let change = series_change(e);
+                mailcraft_model::pim::set_series_line(&mut e.event, mailcraft_model::pim::SERIES_CHANGE_LINE, Some(change));
+                // Without what MailCraft keeps of the series for itself.
+                let extra = e.event.extra.iter().filter(|l| !l.starts_with("X-MAILCRAFT-SERIES")).cloned().collect();
+                master = Some(CalEvent { recurrence_id: None, extra, ..e.event.clone() });
+            }
             remote |= e.calendar != LOCAL;
             e.dirty |= e.calendar != LOCAL;
             if e.event.recurrence_id.is_none() {
@@ -183,7 +313,8 @@ impl Session {
         let uid = inv.event.uid.clone();
         // //// Neoffice — into its copies in calendars that can be changed only: one in a calendar that can't (a server's
         // read-only one, a colleague's shared one) stays as the server has it; with only such copies, refused.
-        let (account, locked) = match self.find_event(&uid).map(|(a, _)| a.to_string()) {
+        // //// Neoffice — or by the occurrences of a series a server expanded (find_in_calendar).
+        let (account, locked) = match self.find_in_calendar(&uid).map(|(a, _)| a.to_string()) {
             Some(a) => {
                 let locked: Vec<String> =
                     self.pim.get(&a).map(|p| p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect()).unwrap_or_default();
@@ -201,6 +332,12 @@ impl Session {
         match inv.method.as_str() {
             "CANCEL" => {
                 if self.find_event(&uid).is_none() {
+                    // //// Neoffice — a series a server expanded (find_in_calendar) goes as « Delete the series » or « Delete
+                    // this occurrence » has it go: by its base event there, once, or by that occurrence's own address.
+                    if self.find_in_calendar(&uid).is_some() {
+                        self.delete_event(&uid, inv.event.recurrence_id)?;
+                        return Ok(serde_json::json!({"removed": true}));
+                    }
                     return Ok(serde_json::json!({"removed": false}));
                 }
                 // Cancelled by the organizer: no answer is sent.
@@ -211,9 +348,13 @@ impl Session {
                 match cancelled_one {
                     // //// Neoffice — see `locked` above (both cases).
                     Some(at) => {
-                        if let Some(m) =
-                            p.events.iter_mut().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none() && !locked.contains(&e.calendar))
-                        {
+                        // //// Neoffice — its copy as read, before it changes (Pim::keep_as_read).
+                        let master =
+                            p.events.iter().position(|e| e.event.uid == uid && e.event.recurrence_id.is_none() && !locked.contains(&e.calendar));
+                        if let Some(i) = master {
+                            p.keep_as_read(i);
+                        }
+                        if let Some(m) = master.and_then(|i| p.events.get_mut(i)) {
                             m.event.exdates.push(at);
                             remote = m.calendar != LOCAL;
                             m.dirty |= remote;
@@ -234,22 +375,34 @@ impl Session {
             }
             "REPLY" => {
                 let who = inv.replier.ok_or_else(|| CmdError::Disabled("the answer names no one".into()))?;
-                let account =
-                    self.find_event(&uid).map(|(a, _)| a.to_string()).ok_or_else(|| CmdError::Disabled("the event isn't in your calendar".into()))?;
+                // //// Neoffice — see find_in_calendar.
+                let account = self
+                    .find_in_calendar(&uid)
+                    .map(|(a, _)| a.to_string())
+                    .ok_or_else(|| CmdError::Disabled("the event isn't in your calendar".into()))?;
+                // //// Neoffice — a server that schedules itself (JMAP: Session::server_schedules) keeps its guests' answers:
+                // the answer shows on the copies here, and nothing of it is sent there (nothing MailCraft writes takes a
+                // guest's answer, and one it doesn't list would be invited).
+                let jmap = self.pim.get(&account).is_some_and(|p| p.caldav_home.as_deref() == Some("jmap"));
                 let p = self.pim_mut(&account);
                 let mut remote = false;
-                // //// Neoffice — see `locked` above.
-                for e in p
-                    .events
-                    .iter_mut()
-                    .filter(|e| e.event.uid == uid && e.event.recurrence_id == inv.event.recurrence_id && !locked.contains(&e.calendar))
-                {
+                // //// Neoffice — the copies it answers: that occurrence, else the event; for a series a server expanded, each
+                // of its occurrences where it answers the whole series.
+                let expanded = !p.events.iter().any(|e| e.event.uid == uid && e.event.recurrence_id.is_none());
+                let whole = expanded && inv.event.recurrence_id.is_none();
+                let answers = |e: &StoredEvent| {
+                    e.event.uid == uid && (whole || e.event.recurrence_id == inv.event.recurrence_id) && !locked.contains(&e.calendar)
+                };
+                // //// Neoffice — see `answers` above.
+                for e in p.events.iter_mut().filter(|e| answers(e)) {
                     match e.event.attendees.iter_mut().find(|a| a.email.eq_ignore_ascii_case(&who.email)) {
                         Some(a) => a.partstat = who.partstat.clone(),
                         None => e.event.attendees.push(Attendee { rsvp: false, ..who.clone() }),
                     }
-                    remote |= e.calendar != LOCAL;
-                    e.dirty |= e.calendar != LOCAL;
+                    // //// Neoffice — see `jmap` above.
+                    let sent = e.calendar != LOCAL && !jmap;
+                    remote |= sent;
+                    e.dirty |= sent;
                 }
                 self.after_pim_change(&account, remote);
                 Ok(serde_json::json!({"recorded": who.partstat}))

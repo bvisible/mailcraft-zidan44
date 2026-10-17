@@ -5,6 +5,8 @@
 use mailcraft_model::dates::{civil_from_days, days_from_civil};
 use mailcraft_model::ical::{self, CalEvent};
 use mailcraft_model::pim::{LOCAL, Pim, StoredCard, StoredEvent, Tombstone};
+// //// Neoffice — the occurrences a server expanded (JMAP), which carry their series there (update_occurrence).
+use mailcraft_model::pim::{SERIES_CHANGE, SERIES_CHANGE_LINE, SERIES_CHANGE_RULE, SERIES_LINE, SERIES_RULE_LINE, series_line, set_series_line};
 use mailcraft_model::vcard::Card;
 
 use super::*;
@@ -56,6 +58,10 @@ pub struct AgendaItem {
     pub status: String,
     /// The user's reply is awaited (`NEEDS-ACTION`).
     pub needs_reply: bool,
+    // //// Neoffice — a day-long event's days as they are (its first, and the day after its last), not times: in a zone
+    // whose clock changes at midnight, a day's midnight is no time on its clock (`start` and `end` above are the times its
+    // days start, where the clock shows them), and the calendar draws it on its own days whatever the offset.
+    pub days: Option<(i64, i64)>,
 }
 
 /// A person in an address book.
@@ -65,6 +71,10 @@ pub struct Person {
     pub book: String,
     pub card: Card,
 }
+
+// //// Neoffice — said when a change of an occurrence for the whole series meets one for that occurrence alone that hasn't
+// gone yet, or the other way round (Session::update_occurrence).
+pub const CHANGE_NOT_SENT: &str = "an earlier change of this event has not been sent yet: send and receive, then try again";
 
 impl Session {
     pub(crate) fn load_pim(&mut self) {
@@ -150,7 +160,8 @@ impl Session {
 
     /// The local day (days since the epoch) the calendar shows.
     pub fn cal_day(&self) -> i64 {
-        self.cal_day.unwrap_or_else(|| self.clock.now.saturating_add(i64::from(self.clock.offset)).div_euclid(86_400))
+        // //// Neoffice — by today's own offset (Clock::zone).
+        self.cal_day.unwrap_or_else(|| self.clock.local(self.clock.now).div_euclid(86_400))
     }
 
     /// The local days on screen: a day, the week (Monday first) or the weeks of the month.
@@ -170,14 +181,16 @@ impl Session {
 
     /// The Unix time a local day starts.
     pub fn local_midnight(&self, day: i64) -> i64 {
-        day.saturating_mul(86_400) - i64::from(self.clock.offset)
+        // //// Neoffice — by that day's own offset (Clock::zone: daylight saving), not today's.
+        self.clock.utc(day.saturating_mul(86_400))
     }
 
     /// Move the calendar: to a date, today, or by `step` days, weeks or months (its mode).
     pub fn cal_goto(&mut self, date: Option<&str>, step: i64) -> CmdResult {
         let mut d = self.cal_day();
         match date.map(str::trim) {
-            Some("today") | Some("") => d = self.clock.now.saturating_add(i64::from(self.clock.offset)).div_euclid(86_400),
+            // //// Neoffice — by today's own offset (Clock::zone).
+            Some("today") | Some("") => d = self.clock.local(self.clock.now).div_euclid(86_400),
             Some(s) => {
                 d = parse_local(s, 0)
                     .map(|(t, _)| t.div_euclid(86_400))
@@ -231,7 +244,7 @@ impl Session {
 
     /// The occurrences overlapping `[from, to)`, by start, from every calendar that's shown.
     pub fn agenda(&self, from: i64, to: i64) -> Vec<AgendaItem> {
-        let off = i64::from(self.clock.offset);
+        // //// Neoffice — no longer today's offset for every date (below: each date's own, Clock::zone).
         let mut out = Vec::new();
         for (account, p) in &self.pim {
             for cal in p.calendars.iter().filter(|c| self.calendar_shown(account, &c.id)) {
@@ -240,7 +253,17 @@ impl Session {
                 // All-day events are dates, not times: widen the window by a day each way.
                 for o in ical::occurrences(&events, from - 86_400, to + 86_400) {
                     let Some(e) = events.get(o.event) else { continue };
-                    let (start, end) = if e.all_day { (o.start - off, o.end - off) } else { (o.start, o.end) };
+                    // //// Neoffice — by the offset of each date (Clock::zone: daylight saving): a day-long event from its
+                    // days' own midnights; an occurrence its rule repeats at the hour of the first, the rule being kept in
+                    // UTC (the offset's change between them made up).
+                    let (start, end) = if e.all_day {
+                        (self.clock.utc(o.start), self.clock.utc(o.end))
+                    } else if e.rrule.is_some() && e.recurrence_id.is_none() {
+                        let shift = i64::from(self.clock.offset_at(e.start)) - i64::from(self.clock.offset_at(o.start));
+                        (o.start.saturating_add(shift), o.end.saturating_add(shift))
+                    } else {
+                        (o.start, o.end)
+                    };
                     if start >= to || end.max(start + 1) <= from {
                         continue;
                     }
@@ -262,6 +285,8 @@ impl Session {
                         category: e.categories.first().map(|c| self.category_color_of(c)),
                         status: e.status.clone(),
                         needs_reply,
+                        // //// Neoffice — see `AgendaItem::days`.
+                        days: e.all_day.then(|| (o.start.div_euclid(86_400), o.end.div_euclid(86_400).max(o.start.div_euclid(86_400) + 1))),
                     });
                 }
             }
@@ -284,6 +309,45 @@ impl Session {
     /// The event (master, not an instance) with a uid, and its account.
     pub fn find_event(&self, uid: &str) -> Option<(&str, &StoredEvent)> {
         self.pim.iter().find_map(|(a, p)| p.events.iter().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none()).map(|e| (a.as_str(), e)))
+    }
+
+    // //// Neoffice — the copy of an event the person can change: one in a calendar that isn't read-only, as another's
+    // read-only calendar (a colleague's, shared) may hold the same event, listed first; else the first. And an occurrence
+    // by when it starts (`at`, as the event's rule has it): a server's calendar read through JMAP holds the occurrences of
+    // a series it expanded, and no event of the series.
+    /// The event (master) with a uid the person can change, else the first, and its account.
+    pub fn find_event_to_change(&self, uid: &str) -> Option<(&str, &StoredEvent)> {
+        self.find_copy(uid, None).or_else(|| self.find_event(uid))
+    }
+
+    /// The occurrence starting `at` of the event with a uid: the copy the person can change, else the first.
+    pub fn find_occurrence(&self, uid: &str, at: i64) -> Option<(&str, &StoredEvent)> {
+        self.find_copy(uid, Some(at)).or_else(|| {
+            self.pim
+                .iter()
+                .find_map(|(a, p)| p.events.iter().find(|e| e.event.uid == uid && e.event.recurrence_id == Some(at)).map(|e| (a.as_str(), e)))
+        })
+    }
+
+    /// The copy of the event `uid` (`at`: the occurrence starting then; `None`: the event itself) in a calendar that can
+    /// be changed.
+    fn find_copy(&self, uid: &str, at: Option<i64>) -> Option<(&str, &StoredEvent)> {
+        self.pim.iter().find_map(|(a, p)| {
+            let writable = |e: &&StoredEvent| !p.calendars.iter().any(|c| c.id == e.calendar && c.read_only);
+            p.events.iter().filter(|e| e.event.uid == uid && e.event.recurrence_id == at).find(writable).map(|e| (a.as_str(), e))
+        })
+    }
+
+    /// Whether this is the browser build with a hosting page's mailboxes (nothing kept here: `keeps_local_pim` off), where
+    /// the servers and the sign-in are the page's.
+    pub fn hosted(&self) -> bool {
+        !self.keeps_local_pim
+    }
+
+    /// Whether a calendar's server sends the meeting mail itself (JMAP's `sendSchedulingMessages`, calendars.rs in
+    /// mailcraft-jmap): MailCraft doesn't send it too.
+    pub fn server_schedules(&self, account: &str, calendar: &str) -> bool {
+        calendar != LOCAL && self.pim.get(account).is_some_and(|p| p.caldav_home.as_deref() == Some("jmap"))
     }
 
     fn new_uid(&mut self) -> String {
@@ -328,10 +392,21 @@ impl Session {
 
     /// Change an event (all of its occurrences).
     pub fn update_event(&mut self, uid: &str, change: impl FnOnce(&mut CalEvent)) -> CmdResult {
-        let (account, _) =
-            self.find_event(uid).map(|(a, e)| (a.to_string(), e.calendar.clone())).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
+        // //// Neoffice — the copy the person can change (find_event_to_change), not one in a read-only calendar listed first.
+        let (account, _) = self
+            .find_event_to_change(uid)
+            .map(|(a, e)| (a.to_string(), e.calendar.clone()))
+            .ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
         let p = self.pim_mut(&account);
-        let Some(stored) = p.events.iter_mut().find(|e| e.event.uid == uid && e.event.recurrence_id.is_none()) else {
+        // //// Neoffice — see above: that copy, else the first (refused below when it can't be changed either).
+        let locked: Vec<String> = p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect();
+        let master = |e: &StoredEvent| e.event.uid == uid && e.event.recurrence_id.is_none();
+        let at = p.events.iter().position(|e| master(e) && !locked.contains(&e.calendar)).or_else(|| p.events.iter().position(master));
+        // //// Neoffice — its copy as read, before it changes (Pim::keep_as_read).
+        if let Some(i) = at {
+            p.keep_as_read(i);
+        }
+        let Some(stored) = at.and_then(|i| p.events.get_mut(i)) else {
             return Err(CmdError::Params(format!("no event `{uid}`")));
         };
         if p.calendars.iter().any(|c| c.id == stored.calendar && c.read_only) {
@@ -348,8 +423,113 @@ impl Session {
         Ok(serde_json::json!({"uid": uid}))
     }
 
+    // //// Neoffice — an occurrence a server expanded (JMAP: no event of the series here, find_occurrence) is changed alone,
+    // by its own address there, or for the whole series (`series`), which it carries to the server (SERIES_CHANGE_LINE)
+    // while the other occurrences show the change at once. An occurrence has no rule of its own: the rule `change` gives
+    // (starting from the series', SERIES_RULE_LINE) is the series'.
+    pub fn update_occurrence(&mut self, uid: &str, at: i64, series: bool, change: impl FnOnce(&mut CalEvent)) -> CmdResult {
+        let account = self.find_occurrence(uid, at).map(|(a, _)| a.to_string()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
+        let p = self.pim_mut(&account);
+        let locked: Vec<String> = p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect();
+        let Some(i) = p.events.iter().position(|e| e.event.uid == uid && e.event.recurrence_id == Some(at) && !locked.contains(&e.calendar)) else {
+            return Err(CmdError::Params("this calendar can't be changed".into()));
+        };
+        let Some((old, calendar, waiting)) = p.events.get(i).map(|x| (x.event.clone(), x.calendar.clone(), x.dirty)) else {
+            return Err(CmdError::Params(format!("no event `{uid}`")));
+        };
+        // //// Neoffice — a change of this occurrence not sent yet goes with its scope (SERIES_CHANGE_LINE: the whole series,
+        // or this occurrence alone): a change for the other scope waits until it has gone, else both would be sent for one
+        // of them; a change of the series' rule waiting stays one.
+        let pending = if waiting { series_line(&old, SERIES_CHANGE_LINE).map(str::to_string) } else { None };
+        if waiting && pending.is_some() != series {
+            return Err(CmdError::Params(CHANGE_NOT_SENT.into()));
+        }
+        let mut e = old.clone();
+        e.rrule = series_line(&old, SERIES_RULE_LINE).map(str::to_string);
+        change(&mut e);
+        check_event(&e)?;
+        // It stays that occurrence.
+        (e.uid, e.recurrence_id) = (old.uid.clone(), old.recurrence_id);
+        let rule = e.rrule.take();
+        if series {
+            let rule_changed = rule.as_deref() != series_line(&old, SERIES_RULE_LINE) || pending.as_deref() == Some(SERIES_CHANGE_RULE);
+            if rule_changed {
+                set_series_line(&mut e, SERIES_RULE_LINE, rule.as_deref());
+            }
+            set_series_line(&mut e, SERIES_CHANGE_LINE, Some(if rule_changed { SERIES_CHANGE_RULE } else { SERIES_CHANGE }));
+            // The other occurrences show it at once; the next read brings them as the server has them.
+            let base = series_line(&old, SERIES_LINE).map(str::to_string);
+            let (moved, length) = (e.start - old.start, e.end - e.start);
+            for x in p.events.iter_mut().filter(|x| {
+                x.event.uid == uid
+                    && x.calendar == calendar
+                    && x.event.recurrence_id != Some(at)
+                    && base.is_some()
+                    && series_line(&x.event, SERIES_LINE) == base.as_deref()
+            }) {
+                x.event.summary.clone_from(&e.summary);
+                x.event.location.clone_from(&e.location);
+                x.event.description.clone_from(&e.description);
+                x.event.categories.clone_from(&e.categories);
+                x.event.attendees.clone_from(&e.attendees);
+                x.event.all_day = e.all_day;
+                x.event.start = x.event.start.saturating_add(moved);
+                x.event.end = x.event.start.saturating_add(length);
+            }
+        } else {
+            // //// Neoffice — this occurrence alone: no scope left from a change of the series already sent.
+            set_series_line(&mut e, SERIES_CHANGE_LINE, None);
+        }
+        e.sequence = e.sequence.saturating_add(1);
+        let remote = calendar != LOCAL;
+        // Its copy as read, before it changes (Pim::keep_as_read): what the form showed, for the whole series too.
+        p.keep_as_read(i);
+        if let Some(x) = p.events.get_mut(i) {
+            x.event = e;
+            x.dirty |= remote;
+        }
+        self.after_pim_change(&account, remote);
+        Ok(serde_json::json!({"uid": uid, "occurrence": at}))
+    }
+
+    // //// Neoffice — the occurrences a server expanded, with no event of the series here (find_occurrence): one deleted
+    // by its own address there, the whole series by its base event's (SERIES_LINE), once; only the copies in calendars
+    // that can be changed.
+    fn delete_occurrences(&mut self, uid: &str, occurrence: Option<i64>) -> CmdResult {
+        let Some(account) = self.pim.iter().find(|(_, p)| p.events.iter().any(|e| e.event.uid == uid)).map(|(a, _)| a.clone()) else {
+            return Err(CmdError::Params(format!("no event `{uid}`")));
+        };
+        let p = self.pim_mut(&account);
+        let locked: Vec<String> = p.calendars.iter().filter(|c| c.read_only).map(|c| c.id.clone()).collect();
+        let going =
+            |e: &StoredEvent| e.event.uid == uid && !locked.contains(&e.calendar) && occurrence.is_none_or(|at| e.event.recurrence_id == Some(at));
+        let gone: Vec<StoredEvent> = p.events.iter().filter(|e| going(e)).cloned().collect();
+        if gone.is_empty() {
+            return Err(CmdError::Params("this calendar can't be changed".into()));
+        }
+        let mut remote = false;
+        for g in &gone {
+            let href = match (occurrence, series_line(&g.event, SERIES_LINE)) {
+                (None, Some(base)) => base.to_string(),
+                _ => g.href.clone(),
+            };
+            if href.is_empty() || p.deleted.iter().any(|t| t.href == href) {
+                continue;
+            }
+            remote = true;
+            p.deleted.push(Tombstone { href, etag: String::new(), calendar: g.calendar.clone() });
+        }
+        p.events.retain(|e| !going(e));
+        self.after_pim_change(&account, remote);
+        Ok(serde_json::json!({"deleted": uid}))
+    }
+
     /// Delete an event, or one occurrence of a recurring one (`occurrence`: its start).
     pub fn delete_event(&mut self, uid: &str, occurrence: Option<i64>) -> CmdResult {
+        // //// Neoffice — occurrences a server expanded, with no event of the series here.
+        if self.find_event(uid).is_none() {
+            return self.delete_occurrences(uid, occurrence);
+        }
         let account = self.find_event(uid).map(|(a, _)| a.to_string()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
         let p = self.pim_mut(&account);
         // //// Neoffice — only its copies in calendars that can be changed: another's read-only calendar (a colleague's,
@@ -364,8 +544,13 @@ impl Session {
                 // One occurrence: an exception on the rule, and any changed instance goes.
                 // //// Neoffice — see `locked` above.
                 p.events.retain(|e| !(e.event.uid == uid && e.event.recurrence_id == Some(at) && !locked.contains(&e.calendar)));
-                let writable = |e: &&mut StoredEvent| e.event.uid == uid && e.event.recurrence_id.is_none() && !locked.contains(&e.calendar);
-                if let Some(m) = p.events.iter_mut().find(writable) {
+                let writable = |e: &StoredEvent| e.event.uid == uid && e.event.recurrence_id.is_none() && !locked.contains(&e.calendar);
+                // //// Neoffice — its copy as read, before it changes (Pim::keep_as_read).
+                let master = p.events.iter().position(writable);
+                if let Some(i) = master {
+                    p.keep_as_read(i);
+                }
+                if let Some(m) = master.and_then(|i| p.events.get_mut(i)) {
                     if !m.event.exdates.contains(&at) {
                         m.event.exdates.push(at);
                     }
@@ -419,6 +604,13 @@ impl Session {
                 e.calendar = x.calendar.clone();
                 e.dirty &= e.event != x.event;
             }
+            // //// Neoffice — what was sent is what the server has of the person's change (Pim::originals): changed again
+            // meanwhile, the next change starts from it; else no change is left to start.
+            if p.events.iter().any(|e| e.dirty && !x.href.is_empty() && e.href == x.href) {
+                p.originals.insert(x.href.clone(), x.event.clone());
+            } else {
+                p.originals.remove(&x.href);
+            }
         }
         // Notes stored on the server: their item there, and no longer to send.
         for x in &sync.pushed_notes {
@@ -436,6 +628,35 @@ impl Session {
                 if !p.notes.iter().any(|n| !n.href.is_empty() && n.href == x.href) {
                     p.notes.push(x.clone());
                 }
+            }
+        }
+        // //// Neoffice — changes the server refused (said in `errors`): an event never stored there goes, one stored there
+        // follows the server again (the read brings it back as the server has it).
+        // Changed again since it was sent, it is a new change, which goes; refused as it was, it shows as it was read before
+        // the change (Pim::originals) until the next read brings the server's.
+        for x in &sync.refused_events {
+            p.events.retain(|e| {
+                !(e.href.is_empty() && e.event.uid == x.event.uid && e.event.recurrence_id == x.event.recurrence_id && e.event == x.event)
+            });
+            let as_read = p.originals.get(&x.href).cloned();
+            for e in p.events.iter_mut().filter(|e| !e.href.is_empty() && e.href == x.href) {
+                e.dirty &= e.event != x.event;
+                if !e.dirty
+                    && let Some(read) = &as_read
+                {
+                    e.event = read.clone();
+                }
+            }
+            if !p.events.iter().any(|e| e.dirty && !x.href.is_empty() && e.href == x.href) {
+                p.originals.remove(&x.href);
+            }
+        }
+        // //// Neoffice — cards whose change the server refused for good (said in `errors`), likewise: one never stored there
+        // goes, one stored there follows the server again (the read brings it back as the server has it).
+        for x in &sync.refused_cards {
+            p.cards.retain(|c| !(c.href.is_empty() && c.card.uid == x.card.uid && c.card == x.card));
+            for c in p.cards.iter_mut().filter(|c| !c.href.is_empty() && c.href == x.href) {
+                c.dirty &= c.card != x.card;
             }
         }
         for x in &sync.pushed_cards {
@@ -460,7 +681,10 @@ impl Session {
             for cal in &sync.synced_calendars {
                 p.events.retain(|e| &e.calendar != cal || e.dirty || e.href.is_empty() || sync.kept.contains(&e.href));
                 for x in sync.events.iter().filter(|x| &x.calendar == cal) {
-                    if !p.events.iter().any(|e| e.dirty && e.event.uid == x.event.uid) {
+                    // //// Neoffice — what has a change here waiting is the server's event at its address (each occurrence a
+                    // server expanded is one of its own, JMAP's: the others of the series are read as usual), or one never
+                    // stored there with its uid (waiting_change).
+                    if !p.events.iter().any(|e| waiting_change(e, x)) {
                         p.events.retain(|e| !(e.event.uid == x.event.uid && e.event.recurrence_id == x.event.recurrence_id && !e.dirty));
                         p.events.push(x.clone());
                     }
@@ -473,8 +697,8 @@ impl Session {
                     let same = |e: &StoredEvent| {
                         (e.event.uid == x.event.uid && e.event.recurrence_id == x.event.recurrence_id) || (!x.href.is_empty() && e.href == x.href)
                     };
-                    // As for a calendar read in full: an event changed here (any of its occurrences) keeps the change.
-                    if !p.events.iter().any(|e| e.dirty && (e.event.uid == x.event.uid || same(e))) {
+                    // As for a calendar read in full: an event changed here keeps the change (waiting_change).
+                    if !p.events.iter().any(|e| (e.dirty && same(e)) || waiting_change(e, x)) {
                         p.events.retain(|e| !same(e));
                         p.events.push(x.clone());
                     }
@@ -558,6 +782,9 @@ impl Session {
         let alive: std::collections::HashSet<String> =
             p.events.iter().map(|e| e.href.clone()).chain(p.cards.iter().map(|c| c.href.clone())).collect();
         p.partial_misses.retain(|href, _| !brought.contains(href.as_str()) && alive.contains(href));
+        // //// Neoffice — and the copies as read of what has no change left to send (Pim::originals).
+        let waiting: std::collections::HashSet<&str> = p.events.iter().filter(|e| e.dirty).map(|e| e.href.as_str()).collect();
+        p.originals.retain(|href, _| waiting.contains(href.as_str()));
         p.ensure_defaults();
         for e in sync.errors.iter().take(3) {
             self.notice(format!("calendars and contacts: {e}"), true);
@@ -865,4 +1092,22 @@ pub fn parse_local(s: &str, offset: i64) -> Option<(i64, bool)> {
         return None;
     }
     Some((day * 86_400 + h * 3600 + mi * 60 - offset, false))
+}
+
+// //// Neoffice — see apply_dav (a calendar read in full or in part).
+/// Whether `e`, here, has a change waiting to be sent that `x`, the server's, is not to undo: the same part of the same
+/// event (by its address there, or by its uid: one event in two calendars, an occurrence a server numbered anew), the
+/// event itself or the same occurrence of it, or an exception for a date the event here takes out; one never stored there
+/// holds back all of its uid. The server's other parts come as it has them: the other occurrences of a series a server
+/// expanded (JMAP's, each an event of its own), the other exceptions of a CalDAV event kept at one address with it, which
+/// its next write keeps (upstream held back every part of the uid, and lost them there).
+fn waiting_change(e: &StoredEvent, x: &StoredEvent) -> bool {
+    if !e.dirty {
+        return false;
+    }
+    if e.href.is_empty() {
+        return e.event.uid == x.event.uid;
+    }
+    let taken_out = e.event.recurrence_id.is_none() && x.event.recurrence_id.is_some_and(|at| e.event.exdates.contains(&at));
+    (e.href == x.href || e.event.uid == x.event.uid) && (e.event.recurrence_id == x.event.recurrence_id || taken_out)
 }

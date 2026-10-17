@@ -493,10 +493,18 @@ pub fn registry() -> Registry {
         CommandSpec::new("calendar.goto", "Go to a date", "Calendar › Go to", |s, v| s.cal_goto(p::str(v, "date"), p::i64(v, "step").unwrap_or(0)))
             .params(r#"{"date"?: "YYYY-MM-DD"|"today", "step"?: number (days, weeks or months, as on screen)}"#),
         CommandSpec::new("calendar.events", "Events", "Calendar", |s, v| {
-            let off = i64::from(s.clock.offset);
+            // //// Neoffice — local times read by the offset of their own date (Clock::zone: daylight saving); Unix seconds as
+            // they are.
             let (d0, d1) = s.cal_days();
-            let from = p::str(v, "from").and_then(|x| parse_local(x, off)).map_or(s.local_midnight(d0), |(t, all_day)| if all_day { t - off } else { t });
-            let to = p::str(v, "to").and_then(|x| parse_local(x, off)).map_or(s.local_midnight(d1), |(t, all_day)| if all_day { t - off + 86_400 } else { t });
+            let read = |x: &str, end: bool| {
+                parse_local(x, 0).map(|(t, all_day)| match (x.trim().parse::<i64>().is_ok(), all_day) {
+                    (true, _) => t,
+                    (false, true) => s.clock.utc(if end { t + 86_400 } else { t }),
+                    (false, false) => s.clock.utc(t),
+                })
+            };
+            let from = p::str(v, "from").and_then(|x| read(x, false)).unwrap_or_else(|| s.local_midnight(d0));
+            let to = p::str(v, "to").and_then(|x| read(x, true)).unwrap_or_else(|| s.local_midnight(d1));
             Ok(json!(s.agenda(from, to).iter().map(|i| json!({
                 "uid": i.uid, "summary": i.summary, "location": i.location, "start": i.start, "end": i.end, "allDay": i.all_day,
                 "occurrence": i.occurrence, "recurring": i.recurring, "account": i.account, "calendar": i.calendar,
@@ -516,7 +524,9 @@ pub fn registry() -> Registry {
                 e.organizer = Some(mailcraft_model::ical::Attendee { email: me.1, name: me.0, partstat: "ACCEPTED".into(), rsvp: false });
             }
             let r = s.create_event(Some(&account), p::str(v, "calendar"), e.clone())?;
-            if let Some(uid) = r.get("uid").and_then(Value::as_str) {
+            // //// Neoffice — not where the calendar's server invites the guests itself (Session::server_schedules).
+            let calendar = r.get("uid").and_then(Value::as_str).and_then(|u| s.find_event(u)).map(|(_, x)| x.calendar.clone()).unwrap_or_default();
+            if let Some(uid) = r.get("uid").and_then(Value::as_str).filter(|_| !s.server_schedules(&account, &calendar)) {
                 e.uid = uid.to_string();
                 s.send_invitations(&e, &account, "REQUEST")?;
             }
@@ -525,25 +535,44 @@ pub fn registry() -> Registry {
         .params(r#"{"summary": string, "start": "YYYY-MM-DD[THH:MM]", "end"?: …, "allDay"?: bool, "location"?: string, "description"?: string, "repeat"?: "daily"|"weekly"|"monthly"|"yearly"|RRULE, "attendees"?: "a@x, Name <b@y>" (invited by mail), "categories"?: [string] | "Work, Clients" (colour it as those categories), "account"?: string, "calendar"?: string}"#),
         CommandSpec::new("event.update", "Edit event", "Calendar › Event", |s, v| {
             let uid = p::req_str(v, "uid")?.to_string();
-            let current = s.find_event(&uid).map(|(_, e)| e.event.clone()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
-            let e = event_from(s, v, current)?;
+            // //// Neoffice — an occurrence a server expanded (no event of the series here): it alone, or the whole series
+            // (`series`); the server tells the guests (Session::update_occurrence).
+            if s.find_event(&uid).is_none()
+                && let Some(at) = p::i64(v, "occurrence")
+            {
+                let mut current = s.find_occurrence(&uid, at).map(|(_, e)| e.event.clone()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
+                current.rrule = mailcraft_model::pim::series_line(&current, mailcraft_model::pim::SERIES_RULE_LINE).map(str::to_string);
+                moved_meanwhile(s, v, &current)?;
+                let e = as_left(v, &current, event_from(s, v, current.clone())?);
+                return s.update_occurrence(&uid, at, p::bool(v, "series").unwrap_or(false), |x| *x = e);
+            }
+            // //// Neoffice — the copy the person can change (find_event_to_change).
+            let current = s.find_event_to_change(&uid).map(|(_, e)| e.event.clone()).ok_or_else(|| CmdError::Params(format!("no event `{uid}`")))?;
+            moved_meanwhile(s, v, &current)?;
+            let e = as_left(v, &current, event_from(s, v, current.clone())?);
             let r = s.update_event(&uid, |x| *x = e)?;
             // The user's own meeting: the guests hear of the change.
-            if let Some((account, stored)) = s.find_event(&uid).map(|(a, e)| (a.to_string(), e.event.clone()))
+            // //// Neoffice — from MailCraft where the calendar's server doesn't tell them itself (Session::server_schedules).
+            if let Some((account, stored, calendar)) = s.find_event_to_change(&uid).map(|(a, e)| (a.to_string(), e.event.clone(), e.calendar.clone()))
                 && organized_by_me(s, &stored)
+                && !s.server_schedules(&account, &calendar)
             {
                 s.send_invitations(&stored, &account, "REQUEST")?;
             }
             Ok(r)
         })
-        .params(r#"{"uid": string, … the fields of event.create to change}"#),
+        // //// Neoffice — and an occurrence a server expanded, alone or for the whole series.
+        .params(r#"{"uid": string, … the fields of event.create to change, "occurrence"?: unix seconds and "series"?: bool (an occurrence a server expanded: that one, or the whole series)}"#),
         CommandSpec::new("event.delete", "Delete event", "Calendar › Event", |s, v| {
             let uid = p::req_str(v, "uid")?.to_string();
-            let before = s.find_event(&uid).map(|(a, e)| (a.to_string(), e.event.clone()));
+            // //// Neoffice — and its calendar, whose server may tell the guests itself (Session::server_schedules).
+            let before = s.find_event_to_change(&uid).map(|(a, e)| (a.to_string(), e.event.clone(), e.calendar.clone()));
             let occurrence = p::i64(v, "occurrence");
             let r = s.delete_event(&uid, occurrence)?;
-            if let Some((account, mut e)) = before
+            // //// Neoffice — not where the calendar's server tells the guests itself (`before` above).
+            if let Some((account, mut e, calendar)) = before
                 && organized_by_me(s, &e)
+                && !s.server_schedules(&account, &calendar)
             {
                 // One occurrence off: the guests are told of that one.
                 if let Some(at) = occurrence.filter(|_| e.rrule.is_some()) {
@@ -1510,11 +1539,55 @@ fn list_accounts(s: &mut Session, _: &Value) -> CmdResult {
 }
 
 /// An event from command params, starting from `e` (what's not given stays).
+// //// Neoffice — the time an event's form opened with (`was`: its start, end and all-day as the form showed them), when
+// the form changes the time: an event moved elsewhere meanwhile (in the desk, by another device) and read since is not
+// moved back over it; the person opens it again and sees where it is now.
+/// Said when the form's time is not the event's any more.
+pub const MOVED_MEANWHILE: &str = "this event was changed meanwhile: open it again to see it as it is now";
+
+fn moved_meanwhile(s: &Session, v: &Value, current: &mailcraft_model::ical::CalEvent) -> Result<(), CmdError> {
+    let Some(was) = v.get("was").filter(|w| w.is_object()) else { return Ok(()) };
+    if !["start", "end", "allDay"].iter().any(|k| v.get(*k).is_some()) {
+        return Ok(());
+    }
+    let opened = event_from(s, was, current.clone())?;
+    // As the form shows a time: the local clock to the minute (an hour a change of offset repeats reads as one), or a day.
+    let shown = |e: &mailcraft_model::ical::CalEvent, t: i64| if e.all_day { t.div_euclid(86_400) } else { s.clock.local(t).div_euclid(60) };
+    let same = opened.all_day == current.all_day
+        && shown(&opened, opened.start) == shown(current, current.start)
+        && shown(&opened, opened.end) == shown(current, current.end);
+    if !same {
+        return Err(CmdError::Params(MOVED_MEANWHILE.into()));
+    }
+    Ok(())
+}
+
+// //// Neoffice — what the form left as it showed it (`was`: the start or the end it opened with, the all-day unchanged)
+// keeps its exact instant, its seconds and the second pass of an hour a change of offset repeats, rather than the one the
+// form's text reads as (Clock::utc takes the first).
+fn as_left(v: &Value, current: &mailcraft_model::ical::CalEvent, mut e: mailcraft_model::ical::CalEvent) -> mailcraft_model::ical::CalEvent {
+    let Some(was) = v.get("was").filter(|w| w.is_object()) else { return e };
+    let left = |k: &str| v.get(k).is_some() && v.get(k) == was.get(k) && v.get("allDay") == was.get("allDay");
+    if left("start") {
+        e.start = current.start;
+    }
+    if left("end") {
+        e.end = current.end;
+    }
+    e
+}
+
 fn event_from(s: &Session, v: &Value, mut e: mailcraft_model::ical::CalEvent) -> Result<mailcraft_model::ical::CalEvent, CmdError> {
-    let off = i64::from(s.clock.offset);
+    // //// Neoffice — a local time read by the offset of its own date (Clock::zone: daylight saving), not today's; a day,
+    // or Unix seconds, as they are.
+    let local = |x: &str, (t, all_day): (i64, bool)| (if all_day || x.trim().parse::<i64>().is_ok() { t } else { s.clock.utc(t) }, all_day);
     let when = |k: &str| -> Result<Option<(i64, bool)>, CmdError> {
         match p::str(v, k) {
-            Some(x) => parse_local(x, off).map(Some).ok_or_else(|| CmdError::Params(format!("`{x}` is not a date (YYYY-MM-DD or YYYY-MM-DDTHH:MM)"))),
+            // //// Neoffice — see `local` above.
+            Some(x) => parse_local(x, 0)
+                .map(|r| local(x, r))
+                .map(Some)
+                .ok_or_else(|| CmdError::Params(format!("`{x}` is not a date (YYYY-MM-DD or YYYY-MM-DDTHH:MM)"))),
             None => Ok(v.get(k).and_then(Value::as_i64).map(|n| (n, false))),
         }
     };

@@ -67,7 +67,13 @@ impl Args {
 
 fn clock() -> Clock {
     let now = chrono::Local::now();
-    Clock::new(now.timestamp(), now.offset().local_minus_utc())
+    // //// Neoffice — with the system's time-zone rules, so that each date shows with its own offset (daylight saving).
+    let offset = |t: i64| {
+        use chrono::TimeZone as _;
+        chrono::Local.timestamp_opt(t, 0).single().map_or(now.offset().local_minus_utc(), |d| d.offset().local_minus_utc())
+    };
+    let zone = mailcraft_engine::model::dates::Zone::from_offsets(now.timestamp() - 3 * 366 * 86_400, now.timestamp() + 10 * 366 * 86_400, offset);
+    Clock::new(now.timestamp(), now.offset().local_minus_utc()).with_zone(zone)
 }
 
 fn password(prompt_for: &str) -> Result<String, String> {

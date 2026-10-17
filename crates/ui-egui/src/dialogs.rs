@@ -488,6 +488,19 @@ pub enum Dialog {
     },
     Event(Box<crate::pim_dialogs::EventForm>),
     Contact(Box<crate::pim_dialogs::ContactForm>),
+    // //// Neoffice — deleting a contact of the server's book in a hosting page asks first: it is the company's contact,
+    // gone for the whole team (read_only.rs, `delete`).
+    DeleteContact {
+        uid: String,
+        name: String,
+    },
+    // //// Neoffice — likewise deleting an event of a Neoffice calendar (read_only.rs, `delete_event`).
+    DeleteEvent(Box<crate::read_only::EventDeletion>),
+    // //// Neoffice — the name shown on an account's mail, where its servers are a hosting page's (hosted.rs).
+    AccountName {
+        account: String,
+        name: String,
+    },
     /// New folder (in `parent`), or rename `rename`.
     FolderName {
         account: String,
@@ -872,6 +885,8 @@ impl Dialog {
             Dialog::Contact(f) => f.error = Some(e),
             Dialog::Vacation(f) => f.error = Some(e),
             Dialog::OpenSharedCalendar { error, .. } => *error = Some(e),
+            // //// Neoffice — see `Dialog::DeleteEvent`.
+            Dialog::DeleteEvent(d) => d.error = Some(e),
             _ => {}
         }
     }
@@ -1883,7 +1898,8 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                         let shown = if f.target.is_empty() { tl!("Choose…").to_string() } else { tl!(&f.target).to_string() };
                         egui::ComboBox::from_id_salt("rule-cat").width(300.0).selected_text(shown).show_ui(ui, |ui| {
                             for c in &s.prefs.categories {
-                                ui.selectable_value(&mut f.target, c.name.clone(), &c.name);
+                                // //// Neoffice — in the interface language, as the menu above it shows them.
+                                ui.selectable_value(&mut f.target, c.name.clone(), tl!(&c.name));
                             }
                         });
                         ui.end_row();
@@ -1979,6 +1995,12 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             crate::pim_dialogs::contact(ui, f, t, acts, notes)
         }
         Dialog::Vacation(f) => vacation(ui, f, t, acts),
+        // //// Neoffice — see `Dialog::DeleteContact`.
+        Dialog::DeleteContact { uid, name } => crate::read_only::confirm_delete(ui, t, uid, name, acts),
+        // //// Neoffice — see `Dialog::DeleteEvent`.
+        Dialog::DeleteEvent(d) => crate::read_only::confirm_delete_event(ui, t, d, acts),
+        // //// Neoffice — see `Dialog::AccountName`.
+        Dialog::AccountName { account, name } => crate::hosted::account_name(ui, t, account, name, acts),
         Dialog::ConfirmEmpty { account, folder, name, for_good } => {
             ui.set_width(400.0);
             if *for_good {

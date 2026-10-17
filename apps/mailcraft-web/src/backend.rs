@@ -30,6 +30,9 @@ enum Task {
     SyncAll,
     SyncFolder(String),
     Job(Job),
+    // //// Neoffice — what is left to send to the address books and calendars goes again (poll), without saying again a
+    // failure the last sync of them said (`pim_said`).
+    Resend,
 }
 
 struct Account {
@@ -58,10 +61,19 @@ struct Account {
     // //// Neoffice — new tokens are asked of the hosting page for this mailbox, or will be again shortly (renew): it is
     // connecting, and has no password for the person to type.
     renew_waits: bool,
-    // //// Neoffice — what a sync of the address books did on the server that the engine hasn't taken in yet (the cards it
-    // stored, the deletions it is done with): the next sync, which may come before the engine has, neither makes those
-    // cards again nor sends those deletions again (pim).
+    // //// Neoffice — what a sync of the address books and calendars did on the server that the engine hasn't taken in yet
+    // (the cards and events it stored, the refusals it said, the deletions it is done with): the next sync, which may
+    // come before the engine has, neither makes those again, nor says those again, nor sends those deletions again (pim).
     sent: mailcraft_jmap::contacts::Sent,
+    // //// Neoffice — what the last sync of the address books and calendars said had failed (pim): a resend doesn't say it
+    // again (Task::Resend).
+    pim_said: Vec<String>,
+    // //// Neoffice — the resends since something was left to send (poll): RESENDS at most, then with the syncs of
+    // everything only.
+    resends: u8,
+    // //// Neoffice — when the address books and calendars were last synced (pim): each sync's time is past the one before,
+    // which tells what the engine has taken in (`Sent::recorded`).
+    synced_at: i64,
 }
 
 // //// Neoffice — after a sleep the page's own credential may be stale for a while, and the person may need minutes to
@@ -71,6 +83,10 @@ const RENEW_TRIES: u8 = 60;
 
 // //// Neoffice — the address books and calendars are read again with the mail, at most this often (seconds).
 const CONTACTS_EVERY: i64 = 600;
+// //// Neoffice — what is left to send to them goes again with this many checks of the Inbox (poll), then with the syncs of
+// everything only: nothing of a hosting page's mailbox is kept once the page is closed, and a server that fails for long
+// isn't asked every check.
+const RESENDS: u8 = 3;
 
 struct Shared {
     store: Store,
@@ -149,10 +165,16 @@ fn enqueue(sh: &Rcs, id: &str, task: Task) {
         let mut s = sh.borrow_mut();
         let Some(a) = s.accounts.get_mut(id) else { return };
         // //// Neoffice — one read of the address books and calendars waiting at a time: asked again meanwhile, it is the
-        // same one (it reads the engine's copy when it starts), so a change is never sent by two reads in a row.
-        let pim = |t: &Task| matches!(t, Task::Job(Job::SyncDav { .. }));
-        if !(pim(&task) && a.queue.iter().any(pim)) {
-            a.queue.push_back(task);
+        // same one (it reads the engine's copy when it starts), so a change is never sent by two reads in a row; asked for
+        // a change made here, a resend waiting becomes it, so that its failure is said (Task::Resend).
+        let pim = |t: &Task| matches!(t, Task::Job(Job::SyncDav { .. }) | Task::Resend);
+        match a.queue.iter_mut().find(|t| pim(t)) {
+            Some(queued) if pim(&task) => {
+                if matches!(queued, Task::Resend) && !matches!(task, Task::Resend) {
+                    *queued = task;
+                }
+            }
+            _ => a.queue.push_back(task),
         }
         !std::mem::replace(&mut a.running, true)
     };
@@ -176,9 +198,12 @@ async fn run(sh: Rcs, id: String) {
         };
         match task {
             Task::Connect => connect(&sh, &id).await,
-            Task::SyncAll => sync_all(&sh, &id).await,
+            // //// Neoffice — the poller's own sync of everything: not one the person asked for (sync_all).
+            Task::SyncAll => sync_all(&sh, &id, false).await,
             Task::SyncFolder(f) => sync_one(&sh, &id, &f).await,
             Task::Job(j) => job(&sh, &id, j).await,
+            // //// Neoffice — see Task::Resend.
+            Task::Resend => pim(&sh, &id, true).await,
         }
     }
 }
@@ -327,7 +352,8 @@ async fn connect(sh: &Rcs, id: &str) {
             for op in ops {
                 remote(sh, id, op).await;
             }
-            sync_all(sh, id).await;
+            // //// Neoffice — signed in again: what was left to send goes now (pim_waiting).
+            sync_all(sh, id, true).await;
         }
         Err(e) => failed(sh, id, e),
     }
@@ -361,7 +387,9 @@ async fn relist(sh: &Rcs, id: &str) -> bool {
     }
 }
 
-async fn sync_all(sh: &Rcs, id: &str) {
+// //// Neoffice — `asked`: a sync the person asked for (or a sign-in), which sends what is left to send whatever the pace
+// of the address books' and calendars' reads; the poller's own syncs of everything keep that pace (pim).
+async fn sync_all(sh: &Rcs, id: &str, asked: bool) {
     if !relist(sh, id).await {
         return;
     }
@@ -379,56 +407,144 @@ async fn sync_all(sh: &Rcs, id: &str) {
         if let Ok(Some((used, limit))) = c.quota().await {
             emit(sh, Event::Quota { account: id.to_string(), used, limit });
         }
-        // //// Neoffice — the address books and the calendars with the mail, when the server offers them (pim).
-        let due = sh.borrow().accounts.get(id).is_some_and(|a| a.contacts_at.is_none_or(|at| now() - at >= CONTACTS_EVERY));
+        // //// Neoffice — the address books and the calendars with the mail, when the server offers them (pim): read at most
+        // every CONTACTS_EVERY seconds, and at a sync the person asked for when something made here waits to be sent (as
+        // said: « tried again at the next sync »); the poller resends it meanwhile (Task::Resend).
+        let due = (asked && pim_waiting(sh, id))
+            || sh.borrow().accounts.get(id).is_some_and(|a| a.contacts_at.is_none_or(|at| now() - at >= CONTACTS_EVERY));
         if due {
-            pim(sh, id).await;
+            pim(sh, id, false).await;
         }
         status(sh, id, SyncStatus::Online { at: now() });
     }
 }
 
+// //// Neoffice — whether something made, changed or deleted here waits to be sent to the address books or calendars:
+// the engine's copy, less what an earlier sync sent that the engine hasn't taken in yet (`sent`).
+fn pim_waiting(sh: &Rcs, id: &str) -> bool {
+    let Some(mut sent) = sh.borrow().accounts.get(id).map(|a| a.sent.clone()) else { return false };
+    let mut pim: mailcraft_engine::model::pim::Pim = store(sh).load_account_doc(id, mailcraft_engine::model::pim::PIM_DOC).unwrap_or_default();
+    sent.resume(&mut pim);
+    mailcraft_jmap::contacts::waiting(&pim)
+}
+
 // //// Neoffice — read the account's address books and calendars (JMAP for Contacts and for Calendars) and hand them
 // to the engine to merge in one sync, as a CardDAV and CalDAV sync's result. What the server does not offer is not
-// asked; a failure is said and tried at the next sync, and the other part is merged all the same.
-async fn pim(sh: &Rcs, id: &str) {
+// asked; a failure is said and tried at the next sync, and the other part is merged all the same. `quiet`: a resend
+// (Task::Resend), which doesn't say again what the last one said had failed.
+async fn pim(sh: &Rcs, id: &str, quiet: bool) {
     let Some(c) = client(sh, id) else { return };
     if !c.offers_contacts() && !c.offers_calendars() {
         return;
     }
-    let at = now();
-    // //// Neoffice — the account's address books as the engine keeps them: what was made, changed or deleted here goes
-    // first, but not twice what an earlier sync did that the engine hasn't taken in yet (`sent`).
+    // //// Neoffice — a sync asked for a change made here, or with everything, starts the resends' count again (poll); and
+    // each sync's time is past the one before (`synced_at`).
+    let at = {
+        let mut s = sh.borrow_mut();
+        match s.accounts.get_mut(id) {
+            Some(a) => {
+                if !quiet {
+                    a.resends = 0;
+                }
+                a.synced_at = now().max(a.synced_at.saturating_add(1));
+                a.synced_at
+            }
+            None => now(),
+        }
+    };
+    // //// Neoffice — the account's address books and calendars as the engine keeps them: what was made, changed or deleted
+    // here goes first, but not twice what an earlier sync did that the engine hasn't taken in yet (`sent`).
     let mut pim: mailcraft_engine::model::pim::Pim = store(sh).load_account_doc(id, mailcraft_engine::model::pim::PIM_DOC).unwrap_or_default();
     if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
         a.sent.resume(&mut pim);
     }
     // //// Neoffice — a hosted mailbox's server (Neoffice's) keeps no notes on its contacts: none is sent there.
     let notes = !hosted(sh, id);
-    let contacts = c.sync_contacts(&pim, notes, at).await.unwrap_or_else(|e| {
-        log::warn!("{id}: the address books were not read: {e}");
-        None
-    });
+    // //// Neoffice — a resend sends what is left to send, without reading everything again.
+    let contacts = match if quiet { c.send_contacts(&pim, notes, at).await } else { c.sync_contacts(&pim, notes, at).await } {
+        Ok(sync) => sync,
+        // //// Neoffice — a token refused here goes the way the mail's does (failed: a hosted mailbox asks the page for a
+        // new one, signs in again and syncs everything, these included), rather than leaving People empty until then.
+        Err(e @ Error::Auth(_)) => return refused(sh, id, e, None),
+        Err(e) => {
+            log::warn!("{id}: the address books were not read: {e}");
+            None
+        }
+    };
     // //// Neoffice — see `sent` (Account).
     if let Some(sync) = &contacts
         && let Some(a) = sh.borrow_mut().accounts.get_mut(id)
     {
         a.sent.record(sync);
     }
-    let calendars = c.sync_calendars(at).await.unwrap_or_else(|e| {
-        log::warn!("{id}: the calendars were not read: {e}");
-        None
-    });
+    // //// Neoffice — how its events are written (mailcraft-jmap's calendars.rs): who the person is, the browser's zone and
+    // its rules, and no keywords to a hosted mailbox's server (Neoffice's keeps none, and refuses a set that has them).
+    let me: Vec<String> = sh
+        .borrow()
+        .accounts
+        .get(id)
+        .map(|a| [&a.config.email, &a.config.username].iter().map(|m| m.trim().to_lowercase()).filter(|m| !m.is_empty()).collect())
+        .unwrap_or_default();
+    let local = |zone: Option<&str>, t: i64| crate::host::local_time(zone, t);
+    let writing = mailcraft_jmap::calendars::Writing { me, keywords: !hosted(sh, id), zone: crate::host::time_zone(), local: &local };
+    let calendars = match if quiet { c.send_calendars(&pim, &writing, at).await } else { c.sync_calendars(&pim, &writing, at).await } {
+        Ok(sync) => sync,
+        // //// Neoffice — see `refused`; what the address books' part did is handed over first.
+        Err(e @ Error::Auth(_)) => {
+            let done = mailcraft_jmap::calendars::pim_sync(contacts, None, (c.offers_contacts(), c.offers_calendars()), at);
+            return refused(sh, id, e, done);
+        }
+        Err(e) => {
+            log::warn!("{id}: the calendars were not read: {e}");
+            None
+        }
+    };
+    // //// Neoffice — see `sent` (Account): what the calendars' sync did, likewise.
+    if let Some(sync) = &calendars
+        && let Some(a) = sh.borrow_mut().accounts.get_mut(id)
+    {
+        a.sent.record_events(sync);
+    }
     // //// Neoffice — read: not again for a while; with neither part read, again at the next sync of the mail (address books
-    // not read come back without their list, what was sent before them only).
-    let read = contacts.as_ref().is_some_and(|s| s.books.is_some()) || calendars.is_some();
+    // and calendars not read come back without their list, what was sent before them only).
+    let read = contacts.as_ref().is_some_and(|s| s.books.is_some()) || calendars.as_ref().is_some_and(|s| s.calendars.is_some());
     if read && let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
         a.contacts_at = Some(at);
     }
     // //// Neoffice — what the session offers: a part it offers that failed this time keeps its home.
-    if let Some(sync) = mailcraft_jmap::calendars::pim_sync(contacts, calendars, (c.offers_contacts(), c.offers_calendars()), at) {
+    if let Some(mut sync) = mailcraft_jmap::calendars::pim_sync(contacts, calendars, (c.offers_contacts(), c.offers_calendars()), at) {
+        // //// Neoffice — a refusal a send alone found (Task::Resend, which reads nothing) is followed by a read, so that what
+        // was refused (a change, a deletion) shows again as the server has it.
+        if quiet && mailcraft_jmap::contacts::read_after(&sync) {
+            enqueue(sh, id, Task::Job(Job::SyncDav { account: id.to_string() }));
+        }
+        // //// Neoffice — a resend says only what the last syncs didn't (`pim_said`): what the engine shows of them is the first
+        // three (apply_dav), so a failure past those is said by a later one.
+        if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+            let all = sync.errors.clone();
+            let said = std::mem::take(&mut a.pim_said);
+            if quiet {
+                sync.errors.retain(|e| !said.contains(e));
+            }
+            let mut now_said: Vec<String> = said.into_iter().filter(|e| all.contains(e)).collect();
+            now_said.extend(sync.errors.iter().take(3).filter(|e| !now_said.contains(e)).cloned().collect::<Vec<_>>());
+            a.pim_said = now_said;
+        }
         emit(sh, Event::DavSynced { account: id.to_string(), sync: Box::new(sync) });
     }
+}
+
+// //// Neoffice — the server refused the token while the address books and calendars were synced: what was done before
+// goes to the engine (`done`), they are read again with the next sync of everything (`contacts_at` let go of), and the
+// account goes the way a refusal of the mail's sync does (`failed`: a hosted mailbox asks the page for a new token).
+fn refused(sh: &Rcs, id: &str, e: Error, done: Option<mailcraft_engine::model::pim::DavSync>) {
+    if let Some(sync) = done {
+        emit(sh, Event::DavSynced { account: id.to_string(), sync: Box::new(sync) });
+    }
+    if let Some(a) = sh.borrow_mut().accounts.get_mut(id) {
+        a.contacts_at = None;
+    }
+    failed(sh, id, e);
 }
 
 async fn sync_one(sh: &Rcs, id: &str, path: &str) {
@@ -519,7 +635,8 @@ async fn job(sh: &Rcs, id: &str, j: Job) {
     match j {
         Job::SyncAll { .. } => {
             if client(sh, id).is_some() {
-                sync_all(sh, id).await;
+                // //// Neoffice — asked for by the person (Send/Receive): see sync_all.
+                sync_all(sh, id, true).await;
             } else {
                 connect(sh, id).await;
             }
@@ -606,7 +723,7 @@ async fn job(sh: &Rcs, id: &str, j: Job) {
         }
         // Nothing to do in the browser: no Outbox (sending needs the server), no CalDAV.
         // //// Neoffice — but address books and calendars over JMAP, read again when the engine asks (pim).
-        Job::SyncDav { .. } => pim(sh, id).await,
+        Job::SyncDav { .. } => pim(sh, id, false).await,
         Job::FlushOutbox { .. } => {}
         Job::Start { .. }
         | Job::Remove { .. }
@@ -639,6 +756,21 @@ async fn poll(sh: Rcs, id: String, generation: u32) {
             (true, _) if tick.is_multiple_of(FULL_EVERY) => enqueue(&sh, &id, Task::SyncAll),
             (true, Some(f)) if !pushing => enqueue(&sh, &id, Task::SyncFolder(f)),
             (true, _) => {}
+        }
+        // //// Neoffice — what is left to send to the address books and calendars (a change the server couldn't take for the
+        // time being) goes again with the next checks (RESENDS), and so again after each sync of everything, not only with
+        // a sync of them.
+        if connected {
+            let waiting = !tick.is_multiple_of(FULL_EVERY) && pim_waiting(&sh, &id);
+            let resend = {
+                let mut s = sh.borrow_mut();
+                let Some(a) = s.accounts.get_mut(&id) else { return };
+                a.resends = if waiting { a.resends.saturating_add(1) } else { 0 };
+                waiting && a.resends <= RESENDS
+            };
+            if resend {
+                enqueue(&sh, &id, Task::Resend);
+            }
         }
     }
 }
@@ -778,6 +910,9 @@ impl Backend for WebBackend {
                             renew_tries: 0,
                             renew_waits: false,
                             sent: Default::default(),
+                            pim_said: Vec::new(),
+                            synced_at: 0,
+                            resends: 0,
                             pushing: false,
                         },
                     );
