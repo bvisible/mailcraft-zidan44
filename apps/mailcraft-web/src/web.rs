@@ -109,8 +109,10 @@ pub fn start() {
                     session.jmap_only = true;
                     // //// Neoffice — the host's mailboxes sign in with what the page gave (host.rs).
                     let backend = WebBackend::new(store.clone(), cc.egui_ctx.clone(), crate::host::secrets(&host));
-                    // //// Neoffice — Nora, when the page asked for her (`?nora`).
-                    let nora = crate::nora::requested(&query()).map(|origin| crate::nora::Nora::new(origin, cc.egui_ctx.clone()));
+                    // //// Neoffice — Nora, when the page asked for her (`?nora`) or makes her calls itself (`mailcraftNoraCall`, Neodesk).
+                    let nora = crate::nora::requested(&query())
+                        .or_else(|| crate::nora::offered().then(String::new))
+                        .map(|origin| crate::nora::Nora::new(origin, cc.egui_ctx.clone()));
                     let hosted_mail = host.iter().map(|a| a.email.to_lowercase()).collect();
                     let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone(), nora, hosted: hosted_mail, store: store.clone() };
                     let mut app = MailApp::new(session, Box::new(backend), Box::new(services));

@@ -10,6 +10,11 @@
 //! A Frappe page's CSRF token (`csrf_token` or `frappe.csrf_token`) is sent as `X-Frappe-CSRF-Token`
 //! without being asked; when MailCraft runs in a frame of a page of the same origin, that page's
 //! settings and token count too. Nothing secret travels in the address.
+//!
+//! A host that makes the calls itself offers `window.mailcraftNoraCall(method, args)`, a promise of
+//! `{ status, body }` (`args` is the JSON of the arguments): Nora is then on without `?nora`, and
+//! every call goes through it. Neodesk does so: it calls with the person's credential, which neither
+//! its page nor MailCraft ever holds.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,6 +34,12 @@ pub fn requested(query: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether the page (or the page of the same origin that frames it) makes Nora's calls itself
+/// (`mailcraftNoraCall`): Nora is then on, as with `?nora`.
+pub fn offered() -> bool {
+    web_sys::window().is_some_and(|window| host_call(&windows(&window)).is_some())
 }
 
 /// The connection: calls go out as `fetch`es, answers wait in `inbox` for the next frame.
@@ -129,10 +140,29 @@ fn reason(error: JsValue) -> String {
         .unwrap_or_else(|| format!("{error:?}"))
 }
 
-/// One call: a POST of the arguments to the method, answered with its status and body.
+/// The host's own way to Nora, when it offers one: the window that offers it, and the function.
+fn host_call(windows: &[JsValue]) -> Option<(JsValue, js_sys::Function)> {
+    windows.iter().find_map(|w| get(w, "mailcraftNoraCall").filter(JsValue::is_function).map(|f| (w.clone(), js_sys::Function::from(f))))
+}
+
+/// One call made by the host: its answer read as a `fetch`'s (status 0 when it gave none).
+async fn call_host(owner: &JsValue, function: &js_sys::Function, call: &NoraCall) -> Result<(u16, String), String> {
+    let promise = function.call2(owner, &JsValue::from_str(call.method), &JsValue::from_str(&call.args.to_string())).map_err(reason)?;
+    let answer = JsFuture::from(js_sys::Promise::resolve(&promise)).await.map_err(reason)?;
+    let status =
+        get(&answer, "status").and_then(|value| value.as_f64()).filter(|status| (0.0..1000.0).contains(status)).map_or(0, |status| status as u16);
+    let body = get(&answer, "body").and_then(|value| value.as_string()).unwrap_or_default();
+    Ok((status, body))
+}
+
+/// One call: a POST of the arguments to the method, answered with its status and body; through the
+/// host when it makes the calls itself.
 async fn fetch(default_origin: &str, call: &NoraCall) -> Result<(u16, String), String> {
     let window = web_sys::window().ok_or("no window")?;
     let windows = windows(&window);
+    if let Some((owner, function)) = host_call(&windows) {
+        return call_host(&owner, &function, call).await;
+    }
     let host = host(&windows);
     let origin = host.origin.as_deref().unwrap_or(default_origin).trim_end_matches('/');
     let url = format!("{origin}/api/method/{}", call.method);
