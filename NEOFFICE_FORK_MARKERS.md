@@ -115,9 +115,11 @@ and the desktop app, behave as upstream, except where a section says otherwise.
   one the page gives (`signature: { html, text }`, optional: its text, else its HTML made text), and so is the name
   shown on its mail; one made or changed in NeoMail is kept with the settings (`mailcraft.signatures`,
   `mailcraft.names`, by address) until NeoMail writes it to Neoffice, as long as the page still gives the one it
-  replaced (one changed in Neoffice since is Neoffice's). New file `apps/mailcraft-web/src/kept.rs` (built on every
-  target, its tests run natively); marked changes in `apps/mailcraft-web/src/web.rs` (`WebShell::save`, `kept_texts`,
-  `save_kept`, `ids`).
+  replaced (one changed in Neoffice since is Neoffice's). A change of one is written at the frame it happens, not at
+  eframe's next save (every 10 s, or when the page loses the focus): a page that died first lost it (maintenance#1671).
+  New file `apps/mailcraft-web/src/kept.rs` (built on every target, its tests run natively); marked changes in
+  `apps/mailcraft-web/src/web.rs` (`WebShell::save`, `WebShell::ui`, `save_signatures_and_names`, `kept_fingerprint`,
+  `kept_texts`, `save_kept`, `ids`).
 - **The account page offers what is the person's**: in Options' Info, no « Add account… », and the account's settings
   are the name shown on their mail (« Your name… », `Dialog::AccountName`, hosted.rs) and their signature, not its
   servers, its sign-in or its removal (the page's); « Automatic replies » isn't offered where the server offers none,

@@ -152,7 +152,19 @@ pub fn start() {
                     // What each starts with in this tab, to tell what this tab changed (kept.rs, `seen`).
                     let seen_signatures = seen_from(&page_signatures, &kept_texts(cc.storage, SIGNATURES_KEY));
                     let seen_names = seen_from(&page_names, &kept_texts(cc.storage, NAMES_KEY));
-                    Ok(Box::new(WebShell { app, store, sample, hosted, page_signatures, page_names, seen_signatures, seen_names, db }))
+                    let kept_fingerprint = kept_fingerprint(&app.session);
+                    Ok(Box::new(WebShell {
+                        app,
+                        store,
+                        sample,
+                        hosted,
+                        page_signatures,
+                        page_names,
+                        seen_signatures,
+                        seen_names,
+                        kept_fingerprint,
+                        db,
+                    }))
                 }),
             )
             .await;
@@ -207,13 +219,29 @@ struct WebShell {
     // What this tab knows of each mailbox's signature and name, to tell its own changes (kept.rs, `Seen`).
     seen_signatures: std::collections::HashMap<String, crate::kept::Seen>,
     seen_names: std::collections::HashMap<String, crate::kept::Seen>,
+    // //// Neoffice — the mailboxes' signatures and names as last looked at (`kept_fingerprint`), to keep at once one
+    // the person has just made.
+    kept_fingerprint: u64,
     /// Where the cache is kept between visits.
     db: Option<web_sys::IdbDatabase>,
 }
 
 impl eframe::App for WebShell {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    // //// Neoffice — the frame's storage, to keep at once a signature or a name made here (maintenance#1671).
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui);
+        // //// Neoffice — a signature or a name made here is kept at once, not at the next save (every 10 s): eframe's save
+        // at the page's unload never runs (it listens for "onbeforeunload", which is no event's name), and the one between
+        // frames stops in a hidden tab, so what was made just before a reload was lost (maintenance#1671).
+        if self.hosted {
+            let now = kept_fingerprint(&self.app.session);
+            if now != self.kept_fingerprint {
+                self.kept_fingerprint = now;
+                if let Some(storage) = frame.storage_mut() {
+                    self.save_signatures_and_names(storage);
+                }
+            }
+        }
         // What changed in the cache this frame goes to IndexedDB.
         if let Some(db) = &self.db {
             let changes: Vec<_> = self.store.take_changes().into_iter().filter(|(p, _)| !p.ends_with(".bad")).collect();
@@ -244,11 +272,7 @@ impl eframe::App for WebShell {
         }
         // //// Neoffice — and the signatures and names made here (kept.rs), not the mail, the accounts or their secrets.
         if self.hosted {
-            save_kept(storage, SIGNATURES_KEY, &self.app.session, &self.page_signatures, &mut self.seen_signatures, |c| crate::kept::Shown {
-                text: c.signature.clone(),
-                html: c.signature_html.clone(),
-            });
-            save_kept(storage, NAMES_KEY, &self.app.session, &self.page_names, &mut self.seen_names, |c| crate::kept::Shown::plain(&c.name));
+            self.save_signatures_and_names(storage);
         }
         if !keeps.files {
             return;
@@ -275,6 +299,29 @@ impl eframe::App for WebShell {
     fn auto_save_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(10)
     }
+}
+
+impl WebShell {
+    // //// Neoffice — the signatures and names made here for the hosting page's mailboxes (kept.rs): at each save, and at
+    // once when one changes (`ui`).
+    fn save_signatures_and_names(&mut self, storage: &mut dyn eframe::Storage) {
+        save_kept(storage, SIGNATURES_KEY, &self.app.session, &self.page_signatures, &mut self.seen_signatures, |c| crate::kept::Shown {
+            text: c.signature.clone(),
+            html: c.signature_html.clone(),
+        });
+        save_kept(storage, NAMES_KEY, &self.app.session, &self.page_names, &mut self.seen_names, |c| crate::kept::Shown::plain(&c.name));
+    }
+}
+
+// //// Neoffice — what the mailboxes' signatures and names are, in one number: a change of one changes it (WebShell::ui).
+// Only a hint that something may have changed: `save_kept` writes what this tab changed, or nothing.
+fn kept_fingerprint(session: &Session) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    for a in &session.accounts {
+        (&a.config.email, &a.config.signature, &a.config.signature_html, &a.config.name).hash(&mut h);
+    }
+    h.finish()
 }
 
 // //// Neoffice — each account's id and address, which what is a mailbox's is kept by (hosted.rs).
