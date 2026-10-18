@@ -1030,6 +1030,32 @@ fn craft_fonts_are_the_last_fallbacks() {
     assert_eq!(arabic, crate::craft_fonts::has_script("Arab"));
 }
 
+// //// Neoffice — the browser build's own font, regular and bold (interface_font.rs, maintenance#1673).
+/// Given no font (the browser has none), the interface draws with Karla, whose bold is a font of its own: the bold
+/// family no longer falls back to the regular one. The system's fonts, when given, stay first.
+#[test]
+fn the_interface_font_draws_bold_apart_from_regular() {
+    use crate::interface_font::{KARLA, or_built_in};
+    let (regular, bold) = or_built_in(None, None, Some(&KARLA));
+    assert_eq!((regular.as_deref(), bold.as_deref()), (Some(KARLA.regular), Some(KARLA.bold)));
+    let system = or_built_in(Some(vec![1]), Some(vec![2]), Some(&KARLA));
+    assert_eq!(system, (Some(vec![1]), Some(vec![2])));
+    assert_eq!(or_built_in(None, None, None), (None, None));
+    let licence = KARLA.licence();
+    assert!(licence.starts_with("Copyright 2019 The Karla Project Authors") && licence.contains("SIL OPEN FONT LICENSE Version 1.1"));
+    assert!(!licence.contains("Neoffice"), "the fork's marker line is not part of the licence");
+
+    let ctx = egui::Context::default();
+    // (Karla covers neither Arabic nor Hebrew: the coverage the other tests share stays as they expect it.)
+    crate::theme::install_fonts_with(&ctx, regular, bold, Vec::new(), None);
+    ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+    let width = |font: egui::FontId| ctx.fonts_mut(|f| f.layout_no_wrap("Réunion d’équipe à 14 h".into(), font, egui::Color32::WHITE).size().x);
+    let (plain, strong) = (width(crate::theme::regular(14.0)), width(crate::theme::bold(14.0)));
+    assert!(strong > plain + 1.0, "bold {strong} is not wider than regular {plain}");
+    let french = "àâçéèêëîïôùûüÿœæÀÇÉÈÊÎÔÙŒ«»’…–—€";
+    assert!(ctx.fonts_mut(|f| f.has_glyphs(&crate::theme::bold(14.0), french) && f.has_glyphs(&crate::theme::regular(14.0), french)));
+}
+
 /// A remembered window place is used only when it's sensible: a real size, roughly on a screen.
 #[test]
 fn window_places_open_only_where_they_make_sense() {

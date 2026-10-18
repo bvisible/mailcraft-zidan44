@@ -30,6 +30,8 @@ pub mod craft_fonts;
 mod dialogs;
 pub mod i18n;
 pub mod icons;
+// //// Neoffice — the interface's own font in the browser, regular and bold (maintenance#1673).
+pub mod interface_font;
 mod list;
 // //// Neoffice — the engine's and the network layers' messages in the interface language (toasts, statuses).
 mod messages;
@@ -583,6 +585,9 @@ impl MailApp {
 
     /// Register the UI fonts, preferring an installed system font (call before the first frame).
     pub fn install_fonts(&mut self, ctx: &egui::Context, regular: Option<Vec<u8>>, bold: Option<Vec<u8>>) {
+        // //// Neoffice — given none (the browser has no system font), the interface's own pair: without a bold font
+        // nothing shows bold (interface_font.rs, maintenance#1673).
+        let (regular, bold) = interface_font::or_built_in(regular, bold, interface_font::built_in());
         self.ui.fonts = (regular.clone(), bold.clone());
         bidi::set_coverage(regular.as_deref());
         if !bidi::covers_rtl() {

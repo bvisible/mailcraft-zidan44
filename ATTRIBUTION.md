@@ -11,6 +11,10 @@ the fonts listed in [storytold/craft-fonts](https://github.com/storytold/craft-f
 About page. The app icon files in `assets/app-icon/`
 are rendered by `cargo xtask icons` from MailCraft's own drawing in `xtask/src/icons.rs`.
 
+<!-- //// Neoffice — the browser build draws its interface with Karla (crates/ui-egui/src/interface_font.rs, maintenance#1673). -->
+The browser build draws its interface with Karla, regular and bold (`crates/ui-egui/fonts/karla/`, SIL Open Font
+License 1.1, its text shown on the About page): the browser has no system font to give it a bold.
+
 | Path | Author | Source | Licence |
 |---|---|---|---|
 | `docs/images/reading.png` | MailCraft contributors | Screenshot of MailCraft's own sample mailbox | MIT OR Apache-2.0 |
@@ -28,3 +32,9 @@ are rendered by `cargo xtask icons` from MailCraft's own drawing in `xtask/src/i
 | `assets/app-icon/mailcraft-1024.png` | MailCraft contributors | Rendered by `cargo xtask icons` (`xtask/src/icons.rs`) | MIT OR Apache-2.0 |
 | `assets/app-icon/mailcraft.icns` | MailCraft contributors | Rendered by `cargo xtask icons` (`xtask/src/icons.rs`) | MIT OR Apache-2.0 |
 | `assets/app-icon/mailcraft.ico` | MailCraft contributors | Rendered by `cargo xtask icons` (`xtask/src/icons.rs`) | MIT OR Apache-2.0 |
+
+<!-- //// Neoffice — the browser build's interface font (crates/ui-egui/src/interface_font.rs, maintenance#1673). -->
+| Path | Author | Source | Licence |
+|---|---|---|---|
+| `crates/ui-egui/fonts/karla/Karla-Regular.ttf` | The Karla Project Authors | [googlefonts/karla](https://github.com/googlefonts/karla) v2.004, static Latin instance | OFL-1.1 (`crates/ui-egui/fonts/karla/OFL.txt`) |
+| `crates/ui-egui/fonts/karla/Karla-Bold.ttf` | The Karla Project Authors | [googlefonts/karla](https://github.com/googlefonts/karla) v2.004, static Latin instance | OFL-1.1 (`crates/ui-egui/fonts/karla/OFL.txt`) |

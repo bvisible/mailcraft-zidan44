@@ -669,9 +669,21 @@ fn about(t: &Tokens, ui: &mut Ui, acts: &mut Vec<Action>) {
         acts.push(Action::OpenUrl("https://github.com/ZIDAN44/mailcraft".into()));
     }
     // Fonts built in from craft-fonts travel with their licences.
-    if !crate::craft_fonts::CRAFT_FONTS.is_empty() {
+    // //// Neoffice — and so does the interface's own font of the browser build (interface_font.rs).
+    let interface = crate::interface_font::built_in();
+    if !crate::craft_fonts::CRAFT_FONTS.is_empty() || interface.is_some() {
         ui.add_space(12.0);
         ui.label(RichText::new(tl!("Fonts")).font(theme::bold(14.0)).color(t.text));
+        // //// Neoffice — the interface's own font first, its regular and bold under one licence.
+        if let Some(f) = interface {
+            egui::CollapsingHeader::new(RichText::new(format!("{} · {}", f.family, f.licence)).color(t.dim))
+                .id_salt(("interface-font", f.family))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(220.0).id_salt(("interface-font-licence", f.family)).show(ui, |ui| {
+                        ui.label(RichText::new(f.licence()).small().color(t.dim));
+                    });
+                });
+        }
         for f in crate::craft_fonts::CRAFT_FONTS {
             egui::CollapsingHeader::new(RichText::new(format!("{} {} · {}", f.family, f.style, f.licence)).color(t.dim))
                 .id_salt(("craft-font", f.family, f.style))

@@ -335,6 +335,15 @@ floating time, or one named in a zone the file doesn't describe, is read by its 
 (`ical::parse_floating`, marked in `crates/model/src/ical.rs`; `Session::read_calendar`). Without the rules (a test, a
 service that gives none), today's offset for every date, as before.
 
+### The browser build's own font (maintenance#1673)
+
+The desktop app draws with the system's font and its bold (`install_fonts`); the browser has none to give, and the
+bold family fell back to the regular font: the B of the editor, the unread mail of the list and the headings showed
+nothing bold. The new file `crates/ui-egui/src/interface_font.rs` holds Karla regular and bold (the Neoffice desk's
+font, `crates/ui-egui/fonts/karla/`, about 40 KB each), which `MailApp::install_fonts` installs when it is given no
+font, in the browser build only (`built_in`); the About page shows its licence before the craft-fonts ones (marked
+lines in `backstage.rs`). The licence file carries the fork's header as its first line, left out of what About shows.
+
 ### The engine's messages in the interface language
 
 The engine and the network layers write their messages in English, some with values in them. The toasts
@@ -360,4 +369,8 @@ either catalog that puts a name right after a word it would elide (« La fiche d
 
 ## What cannot carry a comment
 
-Nothing yet: no change to `Cargo.lock`, to an asset or to a catalog (`*.tsv`).
+No change to `Cargo.lock` or to a catalog (`*.tsv`). The fonts the fork adds:
+
+| Binary | Why |
+|---|---|
+| `crates/ui-egui/fonts/karla/*.ttf` | Karla regular and bold, unchanged from googlefonts/karla v2.004: the browser build's interface font (see « The browser build's own font ») |
