@@ -26,9 +26,9 @@ pub fn keeps(sample: bool, hosted: bool) -> Keeps {
     Keeps { settings: !sample, files: !sample && !hosted }
 }
 
-/// A signature (or a name shown on mail) as a mailbox has it here: its text, and its look when one was given it here
-/// (MailCraft's own HTML, since signatures have one; empty when plain, as a name always is). What the page gives is
-/// text: MailCraft does not read Neoffice's look (its editor's paragraphs would come out double-spaced).
+/// A signature (or a name shown on mail) as a mailbox has it here: its text, and its look (MailCraft's own HTML, since
+/// signatures have one; empty when plain, as a name always is). The page's signature comes with the look Neoffice's
+/// editor gave it, read line for line (`page_signature`, maintenance#1670).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Shown {
     pub text: String,
@@ -50,17 +50,42 @@ pub struct Kept {
 }
 
 /// Whether the one made here still stands: the page still gives the one it replaced (one changed in Neoffice since is
-/// Neoffice's).
-fn stands(page: &str, k: &Kept) -> bool {
-    k.base.trim() == page.trim()
+/// Neoffice's). By its words, not its HTML: the instance may write the same signature's HTML anew.
+fn stands(page: &Shown, k: &Kept) -> bool {
+    k.base.trim() == page.text.trim()
 }
 
 /// The signature (or name) a mailbox starts with: the one made here while it stands, else the page's.
-pub fn chosen(page: &str, kept: Option<&Kept>) -> Shown {
+pub fn chosen(page: &Shown, kept: Option<&Kept>) -> Shown {
     match kept {
         Some(k) if stands(page, k) => k.made.clone(),
-        _ => Shown::plain(page),
+        _ => page.clone(),
     }
+}
+
+/// The longest look of a page's signature read, in characters, as the instance counts them (it hands at most 200 000).
+const MAX_PAGE_LOOK: usize = 200_000;
+
+/// The page's signature as a mailbox shows it: its words as the page gives them (what a change in Neoffice is told by),
+/// and the look Neoffice's editor gave it, as MailCraft's own HTML (`mime::neoffice_signature`: a line per paragraph,
+/// a table as lines, no picture). No look when its HTML says no words (a picture alone), has no formatting (the words
+/// are then the page's), or is too long to read. The look is the one MailCraft's signature editor writes back for it,
+/// read and written once more: a Save that changed nothing gives that very HTML, and `keep` finds nothing made here.
+pub fn page_signature(text: &str, html: &str) -> Shown {
+    use mailcraft_engine::mime::{neoffice_signature, pasted_html, rich};
+    let html = html.trim();
+    if html.is_empty() || html.chars().nth(MAX_PAGE_LOOK).is_some() {
+        return Shown::plain(text);
+    }
+    let (words, styles) = neoffice_signature(html);
+    if words.trim().is_empty() || styles.is_plain() {
+        return Shown::plain(text);
+    }
+    let (words, styles) = pasted_html(&rich::to_html(&words, &styles));
+    if words.trim().is_empty() || styles.is_plain() {
+        return Shown::plain(text);
+    }
+    Shown { text: text.to_string(), html: rich::to_html(&words, &styles) }
 }
 
 /// What a tab knows of a mailbox's signature (or name), to tell its own changes (`changes`).
@@ -74,9 +99,11 @@ pub enum Seen {
 }
 
 /// What a tab starts from for a mailbox.
-pub fn seen(page: &str, kept: Option<&Kept>) -> Seen {
+pub fn seen(page: &Shown, kept: Option<&Kept>) -> Seen {
     match kept {
-        Some(k) if !stands(page, k) => Seen::Stale(k.clone()),
+        // //// Neoffice — one that no longer stands, or that is the page's after all (kept before a page's look was told
+        // by itself, maintenance#1670): cleared once, by the first save.
+        Some(k) if !stands(page, k) || keep(page, &k.made).is_none() => Seen::Stale(k.clone()),
         _ => Seen::Was(chosen(page, kept)),
     }
 }
@@ -93,7 +120,7 @@ pub struct Change {
 
 /// What a tab changed since it last looked (`seen`): `now` gives each of its mailboxes (address in lower case, the
 /// page's, what it has now). Nothing for one unchanged, so that a tab writes only its own changes.
-pub fn changes(now: &[(String, String, Shown)], seen: &HashMap<String, Seen>) -> Vec<Change> {
+pub fn changes(now: &[(String, Shown, Shown)], seen: &HashMap<String, Seen>) -> Vec<Change> {
     let mut out = Vec::new();
     for (email, page, current) in now {
         let only_over = match seen.get(email) {
@@ -118,10 +145,15 @@ pub fn fingerprint<'a>(mailboxes: impl Iterator<Item = [&'a str; 4]>) -> u64 {
 }
 
 /// What to keep of a mailbox's signature (or name), `current`, now that the page gives `page`: nothing while it is the
-/// page's, its words and no look of its own.
-pub fn keep(page: &str, current: &Shown) -> Option<Kept> {
-    let pages = current.text.trim() == page.trim() && current.html.trim().is_empty();
-    (!pages).then(|| Kept { made: current.clone(), base: page.to_string() })
+/// page's. A page's signature with a look is told by its look alone, since MailCraft takes a formatted signature's words
+/// from its look (they may differ from the page's text: a link's address, a list's bullets); one without, by its words.
+pub fn keep(page: &Shown, current: &Shown) -> Option<Kept> {
+    let pages = if page.html.trim().is_empty() {
+        current.text.trim() == page.text.trim() && current.html.trim().is_empty()
+    } else {
+        current.html.trim() == page.html.trim()
+    };
+    (!pages).then(|| Kept { made: current.clone(), base: page.text.clone() })
 }
 
 /// What is kept under a key: by address (lower case), `{ text, base }`, and `html` for a look (none in what was kept
@@ -176,65 +208,153 @@ mod tests {
 
     #[test]
     fn a_signature_made_here_stays_until_neoffice_s_changes() {
-        let page = "Jeanne Muster\nAccounts";
+        let page = Shown::plain("Jeanne Muster\nAccounts");
         // None made here: the page's, which nothing needs to keep.
-        assert_eq!(chosen(page, None), Shown::plain(page));
-        assert_eq!(keep(page, &Shown::plain(page)), None);
+        assert_eq!(chosen(&page, None), page);
+        assert_eq!(keep(&page, &page), None);
         // Made here: kept with the page's it replaced, and taken at the next visit while the page gives that one.
         let mine = Shown::plain("Jeanne\nHead of accounts");
-        let kept = keep(page, &mine).unwrap();
-        assert_eq!(kept, Kept { made: mine.clone(), base: page.into() });
-        assert_eq!(chosen(page, Some(&kept)), mine);
-        assert_eq!(seen(page, Some(&kept)), Seen::Was(mine));
+        let kept = keep(&page, &mine).unwrap();
+        assert_eq!(kept, Kept { made: mine.clone(), base: page.text.clone() });
+        assert_eq!(chosen(&page, Some(&kept)), mine);
+        assert_eq!(seen(&page, Some(&kept)), Seen::Was(mine));
         // Changed in Neoffice since: Neoffice's, and the one made here goes at the next save.
-        let changed = "Jeanne Muster\nFinance";
-        assert_eq!(chosen(changed, Some(&kept)), Shown::plain(changed));
-        assert_eq!(seen(changed, Some(&kept)), Seen::Stale(kept.clone()));
-        assert_eq!(seen(changed, None), Seen::Was(Shown::plain(changed)));
-        assert_eq!(keep(changed, &Shown::plain(changed)), None);
+        let changed = Shown::plain("Jeanne Muster\nFinance");
+        assert_eq!(chosen(&changed, Some(&kept)), changed);
+        assert_eq!(seen(&changed, Some(&kept)), Seen::Stale(kept.clone()));
+        assert_eq!(seen(&changed, None), Seen::Was(changed.clone()));
+        assert_eq!(keep(&changed, &changed), None);
         // A mailbox the page gives no signature for: one made here is kept as well.
-        let made = keep("", &Shown::plain("J. M.")).unwrap();
-        assert_eq!(chosen("", Some(&made)), Shown::plain("J. M."));
+        let made = keep(&Shown::default(), &Shown::plain("J. M.")).unwrap();
+        assert_eq!(chosen(&Shown::default(), Some(&made)), Shown::plain("J. M."));
     }
 
     #[test]
     fn a_look_given_here_is_kept_with_the_words_of_the_page() {
-        let page = "Jeanne Muster\nAccounts";
-        let mut styles = mailcraft_engine::mime::rich::Styles::plain(page);
+        let page = Shown::plain("Jeanne Muster\nAccounts");
+        let mut styles = mailcraft_engine::mime::rich::Styles::plain(&page.text);
         let bold = styles.intern(mailcraft_engine::mime::rich::Style { bold: true, ..Default::default() });
         for c in styles.chars.iter_mut().take(13) {
             *c = bold;
         }
-        let look = Shown { text: page.into(), html: mailcraft_engine::mime::rich::to_html(page, &styles) };
+        let look = Shown { text: page.text.clone(), html: mailcraft_engine::mime::rich::to_html(&page.text, &styles) };
         // The same words, made bold here: kept, look and all, and taken at the next visit.
-        let kept = keep(page, &look).unwrap();
-        assert_eq!(chosen(page, Some(&kept)), look);
+        let kept = keep(&page, &look).unwrap();
+        assert_eq!(chosen(&page, Some(&kept)), look);
         // MailCraft reads its own look back line for line: no line comes out double-spaced.
-        assert_eq!(mailcraft_engine::mime::pasted_html(&look.html).0, page);
+        assert_eq!(mailcraft_engine::mime::pasted_html(&look.html).0, page.text);
         // Plain again: the page's, nothing kept.
-        assert_eq!(keep(page, &Shown::plain(page)), None);
+        assert_eq!(keep(&page, &page), None);
+    }
+
+    // //// Neoffice — the page's signature with the look Neoffice's editor gave it (maintenance#1670).
+    #[test]
+    fn the_page_s_signature_shows_with_its_look_and_is_told_by_its_words() {
+        let html = "<div class=\"ql-editor read-mode\"><p><strong>Jeanne Muster</strong></p><p>Accounts</p></div>";
+        let page = page_signature("Jeanne Muster\nAccounts", html);
+        assert_eq!(page.text, "Jeanne Muster\nAccounts");
+        // Its look, read back line for line (not double-spaced), the name in bold.
+        let (words, styles) = mailcraft_engine::mime::pasted_html(&page.html);
+        assert_eq!(words, "Jeanne Muster\nAccounts");
+        assert!(styles.style(0).bold && !styles.style(words.chars().count() - 1).bold);
+        // The page's, look and all: nothing to keep; a look made here over the same words is kept.
+        assert_eq!(keep(&page, &page), None);
+        let plainer = Shown::plain("Jeanne Muster\nAccounts");
+        assert_eq!(keep(&page, &plainer), Some(Kept { made: plainer.clone(), base: page.text.clone() }));
+        // Told by its words: the same words with another look given in Neoffice still stand; other words do not.
+        let kept = keep(&page, &plainer).unwrap();
+        let rewritten = page_signature("Jeanne Muster\nAccounts", "<p><em>Jeanne Muster</em></p><p>Accounts</p>");
+        assert_ne!(rewritten.html, page.html);
+        assert_eq!(chosen(&rewritten, Some(&kept)), plainer);
+        let changed = page_signature("Jeanne Muster\nFinance", "<p>Jeanne Muster</p><p>Finance</p>");
+        assert_eq!(chosen(&changed, Some(&kept)), changed);
+        // No look from no HTML, HTML without formatting, a picture alone, or too much of it.
+        assert_eq!(page_signature("J. M.", ""), Shown::plain("J. M."));
+        assert_eq!(page_signature("J. M.\nAccounts", "<p>J. M.</p><p>Accounts</p>"), Shown::plain("J. M.\nAccounts"));
+        assert_eq!(page_signature("", "<p><img src=\"/private/files/logo.png\"></p>"), Shown::plain(""));
+        assert_eq!(page_signature("J. M.", &"<p>x</p>".repeat(30_000)), Shown::plain("J. M."));
+    }
+
+    // //// Neoffice — a Save that changed nothing keeps nothing (maintenance#1670).
+    /// The signature editor opened and saved without a change gives the page's signature back, so nothing is kept as
+    /// made here, and a change of its look in Neoffice still reaches NeoMail. A real change is kept.
+    #[test]
+    fn a_save_that_changed_nothing_keeps_nothing() {
+        use mailcraft_engine::{Session, mime::rich, model::AccountConfig, model::dates::Clock, store::Store};
+        let after_save = |page: &Shown, change: Option<&str>| -> Shown {
+            let store = Store::memory();
+            let config = AccountConfig {
+                id: "a1".into(),
+                email: "jeanne@example.ch".into(),
+                signature: page.text.clone(),
+                signature_html: page.html.clone(),
+                ..AccountConfig::default()
+            };
+            store.save_accounts(&[config]).unwrap();
+            let mut session = Session::open(Some(store), Clock::new(0, 0));
+            // As the signature editor opens it, and what its Save sends (crates/ui-egui/src/dialogs.rs).
+            let (mut text, mut styles) = session.signature_rich("a1");
+            if let Some(more) = change {
+                let end = text.chars().count();
+                rich::splice(&mut text, &mut styles, end..end, more, &rich::Styles::plain(more));
+            }
+            let text = text.trim_end().to_string();
+            styles.fit(&text);
+            let html = if styles.is_plain() { None } else { Some(rich::to_html(&text, &styles)) };
+            session.run("account.setSignature", &serde_json::json!({"account": "a1", "signature": text, "html": html})).unwrap();
+            let config = &session.account("a1").unwrap().config;
+            Shown { text: config.signature.clone(), html: config.signature_html.clone() }
+        };
+        let plain = page_signature("Jeanne Muster\nAccounts", "<p>Jeanne Muster</p><p>Accounts</p>");
+        assert_eq!(keep(&plain, &after_save(&plain, None)), None);
+        // A bold name, an empty line, and links whose words are not their address (the page's text says « LinkedIn
+        // <https://…> », the look « LinkedIn »).
+        let html = "<div class=\"ql-editor read-mode\"><p><strong>Jeanne Muster</strong></p><p><br></p>\
+<p><a href=\"https://www.linkedin.com/in/jeanne\">LinkedIn</a> · <a href=\"https://www.example.ch\">www.example.ch</a></p></div>";
+        let look = page_signature("Jeanne Muster\n\nLinkedIn <https://www.linkedin.com/in/jeanne> · www.example.ch", html);
+        assert!(!look.html.is_empty());
+        assert_eq!(keep(&look, &after_save(&look, None)), None);
+        assert!(keep(&look, &after_save(&look, Some("\nAccounts"))).is_some(), "a real change is kept");
+        assert!(keep(&plain, &after_save(&plain, Some(" (CFO)"))).is_some(), "a real change is kept");
+    }
+
+    // //// Neoffice — an entry that is the page's after all goes (maintenance#1670).
+    /// Kept before a page's look was told by itself, an entry may be the page's signature, look and all: it hid later
+    /// changes of the look in Neoffice. It is cleared by the first save, that very entry only.
+    #[test]
+    fn an_entry_that_is_the_page_s_is_cleared_once() {
+        let page = page_signature("Jeanne Muster", "<p><strong>Jeanne Muster</strong></p>");
+        let same = Kept { made: page.clone(), base: page.text.clone() };
+        assert_eq!(seen(&page, Some(&same)), Seen::Stale(same.clone()));
+        let email = "jeanne@example.ch".to_string();
+        let at_start: HashMap<String, Seen> = HashMap::from([(email.clone(), seen(&page, Some(&same)))]);
+        let cleared = changes(&[(email, page.clone(), page.clone())], &at_start);
+        assert_eq!((cleared[0].kept.clone(), cleared[0].only_over.clone()), (None, Some(same)));
+        // One really made here stays.
+        let mine = Kept { made: Shown::plain("J. M."), base: page.text.clone() };
+        assert_eq!(seen(&page, Some(&mine)), Seen::Was(Shown::plain("J. M.")));
     }
 
     #[test]
     fn a_tab_writes_only_what_it_changed() {
-        let page = "Jeanne Muster";
+        let page = Shown::plain("Jeanne Muster");
         let email = "jeanne@example.ch".to_string();
-        let mut seen_now: HashMap<String, Seen> = HashMap::from([(email.clone(), seen(page, None))]);
+        let mut seen_now: HashMap<String, Seen> = HashMap::from([(email.clone(), seen(&page, None))]);
         // Started with the page's and nothing changed: nothing to write.
-        assert!(changes(&[(email.clone(), page.into(), Shown::plain(page))], &seen_now).is_empty());
+        assert!(changes(&[(email.clone(), page.clone(), page.clone())], &seen_now).is_empty());
         // Changed here: one change, kept with the page's it replaced.
         let mine = Shown::plain("J. M.");
-        let made = changes(&[(email.clone(), page.into(), mine.clone())], &seen_now);
+        let made = changes(&[(email.clone(), page.clone(), mine.clone())], &seen_now);
         assert_eq!(made.len(), 1);
-        assert_eq!(made[0].kept, Some(Kept { made: mine.clone(), base: page.into() }));
+        assert_eq!(made[0].kept, Some(Kept { made: mine.clone(), base: page.text.clone() }));
         assert_eq!(made[0].only_over, None);
         // Once written, the same again is nothing.
         seen_now.insert(email.clone(), Seen::Was(made[0].now.clone()));
-        assert!(changes(&[(email.clone(), page.into(), mine)], &seen_now).is_empty());
+        assert!(changes(&[(email.clone(), page.clone(), mine)], &seen_now).is_empty());
         // What no longer stood at the start: cleared once, that very entry only.
         let stale = Kept { made: Shown::plain("Old"), base: "Jeanne Muster\nAccounts".into() };
-        let at_start: HashMap<String, Seen> = HashMap::from([(email.clone(), seen(page, Some(&stale)))]);
-        let cleared = changes(&[(email.clone(), page.into(), Shown::plain(page))], &at_start);
+        let at_start: HashMap<String, Seen> = HashMap::from([(email.clone(), seen(&page, Some(&stale)))]);
+        let cleared = changes(&[(email.clone(), page.clone(), page.clone())], &at_start);
         assert_eq!((cleared[0].kept.clone(), cleared[0].only_over.clone()), (None, Some(stale)));
     }
 

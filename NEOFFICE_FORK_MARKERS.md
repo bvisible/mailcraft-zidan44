@@ -112,8 +112,14 @@ and the desktop app, behave as upstream, except where a section says otherwise.
   load, the conversations ignored, the follow-up dates, the senders moved in or out of Focused), and what is a
   mailbox's (its calendars hidden, its favourite folders, what is collapsed of it) by its address rather than its place
   (new file `crates/ui-egui/src/hosted.rs`, `saved_settings`, `restored_settings`). Each mailbox's signature is the
-  one the page gives (`signature: { html, text }`, optional: its text, else its HTML made text), and so is the name
-  shown on its mail; one made or changed in NeoMail is kept with the settings (`mailcraft.signatures`,
+  one the page gives (`signature: { html, text }`, optional), its words telling it from another and its look read
+  from Neoffice's editor line for line (`kept::page_signature`, maintenance#1670: in `crates/mime/src/lib.rs` the added
+  `neoffice_signature` and `tables_as_lines`, and `paragraphs_as_lines`, Word's rule of `word_paragraphs` taken out
+  of its test for Word; a table reads as lines, a picture is left out; a signature without formatting stays text,
+  and a formatted one is told by its look alone, so that a Save that changed nothing keeps nothing; in
+  `crates/mime/src/rich.rs`, `to_text` writes no link address after words that say it, `said_by`, as the webmail
+  reads a signature); and so is the name shown on its mail; one made or changed in NeoMail is kept with the
+  settings (`mailcraft.signatures`,
   `mailcraft.names`, by address) until NeoMail writes it to Neoffice, as long as the page still gives the one it
   replaced (one changed in Neoffice since is Neoffice's). A change of one is written at the frame it happens, not at
   eframe's next save (every 10 s, or when the page loses the focus): a page that died first lost it (maintenance#1671).

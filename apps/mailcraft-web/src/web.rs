@@ -145,10 +145,10 @@ pub fn start() {
                     }
                     // //// Neoffice — with the host's mailboxes, the settings only (kept.rs), and what the page gave each
                     // mailbox for a signature and a name, to tell one made here.
-                    let page_signatures: std::collections::HashMap<String, String> =
+                    let page_signatures: std::collections::HashMap<String, crate::kept::Shown> =
                         host.iter().map(|a| (a.email.to_lowercase(), a.signature.clone())).collect();
-                    let page_names: std::collections::HashMap<String, String> =
-                        host.iter().map(|a| (a.email.to_lowercase(), a.name.clone())).collect();
+                    let page_names: std::collections::HashMap<String, crate::kept::Shown> =
+                        host.iter().map(|a| (a.email.to_lowercase(), crate::kept::Shown::plain(&a.name))).collect();
                     // What each starts with in this tab, to tell what this tab changed (kept.rs, `seen`).
                     let seen_signatures = seen_from(&page_signatures, &kept_texts(cc.storage, SIGNATURES_KEY));
                     let seen_names = seen_from(&page_names, &kept_texts(cc.storage, NAMES_KEY));
@@ -214,8 +214,8 @@ struct WebShell {
     // //// Neoffice — a hosting page's mailboxes: the settings are kept, and the signatures made here; never mail,
     // accounts or secrets (kept.rs). What the page gave each for a signature (by address, lower case).
     hosted: bool,
-    page_signatures: std::collections::HashMap<String, String>,
-    page_names: std::collections::HashMap<String, String>,
+    page_signatures: std::collections::HashMap<String, crate::kept::Shown>,
+    page_names: std::collections::HashMap<String, crate::kept::Shown>,
     // What this tab knows of each mailbox's signature and name, to tell its own changes (kept.rs, `Seen`).
     seen_signatures: std::collections::HashMap<String, crate::kept::Seen>,
     seen_names: std::collections::HashMap<String, crate::kept::Seen>,
@@ -332,7 +332,7 @@ fn kept_texts(storage: Option<&dyn eframe::Storage>, key: &str) -> std::collecti
 
 // //// Neoffice — what each mailbox starts with in this tab (kept.rs, `seen`), by address.
 fn seen_from(
-    page: &std::collections::HashMap<String, String>,
+    page: &std::collections::HashMap<String, crate::kept::Shown>,
     kept: &std::collections::HashMap<String, crate::kept::Kept>,
 ) -> std::collections::HashMap<String, crate::kept::Seen> {
     page.iter().map(|(email, given)| (email.clone(), crate::kept::seen(given, kept.get(email)))).collect()
@@ -346,11 +346,11 @@ fn save_kept(
     storage: &mut dyn eframe::Storage,
     key: &str,
     session: &Session,
-    page: &std::collections::HashMap<String, String>,
+    page: &std::collections::HashMap<String, crate::kept::Shown>,
     seen: &mut std::collections::HashMap<String, crate::kept::Seen>,
     of: impl Fn(&mailcraft_engine::model::AccountConfig) -> crate::kept::Shown,
 ) {
-    let now: Vec<(String, String, crate::kept::Shown)> = session
+    let now: Vec<(String, crate::kept::Shown, crate::kept::Shown)> = session
         .accounts
         .iter()
         .filter_map(|a| {

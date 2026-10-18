@@ -340,6 +340,14 @@ fn word_paragraphs(html: &str) -> String {
     if !lower.contains("mso") {
         return html.to_string();
     }
+    // //// Neoffice — Word's loop, now `paragraphs_as_lines`, which a signature of Neoffice's editor uses too (#1670).
+    paragraphs_as_lines(html)
+}
+
+// //// Neoffice — Word's rule, `<p>` as `<div>`, without its test for Word: Neoffice's editor (Quill) writes a paragraph
+// per line too, whether or not its `ql-editor` wrapper was kept (`neoffice_signature`, maintenance#1670).
+fn paragraphs_as_lines(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
     let mut i = 0;
     while let Some(off) = lower.get(i..).and_then(|rest| rest.find('<')) {
@@ -353,6 +361,51 @@ fn word_paragraphs(html: &str) -> String {
         } else if tag.starts_with("</p") && after(3) {
             out.push_str("</div");
             i = at + 3;
+        } else {
+            out.push('<');
+            i = at + 1;
+        }
+    }
+    out.push_str(html.get(i..).unwrap_or(""));
+    out
+}
+
+// //// Neoffice — added function (maintenance#1670): a signature written in Neoffice's editor (Quill), which the hosting
+// page hands with its look. Its paragraphs are lines, as Word's are; a table of it (a logo beside the lines of who
+// signs) reads as its rows, each a line of its cells, not as a grid of characters; its pictures are left out, as from
+// any pasted signature (they are files of the instance). The rest is `pasted_html`.
+pub fn neoffice_signature(html: &str) -> (String, rich::Styles) {
+    pasted_html(&tables_as_lines(&paragraphs_as_lines(html)))
+}
+
+// //// Neoffice — a table's rows as lines and its cells side by side (`neoffice_signature`): `<table>`, its row groups and
+// rows become `<div>`, a cell a `<span>` followed by a space, as the instance's own reading of a signature does
+// (frappe_webmail, signature_text).
+fn tables_as_lines(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(off) = lower.get(i..).and_then(|rest| rest.find('<')) {
+        let at = i + off;
+        out.push_str(html.get(i..at).unwrap_or(""));
+        let tag = lower.get(at..).unwrap_or("");
+        let named = |name: &str| {
+            tag.strip_prefix(name).is_some_and(|rest| rest.as_bytes().first().is_none_or(|c| c.is_ascii_whitespace() || matches!(c, b'>' | b'/')))
+        };
+        let (open, close) = (["<table", "<tbody", "<thead", "<tfoot", "<tr"], ["</table", "</tbody", "</thead", "</tfoot", "</tr"]);
+        if let Some(name) = open.iter().find(|n| named(n)) {
+            out.push_str("<div");
+            i = at + name.len();
+        } else if let Some(name) = close.iter().find(|n| named(n)) {
+            out.push_str("</div");
+            i = at + name.len();
+        } else if let Some(name) = ["<td", "<th"].iter().find(|n| named(n)) {
+            out.push_str("<span");
+            i = at + name.len();
+        } else if let Some(name) = ["</td", "</th"].iter().find(|n| named(n)) {
+            // A space before the cell's end: the next cell's words come after it. The rest of the tag is copied as it is.
+            out.push_str(" </span");
+            i = at + name.len();
         } else {
             out.push('<');
             i = at + 1;
@@ -1204,6 +1257,33 @@ mod tests {
         assert_eq!(pasted_html("<P CLASS=MsoNormal>a</P><pre class=MsoNormal>b</pre>").0.matches('a').count(), 1);
         assert!(pasted_html("").0.is_empty());
         assert!(pasted_html("<img src=\"https://x.example/a.png\">").0.is_empty());
+    }
+
+    // //// Neoffice — a signature written in Neoffice's editor, as the hosting page hands it (maintenance#1670).
+    /// Frappe's editor (Quill) writes a paragraph per line, an empty line as `<p><br></p>`, and may keep its
+    /// `ql-editor` wrapper; a table (a logo beside the lines of who signs) reads as lines, not as a grid.
+    #[test]
+    fn a_signature_of_neoffice_s_editor_reads_line_for_line() {
+        let html = "<div class=\"ql-editor read-mode\"><p><strong>Jeanne Muster</strong></p><p>Comptabilit\u{e9}</p>\
+<p><br></p><p>T\u{e9}l. 021 000 00 00</p><p><a href=\"https://www.example.ch\" rel=\"noopener noreferrer\">www.example.ch</a></p></div>";
+        let (text, styles) = neoffice_signature(html);
+        assert_eq!(text, "Jeanne Muster\nComptabilit\u{e9}\n\nT\u{e9}l. 021 000 00 00\nwww.example.ch", "{text:?}");
+        let at = |needle: &str| styles.style(text.find(needle).map(|b| text[..b].chars().count()).unwrap());
+        assert!(at("Jeanne").bold && !at("Comptab").bold);
+        assert_eq!(at("www.example").link.as_deref(), Some("https://www.example.ch"));
+        // Without the wrapper (a signature saved by the API), the same lines.
+        assert_eq!(neoffice_signature("<p>Jeanne Muster</p><p>Comptabilit\u{e9}</p>").0, "Jeanne Muster\nComptabilit\u{e9}");
+        // A table: the picture left out, each row a line of its cells.
+        let table = "<div class=\"ql-editor read-mode\"><table class=\"table table-bordered\"><tbody><tr>\
+<td data-row=\"row-1\"><img src=\"/private/files/logo.png\"></td><td data-row=\"row-1\"><p>Jeanne Muster</p><p>Comptabilit\u{e9}</p></td>\
+</tr><tr><td data-row=\"row-2\">T\u{e9}l.</td><td data-row=\"row-2\">021 000 00 00</td></tr></tbody></table></div>";
+        let (lines, _) = neoffice_signature(table);
+        let lines: Vec<&str> = lines.split('\n').map(str::trim).collect();
+        assert!(lines.contains(&"Jeanne Muster") && lines.contains(&"Comptabilit\u{e9}"), "{lines:?}");
+        assert!(lines.contains(&"T\u{e9}l. 021 000 00 00"), "the cells of a row, one space apart: {lines:?}");
+        assert!(!lines.iter().any(|l| l.contains('\u{2502}') || l.contains('\u{2500}') || l.contains("logo")), "no grid, no picture: {lines:?}");
+        // Upstream's reading of other HTML is unchanged.
+        assert_eq!(pasted_html("<p>Riley</p><p>Studio</p>").0, "Riley\n\nStudio");
     }
 
     const SIMPLE: &[u8] = b"From: Zoe Park <zoe@studio.example>\r\n\

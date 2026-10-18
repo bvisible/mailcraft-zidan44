@@ -13,17 +13,15 @@ workspace = true
 name = "mailcraft-web"
 path = "src/main.rs"
 
-# //// Neoffice — serde_json on every target: what is kept between visits with a hosting page's mailboxes is read and
-# written by kept.rs, which is built natively too, for its tests; and those tests read MailCraft's own signature look
-# back (mailcraft-engine's mime).
+# //// Neoffice — serde_json and mailcraft-engine on every target: what is kept between visits with a hosting page's
+# mailboxes is read and written by kept.rs, which is built natively too, for its tests, and reads the page's signature
+# with mailcraft-engine's mime (page_signature, maintenance#1670).
 [dependencies]
 serde_json = { workspace = true }
-
-[dev-dependencies]
 mailcraft-engine = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-mailcraft-engine = { workspace = true }
+# //// Neoffice — mailcraft-engine is a dependency on every target now (above).
 mailcraft-jmap = { workspace = true }
 mailcraft-ui-egui = { workspace = true }
 egui = { workspace = true }

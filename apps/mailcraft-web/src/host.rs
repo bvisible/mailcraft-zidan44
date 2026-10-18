@@ -58,8 +58,8 @@ pub struct HostAccount {
     pub username: String,
     pub secret: String,
     pub bearer: bool,
-    /// Its signature in Neoffice, as text (empty: none given).
-    pub signature: String,
+    /// Its signature in Neoffice: its words, and the look Neoffice's editor gave it (kept.rs, `page_signature`).
+    pub signature: crate::kept::Shown,
 }
 
 fn get(target: &JsValue, key: &str) -> Option<JsValue> {
@@ -88,7 +88,7 @@ fn windows() -> Vec<JsValue> {
 /// The mailboxes handed over, the incomplete ones left out (at most 20).
 pub fn accounts() -> Vec<HostAccount> {
     let Some(host) = windows().iter().find_map(|w| get(w, "mailcraftJmap").filter(JsValue::is_object)) else { return Vec::new() };
-    parse(&host)
+    parse(&host, true)
 }
 
 /// The hosting page's answer to `mailcraftJmapRenew()`.
@@ -112,7 +112,8 @@ pub async fn renew() -> Option<Renewed> {
     let answer = JsFuture::from(js_sys::Promise::resolve(&promise)).await.ok()?;
     let list = get(&answer, "accounts").filter(js_sys::Array::is_array)?;
     let named = js_sys::Array::from(&list).iter().take(20).map(|item| text(&item, "email").to_lowercase()).filter(|e| e.contains('@')).collect();
-    Some(Renewed { accounts: parse(&answer), named })
+    // //// Neoffice — a renewal brings new secrets only: the signatures it hands again are not read (maintenance#1670).
+    Some(Renewed { accounts: parse(&answer, false), named })
 }
 
 /// A picture a message links to, fetched by the hosting page's `window.mailcraftFetchUrl(url)` (a promise of
@@ -168,8 +169,12 @@ fn query_param(key: &str) -> Option<String> {
     web_sys::UrlSearchParams::new_with_str(&search).ok()?.get(key)
 }
 
-/// The complete mailboxes of `{ accounts: [...] }` (at most 20).
-fn parse(host: &JsValue) -> Vec<HostAccount> {
+/// The complete mailboxes of `{ accounts: [...] }` (at most 20), with their signatures when `signatures` (not for a
+/// renewal, which brings new secrets only).
+// //// Neoffice — `signatures`, and each distinct signature read once: the instance hands the person's own to every
+// mailbox without one of its own (maintenance#1670).
+fn parse(host: &JsValue, signatures: bool) -> Vec<HostAccount> {
+    let mut read: HashMap<(String, String), crate::kept::Shown> = HashMap::new();
     let Some(list) = get(host, "accounts").filter(js_sys::Array::is_array) else { return Vec::new() };
     let mut out: Vec<HostAccount> = Vec::new();
     for item in js_sys::Array::from(&list).iter().take(20) {
@@ -180,7 +185,7 @@ fn parse(host: &JsValue) -> Vec<HostAccount> {
             username: text(&item, "username"),
             secret: text(&item, "secret"),
             bearer: text(&item, "scheme").eq_ignore_ascii_case("bearer"),
-            signature: get(&item, "signature").map(|s| signature(&s)).unwrap_or_default(),
+            signature: get(&item, "signature").filter(|_| signatures).map(|s| signature(&s, &mut read)).unwrap_or_default(),
         };
         let complete = account.email.contains('@') && account.session.starts_with("https://") && !account.secret.is_empty();
         if complete && !out.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
@@ -190,12 +195,14 @@ fn parse(host: &JsValue) -> Vec<HostAccount> {
     out
 }
 
-/// A mailbox's signature as the page gives it (`{ html, text }`): its text, at most MAX_SIGNATURE_CHARS characters. Its
-/// look is not read: Neoffice's editor writes a paragraph per line, which MailCraft would read double-spaced (kept.rs).
-/// A signature that is only a picture comes with no text, and gives none here (its picture's name is not a signature).
-fn signature(given: &JsValue) -> String {
-    let plain = get(given, "text").and_then(|v| v.as_string()).unwrap_or_default();
-    plain.trim().chars().take(MAX_SIGNATURE_CHARS).collect()
+/// A mailbox's signature as the page gives it (`{ html, text }`): its text, at most MAX_SIGNATURE_CHARS characters, which
+/// tells it from another; and its look, read from Neoffice's editor line for line (kept.rs, `page_signature`,
+/// maintenance#1670). A signature that is only a picture comes with no text, and gives none here (its picture's name is
+/// not a signature).
+fn signature(given: &JsValue, read: &mut HashMap<(String, String), crate::kept::Shown>) -> crate::kept::Shown {
+    let plain: String = get(given, "text").and_then(|v| v.as_string()).unwrap_or_default().trim().chars().take(MAX_SIGNATURE_CHARS).collect();
+    let html = get(given, "html").and_then(|v| v.as_string()).unwrap_or_default();
+    read.entry((plain, html)).or_insert_with_key(|(plain, html)| crate::kept::page_signature(plain, html)).clone()
 }
 
 /// The product's name the person reads (Neoffice's "NeoMail"), if the page gives one.
@@ -223,7 +230,7 @@ pub fn store(accounts: &[HostAccount], signatures: &HashMap<String, crate::kept:
             let signature = crate::kept::chosen(&a.signature, signatures.get(&a.email.to_lowercase()));
             AccountConfig {
                 id: format!("a{}", i + 1),
-                name: crate::kept::chosen(&a.name, names.get(&a.email.to_lowercase())).text,
+                name: crate::kept::chosen(&crate::kept::Shown::plain(&a.name), names.get(&a.email.to_lowercase())).text,
                 email: a.email.clone(),
                 username: if a.username.is_empty() { a.email.clone() } else { a.username.clone() },
                 jmap: Some(a.session.clone()),

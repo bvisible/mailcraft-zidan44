@@ -289,6 +289,22 @@ fn hex(c: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
+// //// Neoffice — added function (maintenance#1670): whether a link's words say its address, as Neoffice's webmail reads
+// it (frappe_webmail, `_bare_address`): one of the words, bared as the address is (no scheme, no leading `www.`, no
+// final slash, any case; the punctuation around a word left out), is the address. A whole word, not a part of one: «
+// x.com » does not say https://x.co.
+fn said_by(address: &str, words: &str) -> bool {
+    fn bare(s: &str) -> String {
+        let lower = s.trim().to_lowercase();
+        let scheme = lower.find("://").filter(|&i| i > 0 && lower.get(..i).is_some_and(|s| s.bytes().all(|b| b.is_ascii_lowercase())));
+        let rest = scheme.and_then(|i| lower.get(i + 3..)).unwrap_or(&lower);
+        rest.strip_prefix("www.").unwrap_or(rest).trim_end_matches('/').to_string()
+    }
+    let address = bare(address);
+    let around = |c: char| matches!(c, '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | '«' | '»' | ',' | ';' | ':' | '!' | '?' | '.');
+    !address.is_empty() && words.split_whitespace().any(|word| bare(word.trim_matches(around)) == address)
+}
+
 fn safe_link(u: &str) -> bool {
     let l = u.trim().to_ascii_lowercase();
     (l.starts_with("https://") || l.starts_with("http://") || l.starts_with("mailto:")) && !u.contains(['"', '<', '>'])
@@ -440,7 +456,9 @@ pub fn to_text(text: &str, styles: &Styles) -> String {
             }
             let run: String = chars.get(i..j).map(|c| c.iter().collect()).unwrap_or_default();
             s.push_str(&run.replace(PICTURE, "[picture]"));
-            if let Some(l) = style.link.as_ref().filter(|l| safe_link(l) && l.trim() != run.trim() && l.strip_prefix("mailto:") != Some(run.trim())) {
+            // //// Neoffice — `said_by`: no address after words that say it already (« www.example.ch »), as Neoffice's
+            // webmail reads a signature (maintenance#1670); upstream compared the words with the whole address.
+            if let Some(l) = style.link.as_ref().filter(|l| safe_link(l) && !said_by(l, &run) && l.strip_prefix("mailto:") != Some(run.trim())) {
                 s.push_str(&format!(" <{}>", l.trim()));
             }
             i = j;
@@ -659,6 +677,29 @@ mod tests {
         let mut j = Styles { chars: vec![9, 9, 9, 9, 9, 9], palette: vec![], paras: vec![] };
         j.fit("ab");
         assert_eq!((j.chars.as_slice(), j.paras.len()), (&[0u16, 0][..], 1));
+    }
+
+    // //// Neoffice — a link's words that say its address (maintenance#1670).
+    /// Plain text writes a link's address after its words, unless the words say it already, as Neoffice's webmail reads
+    /// a signature: no scheme, no leading `www.`, no final slash, any case.
+    #[test]
+    fn plain_text_writes_an_address_its_words_do_not_say() {
+        let link = |text: &str, words: std::ops::Range<usize>, address: &str| {
+            let mut s = Styles::plain(text);
+            s.restyle(text, words, |st| Style { link: Some(address.into()), ..st.clone() });
+            to_text(text, &s)
+        };
+        assert_eq!(link("www.example.ch", 0..14, "https://www.example.ch"), "www.example.ch");
+        assert_eq!(link("Example.CH", 0..10, "https://www.example.ch/"), "Example.CH");
+        assert_eq!(link("https://www.example.ch", 0..22, "https://www.example.ch"), "https://www.example.ch");
+        assert_eq!(link("LinkedIn", 0..8, "https://www.linkedin.com/in/x"), "LinkedIn <https://www.linkedin.com/in/x>");
+        assert_eq!(link("example", 0..7, "https://example.ch"), "example <https://example.ch>");
+        assert_eq!(link("jeanne@example.ch", 0..17, "mailto:jeanne@example.ch"), "jeanne@example.ch");
+        // A whole word, not a part of one.
+        assert_eq!(link("Visit www.example.ch.", 0..21, "https://www.example.ch"), "Visit www.example.ch.");
+        assert_eq!(link("x.com", 0..5, "https://x.co"), "x.com <https://x.co>");
+        assert_eq!(link("example.ch/about", 0..16, "https://example.ch/a"), "example.ch/about <https://example.ch/a>");
+        assert_eq!(link("neoffice.chat", 0..13, "https://neoffice.ch"), "neoffice.chat <https://neoffice.ch>");
     }
 
     #[test]
