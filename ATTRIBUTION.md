@@ -36,5 +36,5 @@ License 1.1, its text shown on the About page): the browser has no system font t
 <!-- //// Neoffice — the browser build's interface font (crates/ui-egui/src/interface_font.rs, maintenance#1673). -->
 | Path | Author | Source | Licence |
 |---|---|---|---|
-| `crates/ui-egui/fonts/karla/Karla-Regular.ttf` | The Karla Project Authors | [googlefonts/karla](https://github.com/googlefonts/karla) v2.004, static Latin instance | OFL-1.1 (`crates/ui-egui/fonts/karla/OFL.txt`) |
-| `crates/ui-egui/fonts/karla/Karla-Bold.ttf` | The Karla Project Authors | [googlefonts/karla](https://github.com/googlefonts/karla) v2.004, static Latin instance | OFL-1.1 (`crates/ui-egui/fonts/karla/OFL.txt`) |
+| `crates/ui-egui/fonts/karla/Karla-Regular.ttf` | The Karla Project Authors | Karla 2.004's variable font ([google/fonts](https://github.com/google/fonts/tree/main/ofl/karla) `Karla[wght].ttf`), its static instance at weight 400 as Google Fonts serves it, unhinted | OFL-1.1 (`crates/ui-egui/fonts/karla/OFL.txt`) |
+| `crates/ui-egui/fonts/karla/Karla-Bold.ttf` | The Karla Project Authors | Karla 2.004's variable font ([google/fonts](https://github.com/google/fonts/tree/main/ofl/karla) `Karla[wght].ttf`), its static instance at weight 700 as Google Fonts serves it, unhinted | OFL-1.1 (`crates/ui-egui/fonts/karla/OFL.txt`) |

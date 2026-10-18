@@ -230,9 +230,9 @@ impl eframe::App for WebShell {
     // //// Neoffice — the frame's storage, to keep at once a signature or a name made here (maintenance#1671).
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui);
-        // //// Neoffice — a signature or a name made here is kept at once, not at the next save (every 10 s): eframe's save
-        // at the page's unload never runs (it listens for "onbeforeunload", which is no event's name), and the one between
-        // frames stops in a hidden tab, so what was made just before a reload was lost (maintenance#1671).
+        // //// Neoffice — a signature or a name made here is kept at once, not at eframe's next save (every 10 s, or when the
+        // page loses the focus; its save at unload listens for "onbeforeunload", which is no event's name): a page that
+        // died before either (a crash, a kill, a hosting page that removed it) lost what was made since (maintenance#1671).
         if self.hosted {
             let now = kept_fingerprint(&self.app.session);
             if now != self.kept_fingerprint {
@@ -313,15 +313,11 @@ impl WebShell {
     }
 }
 
-// //// Neoffice — what the mailboxes' signatures and names are, in one number: a change of one changes it (WebShell::ui).
-// Only a hint that something may have changed: `save_kept` writes what this tab changed, or nothing.
+// //// Neoffice — the mailboxes' signatures and names in one number (kept.rs, `fingerprint`; WebShell::ui).
 fn kept_fingerprint(session: &Session) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    for a in &session.accounts {
-        (&a.config.email, &a.config.signature, &a.config.signature_html, &a.config.name).hash(&mut h);
-    }
-    h.finish()
+    crate::kept::fingerprint(
+        session.accounts.iter().map(|a| [a.config.email.as_str(), &a.config.signature, &a.config.signature_html, &a.config.name]),
+    )
 }
 
 // //// Neoffice — each account's id and address, which what is a mailbox's is kept by (hosted.rs).

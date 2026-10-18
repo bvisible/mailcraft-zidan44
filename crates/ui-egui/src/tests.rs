@@ -1045,15 +1045,27 @@ fn the_interface_font_draws_bold_apart_from_regular() {
     assert!(licence.starts_with("Copyright 2019 The Karla Project Authors") && licence.contains("SIL OPEN FONT LICENSE Version 1.1"));
     assert!(!licence.contains("Neoffice"), "the fork's marker line is not part of the licence");
 
+    // The families `install_fonts_with` makes of them, without what it notes of the main font's coverage, which other
+    // tests share and change.
     let ctx = egui::Context::default();
-    // (Karla covers neither Arabic nor Hebrew: the coverage the other tests share stays as they expect it.)
-    crate::theme::install_fonts_with(&ctx, regular, bold, Vec::new(), None);
+    let mut defs = egui::FontDefinitions::default();
+    for (name, bytes) in [("system", regular), ("system-bold", bold)] {
+        defs.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes.unwrap_or_default())));
+    }
+    let mut proportional = defs.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    proportional.insert(0, "system".into());
+    defs.families.insert(egui::FontFamily::Proportional, proportional.clone());
+    defs.families.insert(egui::FontFamily::Name("bold".into()), [vec!["system-bold".to_string()], proportional].concat());
+    ctx.set_fonts(defs);
     ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
     let width = |font: egui::FontId| ctx.fonts_mut(|f| f.layout_no_wrap("Réunion d’équipe à 14 h".into(), font, egui::Color32::WHITE).size().x);
     let (plain, strong) = (width(crate::theme::regular(14.0)), width(crate::theme::bold(14.0)));
     assert!(strong > plain + 1.0, "bold {strong} is not wider than regular {plain}");
+    // French in Karla itself, regular and bold (not in a fallback after it).
     let french = "àâçéèêëîïôùûüÿœæÀÇÉÈÊÎÔÙŒ«»’…–—€";
-    assert!(ctx.fonts_mut(|f| f.has_glyphs(&crate::theme::bold(14.0), french) && f.has_glyphs(&crate::theme::regular(14.0), french)));
+    for c in french.chars() {
+        assert!(crate::bidi::covers(KARLA.regular, c) && crate::bidi::covers(KARLA.bold, c), "Karla lacks {c}");
+    }
 }
 
 /// A remembered window place is used only when it's sensible: a real size, roughly on a screen.

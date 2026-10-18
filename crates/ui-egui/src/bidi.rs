@@ -49,7 +49,8 @@ pub fn covers_rtl() -> bool {
     COVERAGE.load(Ordering::Relaxed) & (ARABIC | HEBREW) == ARABIC | HEBREW
 }
 
-fn covers(font: &[u8], c: char) -> bool {
+// //// Neoffice — visible to the crate's tests: the browser's own font is checked with it (tests.rs, maintenance#1673).
+pub(crate) fn covers(font: &[u8], c: char) -> bool {
     use skrifa::MetadataProvider as _;
     skrifa::FontRef::new(font).is_ok_and(|f| f.charmap().map(c).is_some())
 }

@@ -345,6 +345,9 @@ nothing bold. The new file `crates/ui-egui/src/interface_font.rs` holds Karla re
 font, `crates/ui-egui/fonts/karla/`, about 40 KB each), which `MailApp::install_fonts` installs when it is given no
 font, in the browser build only (`built_in`); the About page shows its licence before the craft-fonts ones (marked
 lines in `backstage.rs`). The licence file carries the fork's header as its first line, left out of what About shows.
+Karla draws Latin scripts only: Cyrillic or Greek falls back to egui's Ubuntu-Light, which has no bold. PDF previews
+in the browser draw a document's standard fonts that it does not embed with it too (`thumbs.rs` takes the
+interface's fonts), where they drew no text before.
 
 ### The engine's messages in the interface language
 
@@ -375,4 +378,4 @@ No change to `Cargo.lock` or to a catalog (`*.tsv`). The fonts the fork adds:
 
 | Binary | Why |
 |---|---|
-| `crates/ui-egui/fonts/karla/*.ttf` | Karla regular and bold, unchanged from googlefonts/karla v2.004: the browser build's interface font (see « The browser build's own font ») |
+| `crates/ui-egui/fonts/karla/*.ttf` | Karla regular and bold: the static instances (400, 700) of Karla 2.004's variable font that Google Fonts serves, unhinted, which the Neoffice desk ships too; unchanged here. The browser build's interface font (see « The browser build's own font ») |

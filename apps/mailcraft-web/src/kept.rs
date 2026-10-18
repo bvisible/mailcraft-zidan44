@@ -106,6 +106,17 @@ pub fn changes(now: &[(String, String, Shown)], seen: &HashMap<String, Seen>) ->
     out
 }
 
+/// The mailboxes' signatures and names in one number (each mailbox's address, signature, its look, name): a change of
+/// one changes it. Only a hint that something may have changed: `changes` says what (web.rs keeps them at once).
+pub fn fingerprint<'a>(mailboxes: impl Iterator<Item = [&'a str; 4]>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    for mailbox in mailboxes {
+        mailbox.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// What to keep of a mailbox's signature (or name), `current`, now that the page gives `page`: nothing while it is the
 /// page's, its words and no look of its own.
 pub fn keep(page: &str, current: &Shown) -> Option<Kept> {
@@ -225,6 +236,21 @@ mod tests {
         let at_start: HashMap<String, Seen> = HashMap::from([(email.clone(), seen(page, Some(&stale)))]);
         let cleared = changes(&[(email.clone(), page.into(), Shown::plain(page))], &at_start);
         assert_eq!((cleared[0].kept.clone(), cleared[0].only_over.clone()), (None, Some(stale)));
+    }
+
+    #[test]
+    fn a_change_of_any_signature_or_name_changes_the_fingerprint() {
+        let one = ["jeanne@example.ch", "Jeanne Muster", "", "Jeanne"];
+        let base = fingerprint([one].into_iter());
+        assert_eq!(fingerprint([one].into_iter()), base);
+        for i in 0..4 {
+            let mut changed = one;
+            changed[i] = "other";
+            assert_ne!(fingerprint([changed].into_iter()), base, "field {i}");
+        }
+        // Where one ends and the next begins counts too.
+        assert_ne!(fingerprint([["ab", "", "", ""]].into_iter()), fingerprint([["a", "b", "", ""]].into_iter()));
+        assert_ne!(fingerprint([one, one].into_iter()), base);
     }
 
     #[test]
