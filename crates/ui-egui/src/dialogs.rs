@@ -1,6 +1,7 @@
 //! Modal dialogs: add an account, sign in again, move to a folder, confirmations, settings.
 
-use egui::{Margin, RichText, Ui, vec2};
+use egui::{Margin, Rect, RichText, Ui, vec2};
+use mailcraft_engine::Compose;
 use mailcraft_engine::Session;
 use mailcraft_engine::model::organize::{Condition, Rule, RuleAction};
 use mailcraft_engine::model::{AccountConfig, Folder, FolderRole, Security};
@@ -425,6 +426,44 @@ fn vacation(ui: &mut Ui, f: &mut VacationForm, t: &Tokens, acts: &mut Vec<Action
     !cancel
 }
 
+/// The signature editor: the account's signature in a message editor of its own, so it can be
+/// formatted, or pasted from Outlook with its look.
+#[derive(Clone, Debug)]
+pub struct SignatureForm {
+    pub account: String,
+    pub compose: Compose,
+    /// Opened from a message being written: shown over its window, and put into it.
+    pub insert: bool,
+    editor: SignatureEditor,
+}
+
+impl SignatureForm {
+    pub fn new(s: &Session, account: &str, insert: bool) -> SignatureForm {
+        let (body, styles) = s.signature_rich(account);
+        SignatureForm {
+            account: account.to_string(),
+            compose: Compose { id: crate::rich_edit::SIGNATURE_ID, account: account.to_string(), body, styles, ..Default::default() },
+            insert,
+            editor: SignatureEditor(crate::rich_edit::Editor::new(crate::rich_edit::SIGNATURE_ID)),
+        }
+    }
+}
+
+/// The editor's state (undo, the selection); a copy starts afresh.
+pub(crate) struct SignatureEditor(pub crate::rich_edit::Editor);
+
+impl Clone for SignatureEditor {
+    fn clone(&self) -> SignatureEditor {
+        SignatureEditor(crate::rich_edit::Editor::new(self.0.id))
+    }
+}
+
+impl std::fmt::Debug for SignatureEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SignatureEditor")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Dialog {
     AddAccount(Box<AccountForm>),
@@ -454,12 +493,7 @@ pub enum Dialog {
         email: String,
         error: String,
     },
-    Signature {
-        account: String,
-        text: String,
-        /// Opened from a message being written: shown over its window, and put into it.
-        insert: bool,
-    },
+    Signature(Box<SignatureForm>),
     /// An account's name, user name and servers.
     EditAccount(Box<EditForm>),
     /// An account's automatic replies.
@@ -755,7 +789,7 @@ impl Dialog {
 
     /// Dialogs that belong to the message being written (shown in its window when it has one).
     pub fn for_compose(&self) -> bool {
-        matches!(self, Dialog::SelectNames(_) | Dialog::SaveChanges | Dialog::EmptySubject | Dialog::Signature { insert: true, .. })
+        matches!(self, Dialog::SelectNames(_) | Dialog::SaveChanges | Dialog::EmptySubject) || matches!(self, Dialog::Signature(f) if f.insert)
     }
 
     /// The add-account dialog with the address filled in (servers guessed from it).
@@ -994,8 +1028,13 @@ fn buttons(ui: &mut Ui, t: &Tokens, ok: &str, ok_enabled: bool) -> (bool, bool) 
 #[derive(Clone, Debug, Default)]
 pub struct NamesForm {
     pub query: String,
-    /// `all` (everyone known) or `people` (Contacts).
-    pub people_only: bool,
+    /// The address book shown: `all` (everyone known), `people` (every contact) or one book
+    /// (`book:<account>:<id>`); empty until the one it opens with is known.
+    pub source: String,
+    /// The one it opens with.
+    pub default_source: String,
+    /// Each account's address books: (source, name, the account's address).
+    pub books: Vec<(String, String, String)>,
     pub list: Vec<mailcraft_engine::model::EmailAddress>,
     /// The list must be read again (the search or the book changed).
     pub stale: bool,
@@ -1031,17 +1070,44 @@ fn select_names(ui: &mut Ui, f: &mut NamesForm, t: &Tokens, acts: &mut Vec<Actio
         }
         ui.add_space(12.0);
         ui.label(RichText::new(tl!("Address Book")).strong());
-        let shown = if f.people_only { tl!("Contacts") } else { tl!("All addresses") };
-        egui::ComboBox::from_id_salt("address-book").selected_text(shown).show_ui(ui, |ui| {
-            for (people, label) in [(false, "All addresses"), (true, "Contacts")] {
-                if ui.selectable_label(f.people_only == people, tl!(label)).clicked() && f.people_only != people {
-                    f.people_only = people;
+        // Everyone (the people written to or heard from, and contacts), every contact, or one
+        // address book (each account's Contacts, an organisation's shared ones).
+        let accounts = f.books.iter().map(|(_, _, a)| a).collect::<std::collections::BTreeSet<_>>().len();
+        let mut choices: Vec<(String, String, &'static str)> = vec![
+            ("all".into(), tl!("All addresses").to_string(), tl!("Everyone you've written to or heard from, and your contacts")),
+            ("people".into(), tl!("All contacts").to_string(), tl!("Every contact, in every address book")),
+        ];
+        if f.books.len() > 1 {
+            for (source, name, account) in &f.books {
+                let name = if name.is_empty() || name == "Contacts" { tl!("Contacts").to_string() } else { name.clone() };
+                choices.push((source.clone(), if accounts > 1 { format!("{name} ({account})") } else { name }, ""));
+            }
+        }
+        let shown = choices.iter().find(|(s, _, _)| *s == f.source).map_or_else(|| tl!("All addresses").to_string(), |(_, l, _)| l.clone());
+        egui::ComboBox::from_id_salt("address-book").width(220.0).selected_text(shown).show_ui(ui, |ui| {
+            for (source, label, tip) in &choices {
+                let mut r = ui.selectable_label(f.source == *source, label);
+                if !tip.is_empty() {
+                    r = r.on_hover_text(*tip);
+                }
+                if r.clicked() && f.source != *source {
+                    f.source = source.clone();
                     f.stale = true;
                     f.selected = None;
                 }
             }
         });
     });
+    // Outlook's "Show this address list first".
+    if !f.source.is_empty() && f.source != f.default_source {
+        ui.horizontal(|ui| {
+            ui.add_space(ui.available_width() - 260.0);
+            if ui.link(RichText::new(tl!("Always open with this address book")).small()).clicked() {
+                acts.push(Action::Run("contact.defaultBook", json!({"source": f.source})));
+                f.default_source = f.source.clone();
+            }
+        });
+    }
     ui.add_space(6.0);
     let mut add: Option<&'static str> = None;
     egui::Frame::new().stroke(egui::Stroke::new(1.0, t.border)).corner_radius(4).show(ui, |ui| {
@@ -1064,10 +1130,25 @@ fn select_names(ui: &mut Ui, f: &mut NamesForm, t: &Tokens, acts: &mut Vec<Actio
                     if on || r.hovered() {
                         ui.painter().rect_filled(rect, 3.0, if on { t.accent_soft } else { t.hover_row });
                     }
-                    let left = rect.left_center();
-                    ui.painter().text(left + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, name, theme::regular(13.5), t.text);
-                    ui.painter().text(left + vec2(256.0, 0.0), egui::Align2::LEFT_CENTER, &a.email, theme::regular(13.5), t.dim);
-                    r
+                    // Each in its column, a long one cut short with "…" (the whole of it on hover).
+                    let cell = |ui: &Ui, text: &str, x: f32, w: f32, c: egui::Color32| {
+                        let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), theme::regular(13.5), c);
+                        job.wrap.max_width = w;
+                        job.wrap.max_rows = 1;
+                        job.wrap.break_anywhere = true;
+                        job.wrap.overflow_character = Some('…');
+                        let g = ui.fonts_mut(|f| f.layout_job(job));
+                        let cut = g.rows.first().is_some_and(|row| row.glyphs.len() < text.chars().count());
+                        let pos = egui::pos2(rect.min.x + x, rect.center().y - g.size().y / 2.0);
+                        ui.painter()
+                            .with_clip_rect(Rect::from_min_size(egui::pos2(rect.min.x + x, rect.min.y), vec2(w + 2.0, rect.height())))
+                            .galley(pos, g, c);
+                        cut
+                    };
+                    let name_w = 244.0;
+                    let cut_name = cell(ui, &name, 6.0, name_w, t.text);
+                    let cut_email = cell(ui, &a.email, 256.0, (rect.width() - 262.0).max(40.0), t.dim);
+                    if cut_name || cut_email { r.on_hover_text(format!("{name} <{}>", a.email)) } else { r }
                 });
                 if r.inner.clicked() {
                     f.selected = Some(i);
@@ -1564,15 +1645,30 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             }
             !cancel
         }
-        Dialog::Signature { account, text, insert } => {
-            ui.set_width(420.0);
+        Dialog::Signature(f) => {
+            ui.set_width(480.0);
             title(ui, t, "Signature");
             ui.label(RichText::new(tl!("Added to new messages, replies and forwards.")).color(t.dim).small());
-            ui.add(egui::TextEdit::multiline(text).desired_rows(5).desired_width(f32::INFINITY));
-            let (ok, cancel) = buttons(ui, t, if *insert { "Save and insert" } else { "Save" }, true);
+            ui.label(
+                RichText::new(tl!("Paste one from Outlook or Word and it keeps its look; Ctrl+B, Ctrl+I and Ctrl+U format it.")).color(t.dim).small(),
+            );
+            ui.add_space(4.0);
+            egui::Frame::new().stroke(egui::Stroke::new(1.0, t.border)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("signature-text").max_height(220.0).auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_min_height(220.0);
+                    let SignatureForm { compose, editor, .. } = &mut **f;
+                    crate::rich_edit::body(ui, t, &mut editor.0, compose, None, acts);
+                    crate::rich_edit::link_dialog(ui, t, &mut editor.0, compose);
+                });
+            });
+            let (ok, cancel) = buttons(ui, t, if f.insert { "Save and insert" } else { "Save" }, true);
             if ok {
-                acts.push(Action::Run("account.setSignature", json!({"account": account, "signature": text})));
-                if *insert && !text.trim().is_empty() {
+                let text = f.compose.body.trim_end().to_string();
+                let mut styles = f.compose.styles.clone();
+                styles.fit(&text);
+                let html = if styles.is_plain() { None } else { Some(mailcraft_engine::mime::rich::to_html(&text, &styles)) };
+                acts.push(Action::Run("account.setSignature", json!({"account": f.account, "signature": text, "html": html})));
+                if f.insert && !text.trim().is_empty() {
                     acts.push(Action::InsertSignature);
                 }
                 return false;
