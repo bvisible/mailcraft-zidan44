@@ -190,15 +190,11 @@ fn parse(host: &JsValue) -> Vec<HostAccount> {
     out
 }
 
-/// A mailbox's signature as the page gives it (`{ html, text }`), as text: its text, else its HTML made text (MailCraft's
-/// signatures are text), at most MAX_SIGNATURE_CHARS characters.
+/// A mailbox's signature as the page gives it (`{ html, text }`): its text, at most MAX_SIGNATURE_CHARS characters. Its
+/// look is not read: Neoffice's editor writes a paragraph per line, which MailCraft would read double-spaced (kept.rs).
+/// A signature that is only a picture comes with no text, and gives none here (its picture's name is not a signature).
 fn signature(given: &JsValue) -> String {
     let plain = get(given, "text").and_then(|v| v.as_string()).unwrap_or_default();
-    let plain = if plain.trim().is_empty() {
-        get(given, "html").and_then(|v| v.as_string()).map(|h| mailcraft_engine::mime::html_to_text(&h)).unwrap_or_default()
-    } else {
-        plain
-    };
     plain.trim().chars().take(MAX_SIGNATURE_CHARS).collect()
 }
 
@@ -222,14 +218,19 @@ pub fn store(accounts: &[HostAccount], signatures: &HashMap<String, crate::kept:
     let configs: Vec<AccountConfig> = accounts
         .iter()
         .enumerate()
-        .map(|(i, a)| AccountConfig {
-            id: format!("a{}", i + 1),
-            name: crate::kept::chosen(&a.name, names.get(&a.email.to_lowercase())),
-            email: a.email.clone(),
-            username: if a.username.is_empty() { a.email.clone() } else { a.username.clone() },
-            jmap: Some(a.session.clone()),
-            signature: crate::kept::chosen(&a.signature, signatures.get(&a.email.to_lowercase())),
-            ..AccountConfig::default()
+        .map(|(i, a)| {
+            // The one made here, with its look, while it stands (kept.rs).
+            let signature = crate::kept::chosen(&a.signature, signatures.get(&a.email.to_lowercase()));
+            AccountConfig {
+                id: format!("a{}", i + 1),
+                name: crate::kept::chosen(&a.name, names.get(&a.email.to_lowercase())).text,
+                email: a.email.clone(),
+                username: if a.username.is_empty() { a.email.clone() } else { a.username.clone() },
+                jmap: Some(a.session.clone()),
+                signature: signature.text,
+                signature_html: signature.html,
+                ..AccountConfig::default()
+            }
         })
         .collect();
     if let Err(e) = store.save_accounts(&configs) {

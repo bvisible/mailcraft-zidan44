@@ -145,9 +145,14 @@ pub fn start() {
                     }
                     // //// Neoffice — with the host's mailboxes, the settings only (kept.rs), and what the page gave each
                     // mailbox for a signature and a name, to tell one made here.
-                    let page_signatures = host.iter().map(|a| (a.email.to_lowercase(), a.signature.clone())).collect();
-                    let page_names = host.iter().map(|a| (a.email.to_lowercase(), a.name.clone())).collect();
-                    Ok(Box::new(WebShell { app, store, sample, hosted, page_signatures, page_names, db }))
+                    let page_signatures: std::collections::HashMap<String, String> =
+                        host.iter().map(|a| (a.email.to_lowercase(), a.signature.clone())).collect();
+                    let page_names: std::collections::HashMap<String, String> =
+                        host.iter().map(|a| (a.email.to_lowercase(), a.name.clone())).collect();
+                    // What each starts with in this tab, to tell what this tab changed (kept.rs, `seen`).
+                    let seen_signatures = seen_from(&page_signatures, &kept_texts(cc.storage, SIGNATURES_KEY));
+                    let seen_names = seen_from(&page_names, &kept_texts(cc.storage, NAMES_KEY));
+                    Ok(Box::new(WebShell { app, store, sample, hosted, page_signatures, page_names, seen_signatures, seen_names, db }))
                 }),
             )
             .await;
@@ -199,6 +204,9 @@ struct WebShell {
     hosted: bool,
     page_signatures: std::collections::HashMap<String, String>,
     page_names: std::collections::HashMap<String, String>,
+    // What this tab knows of each mailbox's signature and name, to tell its own changes (kept.rs, `Seen`).
+    seen_signatures: std::collections::HashMap<String, crate::kept::Seen>,
+    seen_names: std::collections::HashMap<String, crate::kept::Seen>,
     /// Where the cache is kept between visits.
     db: Option<web_sys::IdbDatabase>,
 }
@@ -236,8 +244,11 @@ impl eframe::App for WebShell {
         }
         // //// Neoffice — and the signatures and names made here (kept.rs), not the mail, the accounts or their secrets.
         if self.hosted {
-            save_kept(storage, SIGNATURES_KEY, &self.app.session, &self.page_signatures, |c| &c.signature);
-            save_kept(storage, NAMES_KEY, &self.app.session, &self.page_names, |c| &c.name);
+            save_kept(storage, SIGNATURES_KEY, &self.app.session, &self.page_signatures, &mut self.seen_signatures, |c| crate::kept::Shown {
+                text: c.signature.clone(),
+                html: c.signature_html.clone(),
+            });
+            save_kept(storage, NAMES_KEY, &self.app.session, &self.page_names, &mut self.seen_names, |c| crate::kept::Shown::plain(&c.name));
         }
         if !keeps.files {
             return;
@@ -271,38 +282,53 @@ fn ids(session: &Session) -> Vec<(String, String)> {
     session.accounts.iter().map(|a| (a.config.id.clone(), a.config.email.to_lowercase())).collect()
 }
 
-// //// Neoffice — the signatures (or names) made here for a hosting page's mailboxes (kept.rs), as kept under `key`: by
-// address, `{ text, base }`.
+// //// Neoffice — the signatures (or names) made here for a hosting page's mailboxes (kept.rs), as kept under `key`.
 fn kept_texts(storage: Option<&dyn eframe::Storage>, key: &str) -> std::collections::HashMap<String, crate::kept::Kept> {
-    let Some(v) = storage.and_then(|s| s.get_string(key)).and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok()) else {
-        return Default::default();
-    };
-    let text = |e: &serde_json::Value, key: &str| e.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-    v.as_object()
-        .map(|m| m.iter().map(|(email, e)| (email.to_lowercase(), crate::kept::Kept { text: text(e, "text"), base: text(e, "base") })).collect())
-        .unwrap_or_default()
+    crate::kept::read(storage.and_then(|s| s.get_string(key)).as_deref())
 }
 
-// //// Neoffice — see `kept_texts`: each hosted mailbox's signature (or name: `of`) made here, none while it is the page's.
+// //// Neoffice — what each mailbox starts with in this tab (kept.rs, `seen`), by address.
+fn seen_from(
+    page: &std::collections::HashMap<String, String>,
+    kept: &std::collections::HashMap<String, crate::kept::Kept>,
+) -> std::collections::HashMap<String, crate::kept::Seen> {
+    page.iter().map(|(email, given)| (email.clone(), crate::kept::seen(given, kept.get(email)))).collect()
+}
+
+// //// Neoffice — see `kept_texts`: what this tab changed of each hosted mailbox's signature (or name: `of`) since it last
+// looked (kept.rs, `changes`), written over what is kept, which it leaves as it is for the others (another tab's, a
+// mailbox this visit doesn't have); nothing written when nothing changed. A write that did not hold (storage full) is
+// tried again at the next save.
 fn save_kept(
     storage: &mut dyn eframe::Storage,
     key: &str,
     session: &Session,
     page: &std::collections::HashMap<String, String>,
-    of: impl Fn(&mailcraft_engine::model::AccountConfig) -> &String,
+    seen: &mut std::collections::HashMap<String, crate::kept::Seen>,
+    of: impl Fn(&mailcraft_engine::model::AccountConfig) -> crate::kept::Shown,
 ) {
-    let mut kept = serde_json::Map::new();
-    for a in &session.accounts {
-        let email = a.config.email.to_lowercase();
-        let Some(given) = page.get(&email) else { continue };
-        if let Some(k) = crate::kept::keep(given, of(&a.config)) {
-            kept.insert(email, serde_json::json!({"text": k.text, "base": k.base}));
-        }
+    let now: Vec<(String, String, crate::kept::Shown)> = session
+        .accounts
+        .iter()
+        .filter_map(|a| {
+            let email = a.config.email.to_lowercase();
+            let given = page.get(&email)?.clone();
+            Some((email, given, of(&a.config)))
+        })
+        .collect();
+    let changes = crate::kept::changes(&now, seen);
+    if changes.is_empty() {
+        return;
     }
-    if kept.is_empty() {
-        storage.remove_string(key);
-    } else if let Ok(j) = serde_json::to_string(&kept) {
-        storage.set_string(key, j);
+    let written = crate::kept::write(storage.get_string(key).as_deref(), &changes);
+    match &written {
+        Some(j) => storage.set_string(key, j.clone()),
+        None => storage.remove_string(key),
+    }
+    if storage.get_string(key) == written {
+        for change in changes {
+            seen.insert(change.email, crate::kept::Seen::Was(change.now));
+        }
     }
 }
 
