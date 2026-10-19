@@ -19,14 +19,14 @@
 //! the signature and the quoted message, as one step Undo takes back; a translation is shown in
 //! place of the message, with the way back to the original.
 
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 use mailcraft_engine::mime::Parsed;
 use mailcraft_engine::model::MessageKey;
 use serde_json::{Value, json};
 
 use crate::icons::Icon;
 use crate::theme::{self, Tokens};
-use crate::{Action, MailApp, UiState, widgets};
+use crate::{Action, MailApp, UiState};
 
 /// The server method that drafts the reply to a message of a mailbox of the server, which it reads
 /// itself by the message's key (the webmail's « Reply with Nora »).
@@ -128,9 +128,10 @@ impl NoraState {
     }
 }
 
-/// The reading pane's Nora button, beside Reply, Reply all and Forward.
+/// The reading pane's Nora button, beside Reply, Reply all and Forward: her sphere and her name, in her colour, with the
+/// list of what she does on the message, as the desk's messages show her (maintenance#1702).
 pub(crate) fn reading_button(ui: &mut Ui, t: &Tokens, acts: &mut Vec<Action>) {
-    let nora = widgets::pill_button(ui, Icon::Reply, "Nora", t).on_hover_text(tl!("Nora, the Neoffice assistant"));
+    let nora = pill(ui, t, "Nora", Mark::Orb, true, false).on_hover_text(tl!("Nora, the Neoffice assistant"));
     egui::Popup::menu(&nora).show(|ui| {
         if ui.button(tl!("Reply with Nora")).clicked() {
             acts.push(Action::Nora(Ask::Reply { all: false }));
@@ -170,14 +171,19 @@ pub(crate) fn act(app: &mut MailApp, ask: Ask) {
 pub(crate) fn compose_band(ui: &mut Ui, t: &Tokens, acts: &mut Vec<Action>, style: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(RichText::new(tl!("Nora")).color(t.dim).small());
-        if ui.small_button(tl!("Correct")).on_hover_text(tl!("Spelling and grammar of your text")).clicked() {
+        // Her sphere and her name, then what she does, as the desk's bar of Nora shows them (maintenance#1702).
+        let tone = tone(t);
+        let (mark, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        orb(ui.painter(), mark, tone.orb);
+        ui.label(RichText::new(tl!("Nora")).font(theme::bold(13.0)).color(tone.text));
+        if pill(ui, t, "Correct", Mark::Check, false, true).on_hover_text(tl!("Spelling and grammar of your text")).clicked() {
             acts.push(Action::Nora(Ask::Correct));
         }
-        if ui.small_button(tl!("Improve")).on_hover_text(tl!("A clearer version of your text")).clicked() {
+        if pill(ui, t, "Improve", Mark::Wand, false, true).on_hover_text(tl!("A clearer version of your text")).clicked() {
             acts.push(Action::Nora(Ask::Improve));
         }
-        ui.menu_button(RichText::new(tl!("Translate")).small(), |ui| {
+        let translate = pill(ui, t, "Translate", Mark::Globe, true, true);
+        egui::Popup::menu(&translate).show(|ui| {
             for (code, name) in LANGUAGES {
                 if ui.button(tl!(name)).clicked() {
                     acts.push(Action::Nora(Ask::TranslateDraft(code)));
@@ -185,10 +191,134 @@ pub(crate) fn compose_band(ui: &mut Ui, t: &Tokens, acts: &mut Vec<Action>, styl
                 }
             }
         });
-        if style && ui.small_button(tl!("My style")).on_hover_text(tl!("Learn my writing style from my sent emails")).clicked() {
+        if style && pill(ui, t, "My style", Mark::Pen, false, true).on_hover_text(tl!("Learn my writing style from my sent emails")).clicked() {
             acts.push(Action::Nora(Ask::LearnStyle));
         }
     });
+}
+
+/// Nora's colours in NeoMail: the clay of Neoffice, apart from the app's own colour, as the desk shows her (her sphere is
+/// the Nora app's orb, `nora-orb.svg`, rings of clay; her buttons a light clay wash).
+struct Tone {
+    orb: Color32,
+    text: Color32,
+    fill: Color32,
+    hover: Color32,
+    border: Color32,
+}
+
+fn tone(t: &Tokens) -> Tone {
+    if t.dark {
+        Tone {
+            orb: Color32::from_rgb(0xD6, 0x8A, 0x59),
+            text: Color32::from_rgb(0xE7, 0xB4, 0x8F),
+            fill: Color32::from_rgb(0x3A, 0x2A, 0x21),
+            hover: Color32::from_rgb(0x46, 0x33, 0x2A),
+            border: Color32::from_rgb(0x7A, 0x4A, 0x2C),
+        }
+    } else {
+        Tone {
+            orb: Color32::from_rgb(0xA1, 0x5A, 0x2E),
+            text: Color32::from_rgb(0x8A, 0x4A, 0x22),
+            fill: Color32::from_rgb(0xF7, 0xEB, 0xE3),
+            hover: Color32::from_rgb(0xF0, 0xDC, 0xCE),
+            border: Color32::from_rgb(0xE2, 0xB5, 0x97),
+        }
+    }
+}
+
+/// Nora's sphere, as the Nora app draws it (`nora-orb.svg`): rings of latitude on a sphere, the near half of each drawn
+/// strong and the far half faint. Fewer rings than the app's thirteen: at the size of a button they would merge.
+pub(crate) fn orb(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    use std::f32::consts::PI;
+    const RINGS: usize = 7;
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.46;
+    let width = (r * 0.11).max(0.9);
+    for k in 0..RINGS {
+        let latitude = ((k as f32 + 0.5) / RINGS as f32 - 0.5) * PI * 0.9;
+        let (sin, cos) = latitude.sin_cos();
+        let (y, rx) = (c.y + r * sin, r * cos);
+        let ry = rx * 0.342;
+        for (near, alpha) in [(true, 0.95), (false, 0.35)] {
+            let points: Vec<egui::Pos2> = (0..=18)
+                .map(|i| {
+                    let a = PI * i as f32 / 18.0;
+                    let a = if near { a } else { -a };
+                    egui::pos2(c.x + rx * a.cos(), y + ry * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, egui::Stroke::new(width, color.gamma_multiply(alpha))));
+        }
+    }
+}
+
+/// What a button of Nora's shows before its words.
+#[derive(Clone, Copy)]
+enum Mark {
+    Orb,
+    Check,
+    Wand,
+    Globe,
+    Pen,
+}
+
+/// A button of Nora's: a mark, its words, a chevron when it opens a menu, on her clay wash with rounded ends.
+fn pill(ui: &mut Ui, t: &Tokens, label: &str, mark: Mark, chevron: bool, small: bool) -> egui::Response {
+    let tone = tone(t);
+    let (size, h) = if small { (12.0, 24.0) } else { (13.0, 28.0) };
+    let galley = ui.painter().layout_no_wrap(tl!(label).to_string(), theme::regular(size), tone.text);
+    let mark_side = h - 10.0;
+    let chevron_w = if chevron { 14.0 } else { 0.0 };
+    let w = 10.0 + mark_side + 6.0 + galley.size().x + chevron_w + 10.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let fill = if resp.hovered() || resp.is_pointer_button_down_on() { tone.hover } else { tone.fill };
+    ui.painter().rect(rect, h / 2.0, fill, egui::Stroke::new(1.0, tone.border), egui::StrokeKind::Inside);
+    let m = egui::Rect::from_min_size(egui::pos2(rect.min.x + 10.0, rect.min.y + 5.0), egui::vec2(mark_side, mark_side));
+    paint_mark(ui.painter(), m, mark, &tone);
+    let at = egui::pos2(m.max.x + 6.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley_with_override_text_color(at, galley, tone.text);
+    if chevron {
+        let cr = egui::Rect::from_center_size(egui::pos2(rect.max.x - 15.0, rect.center().y), egui::vec2(9.0, 9.0));
+        crate::icons::paint(ui.painter(), cr, Icon::ChevronDown, tone.text);
+    }
+    resp
+}
+
+fn paint_mark(painter: &egui::Painter, r: egui::Rect, mark: Mark, tone: &Tone) {
+    let s = egui::Stroke::new(1.4, tone.text);
+    let p = |x: f32, y: f32| egui::pos2(r.min.x + x * r.width(), r.min.y + y * r.height());
+    match mark {
+        Mark::Orb => orb(painter, r, tone.orb),
+        // Two ticks: the spelling checked.
+        Mark::Check => {
+            painter.add(egui::Shape::line(vec![p(0.05, 0.55), p(0.28, 0.78), p(0.62, 0.3)], s));
+            painter.add(egui::Shape::line(vec![p(0.45, 0.72), p(0.52, 0.78), p(0.95, 0.3)], s));
+        }
+        // A wand and its glint: made better.
+        Mark::Wand => {
+            painter.line_segment([p(0.1, 0.9), p(0.62, 0.38)], s);
+            painter.line_segment([p(0.78, 0.05), p(0.78, 0.35)], s);
+            painter.line_segment([p(0.63, 0.2), p(0.93, 0.2)], s);
+        }
+        // A globe: another language.
+        Mark::Globe => {
+            let c = r.center();
+            painter.circle_stroke(c, r.width() * 0.42, s);
+            painter.line_segment([p(0.08, 0.5), p(0.92, 0.5)], s);
+            let half: Vec<egui::Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32 / 12.0 - 0.5);
+                    egui::pos2(c.x + r.width() * 0.18 * a.cos(), c.y + r.height() * 0.42 * a.sin())
+                })
+                .collect();
+            let other: Vec<egui::Pos2> = half.iter().map(|q| egui::pos2(2.0 * c.x - q.x, q.y)).collect();
+            painter.add(egui::Shape::line(half, s));
+            painter.add(egui::Shape::line(other, s));
+        }
+        // A pencil: the person's own way of writing.
+        Mark::Pen => crate::icons::paint(painter, r, Icon::Drafts, tone.text),
+    }
 }
 
 /// Ask Nora to learn the writing style of the mailbox the message is written from, from its sent
