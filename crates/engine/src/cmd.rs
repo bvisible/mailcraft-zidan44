@@ -112,6 +112,19 @@ pub fn registry() -> Registry {
             s.set_rules(rules)
         })
         .params(r#"{"index": number}"#),
+        CommandSpec::new("rules.export", "Export rules", "Home › Rules › Options", |s, v| {
+            let path = p::req_str(v, "path")?;
+            let bytes = s.rules_file()?;
+            std::fs::write(path, bytes).map_err(|e| CmdError::Failed(format!("{path}: {e}")))?;
+            Ok(json!({ "rules": s.rules.len(), "path": path }))
+        })
+        .params(r#"{"path": string}"#),
+        CommandSpec::new("rules.import", "Import rules", "Home › Rules › Options", |s, v| {
+            let path = p::req_str(v, "path")?;
+            let bytes = read_capped(path, 4 << 20)?;
+            s.import_rules(&bytes, p::bool(v, "replace").unwrap_or(false))
+        })
+        .params(r#"{"path": string, "replace"?: bool (in place of the rules here; else added after them)}"#),
         CommandSpec::new("rules.run", "Run rules now", "Home › Rules", |s, v| {
             s.run_rules_now(p::u64(v, "index").and_then(|i| usize::try_from(i).ok()), p::bool(v, "inbox").unwrap_or(false))
         })
@@ -263,7 +276,7 @@ pub fn registry() -> Registry {
         .params(r#"{"query": string, "limit"?: number}"#),
         // Attachments
         CommandSpec::new("attachment.save", "Save attachment", "Reading pane", save_attachment).params(r#"{"index": number, "path": string}"#).when(has_reading),
-        CommandSpec::new("attachment.saveAll", "Save all attachments", "Reading pane", save_all_attachments).params(r#"{"dir": string}"#).when(has_reading),
+        CommandSpec::new("attachment.saveAll", "Save all attachments", "Reading pane", save_all_attachments).params(r#"{"dir": string, "indices"?: [number] (only these attachments)}"#).when(has_reading),
         CommandSpec::new("attachment.preview", "Preview attachment", "Reading pane", preview_attachment).params(r#"{"index": number}"#).when(has_reading),
         // View
         CommandSpec::new("view.readingPane", "Reading pane", "View › Layout", reading_pane).params(r#"{"value": "right"|"bottom"|"off"}"#),
@@ -624,7 +637,9 @@ pub fn registry() -> Registry {
             let c = card_from(v, mailcraft_model::vcard::Card::default())?;
             s.create_card(p::str(v, "account"), c)
         })
-        .params(r#"{"name": string, "emails"?: [string] | "a, b", "phones"?: [string] | "…", "org"?: string, "title"?: string, "note"?: string, "account"?: string}"#),
+        .params(
+            r#"{"name": string, "emails"?: [string] | "a, b", "phones"?: [string | {"value": string, "kind"?: "work"|"home"|"cell"|"fax"|"pager"}], "addresses"?: [{"kind"?: "work"|"home", "street"?, "city"?, "region"?, "postcode"?, "country"?}], "birthday"?: "YYYY-MM-DD" | "", "org"?: string, "title"?: string, "note"?: string, "account"?: string}"#,
+        ),
         CommandSpec::new("contact.update", "Edit contact", "People › Contact", |s, v| {
             let uid = p::req_str(v, "uid")?.to_string();
             let current = s.find_person(&uid).map(|x| x.card).ok_or_else(|| CmdError::Params(format!("no contact `{uid}`")))?;
@@ -1302,8 +1317,10 @@ fn save_all_attachments(s: &mut Session, v: &Value) -> CmdResult {
     let r = s.reading.as_ref().ok_or_else(|| CmdError::Disabled("open a message first".into()))?;
     let parsed = r.parsed.as_ref().ok_or_else(|| CmdError::Disabled("the message is still downloading".into()))?;
     let raw = s.store.as_ref().and_then(|st| st.read_body(&r.key)).ok_or_else(|| CmdError::Failed("the message isn't downloaded".into()))?;
+    // Only some of them, when asked (the ones selected).
+    let only: Option<Vec<u64>> = v.get("indices").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).take(10_000).collect());
     let mut saved = Vec::new();
-    for a in parsed.attachments.iter().filter(|a| !a.inline) {
+    for a in parsed.attachments.iter().filter(|a| !a.inline && only.as_ref().is_none_or(|o| o.contains(&(a.index as u64)))) {
         let Some(data) = mailcraft_mime::attachment_data(&raw, a.index) else { continue };
         let name = sanitize_filename(&a.name);
         let (stem, ext) = name.rsplit_once('.').map_or((name.clone(), String::new()), |(s, e)| (s.to_string(), format!(".{e}")));
@@ -1691,22 +1708,86 @@ fn card_from(v: &Value, mut c: mailcraft_model::vcard::Card) -> Result<mailcraft
             c.family.clear();
         }
     }
-    // //// Neoffice — an address or a number already on the card keeps its kind (work, home, mobile); only new ones have
-    // none.
-    let kind_of = |old: &[mailcraft_model::vcard::Typed], value: &str, same: fn(&str, &str) -> bool| {
-        old.iter().find(|o| same(&o.value, value)).map(|o| o.kind.clone()).unwrap_or_default()
+    use mailcraft_model::vcard::{PostalAddress, Typed};
+    // A list of values, each a string or {"value", "kind"} (a phone's kind: work, home, cell,
+    // fax, pager, or none).
+    let typed = |k: &str| -> Option<Vec<Typed>> {
+        match v.get(k)? {
+            Value::Array(a) => Some(
+                a.iter()
+                    .filter_map(|x| match x {
+                        Value::String(s) => Some(Typed { value: s.trim().to_string(), kind: String::new() }),
+                        Value::Object(_) => Some(Typed {
+                            value: p::str(x, "value").or_else(|| p::str(x, "number")).unwrap_or_default().trim().to_string(),
+                            kind: p::str(x, "kind").unwrap_or_default().trim().to_ascii_lowercase(),
+                        }),
+                        _ => None,
+                    })
+                    .filter(|t| !t.value.is_empty())
+                    .map(|mut t| {
+                        t.value = t.value.chars().take(300).collect();
+                        t.kind = t.kind.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(20).collect();
+                        t
+                    })
+                    .collect(),
+            ),
+            Value::String(_) => list(k).map(|l| l.into_iter().map(|value| Typed { value, kind: String::new() }).collect()),
+            _ => None,
+        }
     };
-    if let Some(e) = list("emails") {
-        // //// Neoffice — see `kind_of` above: an address, whatever its case.
+    // //// Neoffice — an address or a number already on the card keeps its kind (work, home, mobile) when it comes without
+    // one, as a plain string (the form sends addresses that way) or an object with no "kind"; a kind given, even empty
+    // (« Other phone »), is the person's choice. Only new ones have none.
+    let given_kind = |k: &str, value: &str| {
+        v.get(k).and_then(Value::as_array).is_some_and(|a| {
+            a.iter().any(|x| {
+                x.get("kind").is_some()
+                    && p::str(x, "value").or_else(|| p::str(x, "number")).is_some_and(|w| w.trim().chars().take(300).collect::<String>() == value)
+            })
+        })
+    };
+    let keep_kinds = |new: &mut [Typed], old: &[Typed], k: &str, same: fn(&str, &str) -> bool| {
+        for t in new.iter_mut().filter(|t| t.kind.is_empty() && !given_kind(k, &t.value)) {
+            if let Some(o) = old.iter().find(|o| same(&o.value, &t.value)) {
+                t.kind = o.kind.clone();
+            }
+        }
+    };
+    if let Some(e) = typed("emails") {
+        // //// Neoffice — see `keep_kinds` above: an address, whatever its case.
         let old = std::mem::take(&mut c.emails);
-        let same: fn(&str, &str) -> bool = |a, b| a.trim().eq_ignore_ascii_case(b.trim());
-        c.emails = e.into_iter().take(20).map(|value| mailcraft_model::vcard::Typed { kind: kind_of(&old, &value, same), value }).collect();
+        c.emails = e.into_iter().take(20).collect();
+        keep_kinds(&mut c.emails, &old, "emails", |a, b| a.trim().eq_ignore_ascii_case(b.trim()));
     }
-    if let Some(ph) = list("phones") {
-        // //// Neoffice — see `kind_of` above: a number, however it is spaced.
+    if let Some(ph) = typed("phones") {
+        // //// Neoffice — see `keep_kinds` above: a number, however it is spaced.
         let old = std::mem::take(&mut c.phones);
-        let same: fn(&str, &str) -> bool = |a, b| a.split_whitespace().collect::<String>() == b.split_whitespace().collect::<String>();
-        c.phones = ph.into_iter().take(20).map(|value| mailcraft_model::vcard::Typed { kind: kind_of(&old, &value, same), value }).collect();
+        c.phones = ph.into_iter().take(20).collect();
+        keep_kinds(&mut c.phones, &old, "phones", |a, b| a.split_whitespace().collect::<String>() == b.split_whitespace().collect::<String>());
+    }
+    if let Some(list) = v.get("addresses").and_then(Value::as_array) {
+        let field = |a: &Value, k: &str| p::str(a, k).unwrap_or_default().trim().chars().take(500).collect::<String>();
+        c.addresses = list
+            .iter()
+            .filter(|a| a.is_object())
+            .map(|a| PostalAddress {
+                kind: field(a, "kind").to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect(),
+                street: field(a, "street"),
+                city: field(a, "city"),
+                region: field(a, "region"),
+                postcode: field(a, "postcode"),
+                country: field(a, "country"),
+            })
+            .filter(|a| !a.is_empty())
+            .take(10)
+            .collect();
+    }
+    if let Some(b) = p::str(v, "birthday") {
+        c.birthday = if b.trim().is_empty() {
+            String::new()
+        } else {
+            mailcraft_model::vcard::birthday_of(b).ok_or_else(|| CmdError::Params(format!("`{b}` is not a date (YYYY-MM-DD)")))?
+        };
     }
     for (k, field) in [("org", &mut c.org), ("title", &mut c.title), ("note", &mut c.note)] {
         if let Some(x) = p::str(v, k) {
@@ -1722,4 +1803,16 @@ fn organized_by_me(s: &Session, e: &mailcraft_model::ical::CalEvent) -> bool {
         && e.organizer.as_ref().is_some_and(|o| {
             s.accounts.iter().any(|a| a.config.email.eq_ignore_ascii_case(&o.email) || a.config.username.eq_ignore_ascii_case(&o.email))
         })
+}
+
+/// A file's bytes, refused when it's bigger than `max` (read no further than that).
+fn read_capped(path: &str, max: u64) -> Result<Vec<u8>, CmdError> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).map_err(|e| CmdError::Failed(format!("{path}: {e}")))?;
+    let mut bytes = Vec::new();
+    f.take(max.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| CmdError::Failed(format!("{path}: {e}")))?;
+    if bytes.len() as u64 > max {
+        return Err(CmdError::Params(format!("{path} is too big")));
+    }
+    Ok(bytes)
 }

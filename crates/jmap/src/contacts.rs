@@ -647,6 +647,10 @@ pub fn card_of(v: &Value) -> Card {
         org: first_text("organizations", "name"),
         title: first_text("titles", "name"),
         note: first_text("notes", "note"),
+        // Not read (nor written by `card_json`): the hosting instance's contacts keep neither, its ContactCard/set
+        // refuses them, and the contact form doesn't offer them for its books (pim_dialogs.rs, `kept`).
+        addresses: Vec::new(),
+        birthday: String::new(),
         extra,
     }
 }

@@ -513,7 +513,6 @@
 	Back to the reading pane	Torna al riquadro di lettura
 	Write it in a window of its own	Scrivilo in una finestra a parte
 	Hide Bcc	Nascondi Ccn
-	From ▾	Da ▾
 	Untitled	Senza titolo
 	Write new messages in a window of their own	Scrivi i nuovi messaggi in una finestra a parte
 	Saved in Drafts	Salvato in Bozze
@@ -556,7 +555,7 @@
 	Exporting to {file}…	Esportazione in {file}…
 	Export	Esporta
 	Export to Outlook data file	Esporta in file di dati di Outlook
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	Scrive la posta di un account, con le sue cartelle, in un file di dati di Outlook (.pst) che Outlook e altre app di posta possono aprire. La posta mai scaricata viene esclusa.
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	Scrive la posta di un account, con le sue cartelle, in un file di dati di Outlook (.pst) che Outlook e altre app di posta possono aprire.
 	Exchange server (EWS)	Server Exchange (EWS)
 	Exchange server	Server Exchange
 	Server: {url} (EWS)	Server: {url} (EWS)
@@ -811,6 +810,49 @@
 	Everyone you've written to or heard from, and your contacts	Tutte le persone a cui hai scritto o da cui hai ricevuto messaggi, e i tuoi contatti
 	Hide {calendar}	Nascondi {calendar}
 	Write your signature, or paste it…	Scrivi la firma o incollala…
+	Address books	Rubriche
+	Birthday	Compleanno
+	Business	Ufficio
+	City	Città
+	Fax	Fax
+	Mobile	Cellulare
+	Pager	Cercapersone
+	Shared with you through {account}: read-only	Condivisa con te tramite {account}: sola lettura
+	YYYY-MM-DD	AAAA-MM-GG
+	Email 2	Posta elettronica 2
+	Email 3	Posta elettronica 3
+	Business fax	Fax ufficio
+	Other phone	Altro telefono
+	Street	Via
+	Postal code	CAP
+	State/Province	Provincia
+	Country/Region	Paese
+	Business address	Indirizzo ufficio
+	Home address	Indirizzo abitazione
+	Delete “{name}”?	Eliminare «{name}»?
+	Delete this contact?	Eliminare questo contatto?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	Questo contatto verrà eliminato, insieme a tutto ciò che è salvato su di esso. L'operazione non si può annullare.
+	Export…	Esporta…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	Aggiunge le regole da un file salvato da MailCraft. Una regola per un account che questo computer non ha arriva disattivata.
+	Change…	Modifica…
+	Clean up	Pulizia
+	Export rules	Esporta regole
+	Import rules	Importa regole
+	Rules imported: {n}	Regole importate: {n}
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	Regole importate: {n}; {off} disattivate, perché il loro account non è su questo computer
+	Import…	Importa…
+	No data file is open.	Nessun file di dati è aperto.
+	On the server	Sul server
+	On this computer	Su questo computer
+	Open…	Apri…
+	Remove account	Rimuovi account
+	Save your rules in a file, to keep them or to use them on another computer.	Salva le tue regole in un file, per conservarle o usarle su un altro computer.
+	Rules saved in {file}: {n}	Regole salvate in {file}: {n}
+	Save {n} Selected…	Salva {n} selezionati…
+	Run all	Esegui tutte
+	Run every rule that's on, on the mail already in the Inbox	Esegue tutte le regole attive sulla posta già presente nella Posta in arrivo
+	Find a rule	Trova una regola
+	No rule matches.	Nessuna regola corrisponde.
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archivio

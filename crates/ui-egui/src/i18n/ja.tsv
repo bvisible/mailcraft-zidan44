@@ -516,7 +516,6 @@ month	May	5月
 	Back to the reading pane	閲覧ウィンドウに戻します
 	Write it in a window of its own	別のウィンドウで書きます
 	Hide Bcc	BCC を隠す
-	From ▾	差出人 ▾
 	Untitled	無題
 	Write new messages in a window of their own	新しいメッセージを別のウィンドウで書く
 	Saved in Drafts	下書きに保存しました
@@ -559,7 +558,7 @@ month	May	5月
 	Exporting to {file}…	{file} にエクスポートしています…
 	Export	エクスポート
 	Export to Outlook data file	Outlook データ ファイルにエクスポート
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	アカウントのメールをフォルダーごと、Outlook や他のメール アプリで開ける Outlook データ ファイル (.pst) に書き出します。ダウンロードされていないメールは含まれません。
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	アカウントのメールをフォルダーごと、Outlook や他のメール アプリで開ける Outlook データ ファイル (.pst) に書き出します。
 	Exchange server (EWS)	Exchange サーバー (EWS)
 	Exchange server	Exchange サーバー
 	Server: {url} (EWS)	サーバー: {url} (EWS)
@@ -814,3 +813,46 @@ month	May	5月
 	Everyone you've written to or heard from, and your contacts	メールをやり取りしたすべての人と連絡先
 	Hide {calendar}	{calendar} を非表示
 	Write your signature, or paste it…	署名を入力するか貼り付けます…
+	Address books	アドレス帳
+	Birthday	誕生日
+	Business	勤務先
+	City	市区町村
+	Fax	FAX
+	Mobile	携帯
+	Pager	ポケットベル
+	Shared with you through {account}: read-only	{account} を通じて共有: 読み取り専用
+	YYYY-MM-DD	YYYY-MM-DD
+	Email 2	電子メール 2
+	Email 3	電子メール 3
+	Business fax	勤務先 FAX
+	Other phone	その他の電話
+	Street	番地
+	Postal code	郵便番号
+	State/Province	都道府県
+	Country/Region	国/地域
+	Business address	勤務先住所
+	Home address	自宅住所
+	Delete “{name}”?	「{name}」を削除しますか?
+	Delete this contact?	この連絡先を削除しますか?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	この連絡先と、保存されているすべての情報が削除されます。元に戻すことはできません。
+	Export…	エクスポート…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	MailCraft で保存したファイルからルールを追加します。このコンピューターにないアカウントのルールはオフの状態で追加されます。
+	Change…	変更…
+	Clean up	クリーンアップ
+	Export rules	ルールのエクスポート
+	Import rules	ルールのインポート
+	Rules imported: {n}	{n} 件のルールをインポートしました
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	{n} 件のルールをインポートしました。{off} 件はアカウントがこのコンピューターにないためオフです
+	Import…	インポート…
+	No data file is open.	開いているデータ ファイルはありません。
+	On the server	サーバー上
+	On this computer	このコンピューター上
+	Open…	開く…
+	Remove account	アカウントの削除
+	Save your rules in a file, to keep them or to use them on another computer.	ルールをファイルに保存して、保管したり別のコンピューターで使ったりできます。
+	Rules saved in {file}: {n}	{n} 件のルールを {file} に保存しました
+	Save {n} Selected…	選択した {n} 件を保存…
+	Run all	すべて実行
+	Run every rule that's on, on the mail already in the Inbox	オンになっているすべてのルールを、受信トレイに既にあるメールに対して実行します
+	Find a rule	ルールを検索
+	No rule matches.	一致するルールはありません。

@@ -25,6 +25,7 @@ use mailcraft_ui_egui::{Backend, MailApp, Services, VideoFrame};
 /// Passwords in the system keychain (Windows Credential Manager, macOS Keychain, Secret Service).
 struct Keychain;
 
+mod logfile;
 #[cfg(windows)]
 mod toast;
 mod video;
@@ -107,7 +108,23 @@ impl Services for Desktop {
         rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
     }
     fn save_path(&mut self, suggested: &str) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title("Save as").set_file_name(suggested).save_file()
+        let mut d = rfd::FileDialog::new().set_title("Save as").set_file_name(suggested);
+        // Save as type: the suggested name's kind first, so the system keeps its extension.
+        if let Some((_, ext)) = suggested.rsplit_once('.').filter(|(_, e)| !e.is_empty() && e.len() <= 8) {
+            let kind = match ext.to_ascii_lowercase().as_str() {
+                "pst" => "Outlook data file".to_string(),
+                "eml" => "Email message".to_string(),
+                "pdf" => "PDF document".to_string(),
+                "ics" => "Calendar".to_string(),
+                "vcf" => "Contact card".to_string(),
+                "txt" => "Text".to_string(),
+                "json" => "MailCraft rules".to_string(),
+                "html" | "htm" => "Web page".to_string(),
+                e => format!("{} file", e.to_ascii_uppercase()),
+            };
+            d = d.add_filter(kind, &[ext]).add_filter("All files", &["*"]);
+        }
+        d.save_file()
     }
     fn open_path(&mut self, path: &Path) -> Result<(), String> {
         shell_open(path.as_os_str())
@@ -257,6 +274,9 @@ impl Services for Desktop {
     }
     fn pick_folder(&mut self) -> Option<PathBuf> {
         rfd::FileDialog::new().set_title("Save attachments to").pick_folder()
+    }
+    fn pick_rules_file(&mut self) -> Option<PathBuf> {
+        rfd::FileDialog::new().set_title("Import rules").add_filter("MailCraft rules", &["json"]).add_filter("All files", &["*"]).pick_file()
     }
     fn pick_data_file(&mut self) -> Option<PathBuf> {
         rfd::FileDialog::new()
@@ -469,6 +489,11 @@ fn main() -> eframe::Result {
     // (`--data`) or in Documents.
     let files =
         (!sample).then(|| root.as_ref().map(|r| base.as_deref().map_or_else(|| r.join(location::FILES_FOLDER), location::files_dir))).flatten();
+    // Diagnostics go to `mailcraft.log` in the data folder.
+    let echo = cfg!(debug_assertions) || args.iter().any(|a| a == "--log");
+    if let Some(path) = logfile::start(root.as_deref(), echo) {
+        log::info!("{} started; log at {}", version_line(), path.display());
+    }
 
     let (now, offset) = Desktop::default().clock();
     let store = root.as_ref().and_then(|r| {

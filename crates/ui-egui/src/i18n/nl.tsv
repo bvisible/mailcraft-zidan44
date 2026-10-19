@@ -513,7 +513,6 @@
 	Back to the reading pane	Terug naar het leesvenster
 	Write it in a window of its own	Schrijf het in een eigen venster
 	Hide Bcc	BCC verbergen
-	From ▾	Van ▾
 	Untitled	Naamloos
 	Write new messages in a window of their own	Nieuwe berichten in een eigen venster schrijven
 	Saved in Drafts	Opgeslagen in Concepten
@@ -556,7 +555,7 @@
 	Exporting to {file}…	Exporteren naar {file}…
 	Export	Exporteren
 	Export to Outlook data file	Exporteren naar Outlook-gegevensbestand
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	Schrijf de mail van een account, met de mappen, naar een Outlook-gegevensbestand (.pst) dat Outlook en andere mail-apps kunnen openen. Mail die nooit is gedownload, blijft buiten beschouwing.
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	Schrijf de mail van een account, met de mappen, naar een Outlook-gegevensbestand (.pst) dat Outlook en andere mail-apps kunnen openen.
 	Exchange server (EWS)	Exchange-server (EWS)
 	Exchange server	Exchange-server
 	Server: {url} (EWS)	Server: {url} (EWS)
@@ -813,3 +812,46 @@ month	May	mei
 	Everyone you've written to or heard from, and your contacts	Iedereen aan wie u hebt geschreven of van wie u iets hebt ontvangen, en uw contactpersonen
 	Hide {calendar}	{calendar} verbergen
 	Write your signature, or paste it…	Typ uw handtekening of plak deze…
+	Address books	Adresboeken
+	Birthday	Verjaardag
+	Business	Werk
+	City	Plaats
+	Fax	Fax
+	Mobile	Mobiel
+	Pager	Pieper
+	Shared with you through {account}: read-only	Met u gedeeld via {account}: alleen-lezen
+	YYYY-MM-DD	JJJJ-MM-DD
+	Email 2	E-mail 2
+	Email 3	E-mail 3
+	Business fax	Fax werk
+	Other phone	Andere telefoon
+	Street	Straat
+	Postal code	Postcode
+	State/Province	Provincie
+	Country/Region	Land/regio
+	Business address	Adres werk
+	Home address	Adres thuis
+	Delete “{name}”?	‘{name}’ verwijderen?
+	Delete this contact?	Dit contact verwijderen?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	Dit contact wordt verwijderd, met alles wat erover is bewaard. Dit kan niet ongedaan worden gemaakt.
+	Export…	Exporteren…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	Voegt de regels toe uit een bestand dat MailCraft heeft opgeslagen. Een regel voor een account dat niet op deze computer staat, komt uitgeschakeld binnen.
+	Change…	Wijzigen…
+	Clean up	Opruimen
+	Export rules	Regels exporteren
+	Import rules	Regels importeren
+	Rules imported: {n}	Regels geïmporteerd: {n}
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	Regels geïmporteerd: {n}; {off} uitgeschakeld, omdat hun account niet op deze computer staat
+	Import…	Importeren…
+	No data file is open.	Er is geen gegevensbestand geopend.
+	On the server	Op de server
+	On this computer	Op deze computer
+	Open…	Openen…
+	Remove account	Account verwijderen
+	Save your rules in a file, to keep them or to use them on another computer.	Slaat uw regels op in een bestand, om ze te bewaren of op een andere computer te gebruiken.
+	Rules saved in {file}: {n}	Regels opgeslagen in {file}: {n}
+	Save {n} Selected…	{n} geselecteerde opslaan…
+	Run all	Alle uitvoeren
+	Run every rule that's on, on the mail already in the Inbox	Voert alle ingeschakelde regels uit op de mail die al in het Postvak IN staat
+	Find a rule	Een regel zoeken
+	No rule matches.	Geen regel komt overeen.

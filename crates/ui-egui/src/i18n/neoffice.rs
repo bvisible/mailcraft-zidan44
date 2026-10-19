@@ -1678,18 +1678,9 @@ const STRINGS: &[Entry] = &[
 /// `a_french_sentence_never_puts_a_name_right_after_a_word_it_would_elide` refuses; they are said here rather
 /// than in upstream's catalogs, which merging upstream then never touches. When upstream changes one of these
 /// sentences, a test says so, and the fork's is looked at again (kept, or dropped if upstream fixed it).
-const UPSTREAM_SAID_OTHERWISE: &[(&str, &str, &str, &str)] = &[
-    ("fr", "At the top of {account}", "En haut de {account}", "En haut du compte {account}"),
-    ("fr", "Enter the password for {email}.", "Saisissez le mot de passe de {email}.", "Saisissez le mot de passe du compte {email}."),
-    ("fr", "From {names}", "De {names}", "Envoyés par {names}"),
-    ("fr", "Mail from {sender}", "Courrier de {sender}", "Courrier envoyé par {sender}"),
-    ("fr", "Updating {folder}…", "Mise à jour de {folder}…", "Mise à jour du dossier {folder}…"),
-    ("fr", "from “{text}”", "vient de « {text} »", "envoyé par « {text} »"),
-    ("fr", "In the address book of {account}", "Dans le carnet d’adresses de {account}", "Dans le carnet d’adresses du compte {account}"),
-    ("fr", "Opening {file}…", "Ouverture de {file}…", "Ouverture du fichier {file}…"),
-    ("fr", "Delete everything in “{folder}”?", "Supprimer tout le contenu de « {folder} » ?", "Supprimer tout le contenu du dossier « {folder} » ?"),
-    ("fr", "{folder} Properties", "Propriétés de {folder}", "Propriétés du dossier {folder}"),
-];
+/// Upstream fixed the ten it had in its own French (8612c1b, « French values never follow a word that elides »): they
+/// were dropped at that merge, and the table waits for the next one.
+const UPSTREAM_SAID_OTHERWISE: &[(&str, &str, &str, &str)] = &[];
 
 /// This fork's entries for the language `code`: (English, translation).
 pub(super) fn entries(code: &str) -> impl Iterator<Item = (String, String)> + '_ {

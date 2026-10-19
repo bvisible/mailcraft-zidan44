@@ -214,7 +214,7 @@ fn compose_reply_and_send_locally() {
     s.run("list.open", &k).unwrap();
     s.run("mail.reply", &json!({})).unwrap();
     let c = s.compose.clone().unwrap();
-    assert_eq!(c.to, "Print Shop <orders@printshop.example>");
+    assert_eq!(c.to, "Print Shop <orders@printshop.example>; ", "ready for another address");
     assert_eq!(c.subject, "Re: Your proof for the festival poster is ready");
     assert!(c.body.contains("\nFrom: Print Shop <orders@printshop.example>\nSent: "));
     assert!(c.body.contains("The proof for order 4471"));
@@ -565,6 +565,13 @@ fn attachments_preview_and_save_all() {
     let again = s.run("attachment.saveAll", &json!({"dir": dir.to_string_lossy()})).unwrap();
     assert!(again["saved"][0].as_str().unwrap().contains("(2)"), "names already taken get a number");
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    // Only the ones asked for (those selected).
+    let only = s.run("attachment.saveAll", &json!({"dir": dir.to_string_lossy(), "indices": [9999]})).unwrap();
+    assert_eq!(only["saved"].as_array().map(Vec::len), Some(0));
+    let index = s.reading.as_ref().and_then(|r| r.parsed.as_ref()).map(|p| p.attachments[0].index).unwrap();
+    let only = s.run("attachment.saveAll", &json!({"dir": dir.to_string_lossy(), "indices": [index]})).unwrap();
+    assert_eq!(only["saved"].as_array().map(Vec::len), Some(1));
+    assert!(s.run("attachment.saveAll", &json!({"dir": dir.to_string_lossy(), "indices": "junk"})).is_ok(), "junk means all");
     assert!(s.run("attachment.saveAll", &json!({"dir": "/no/such/folder"})).is_err());
     assert_eq!(mailcraft_mime::craft_app_for("application/pdf", "a.pdf"), Some(("pdfcraft", "PdfCraft")));
     assert_eq!(mailcraft_mime::craft_app_for("application/octet-stream", "q.XLSX").map(|a| a.0), Some("gridcraft"));
@@ -901,7 +908,7 @@ fn offline_sends_wait_in_the_outbox() {
     // Edit takes it back out, Bcc and attachment included.
     s.run("outbox.edit", &json!({"key": key.to_id()})).unwrap();
     let c = s.compose.clone().unwrap();
-    assert_eq!((c.to.as_str(), c.bcc.as_str(), c.subject.as_str()), ("ann@example.org", "boss@example.org", "Plans"));
+    assert_eq!((c.to.as_str(), c.bcc.as_str(), c.subject.as_str()), ("ann@example.org; ", "boss@example.org; ", "Plans"));
     assert_eq!(c.attachments.len(), 1);
     assert!(s.outbox.is_empty() && store.outbox(&id).is_empty());
 
@@ -982,6 +989,68 @@ fn remote_accounts_go_through_jobs_and_events() {
     s.apply(Event::Sent { account: id.clone(), id: send_id });
     assert!(s.compose.is_none());
     assert!(s.take_jobs().iter().any(|j| matches!(j, Job::Apply { op: Op::SetFlag { flag: Flag::Answered, .. }, .. })));
+
+    // Queued instead of delivered: no Answered flag yet.
+    s.run("mail.reply", &json!({})).unwrap();
+    s.run("compose.send", &json!({})).unwrap();
+    let send_id = match s.take_jobs().into_iter().find(|j| matches!(j, Job::Send { .. })) {
+        Some(Job::Send { id, .. }) => id,
+        _ => panic!(),
+    };
+    s.apply(Event::Queued { account: id.clone(), id: send_id, error: "offline".into() });
+    assert!(s.compose.is_none(), "the compose closes anyway");
+    assert!(!s.take_jobs().iter().any(|j| matches!(j, Job::Apply { op: Op::SetFlag { flag: Flag::Answered, .. }, .. })), "no flag before delivery");
+    // The owed flag survives a restart and is set on delivery.
+    let mut again = Session::open(s.store.clone(), mailcraft_model::dates::Clock::new(NOW, 0));
+    again.take_jobs();
+    again.apply(Event::Sent { account: id.clone(), id: send_id });
+    assert!(
+        again.take_jobs().iter().any(|j| matches!(j, Job::Apply { op: Op::SetFlag { flag: Flag::Answered, keys, .. }, .. } if keys.contains(&key)))
+    );
+    again.apply(Event::Sent { account: id.clone(), id: send_id });
+    assert!(!again.take_jobs().iter().any(|j| matches!(j, Job::Apply { op: Op::SetFlag { .. }, .. })), "set a single time");
+    drop(again);
+    let mut s = Session::open(s.store.clone(), mailcraft_model::dates::Clock::new(NOW, 0));
+    s.apply(Event::Folders {
+        account: id.clone(),
+        folders: vec![
+            mailcraft_model::Folder { account: id.clone(), path: "INBOX".into(), role: FolderRole::Inbox, selectable: true, ..Default::default() },
+            mailcraft_model::Folder { account: id.clone(), path: "Trash".into(), role: FolderRole::Trash, selectable: true, ..Default::default() },
+        ],
+    });
+    let answered = |s: &mut Session| s.take_jobs().iter().any(|j| matches!(j, Job::Apply { op: Op::SetFlag { flag: Flag::Answered, .. }, .. }));
+    // Queue a reply in the Outbox (as the network layer does when it can't send) and show it.
+    let queue_reply = |s: &mut Session| -> mailcraft_model::MessageKey {
+        s.run("folder.open", &json!({"account": id, "folder": "INBOX"})).unwrap();
+        s.run("list.open", &json!({"key": key.to_id()})).unwrap();
+        s.apply(Event::Body { key: key.clone(), raw: b"From: a@b.example\r\nSubject: Hello\r\nMessage-ID: <h@b>\r\n\r\nHi there\r\n".to_vec() });
+        s.run("mail.reply", &json!({})).unwrap();
+        s.run("compose.send", &json!({})).unwrap();
+        let Some(Job::Send { id: send_id, raw, from, recipients, .. }) = s.take_jobs().into_iter().find(|j| matches!(j, Job::Send { .. })) else {
+            panic!()
+        };
+        let item = mailcraft_store::OutboxItem { id: send_id, from, recipients, queued: NOW, error: Some("offline".into()), ..Default::default() };
+        s.store.as_ref().unwrap().outbox_add(&id, &item, &raw).unwrap();
+        s.apply(Event::Queued { account: id.clone(), id: send_id, error: "offline".into() });
+        s.run("folder.outbox", &json!({})).unwrap();
+        s.list[0].key.clone()
+    };
+    // Edited from the Outbox, then delivered: the flag follows the edit.
+    let queued = queue_reply(&mut s);
+    s.run("outbox.edit", &json!({"key": queued.to_id()})).unwrap();
+    s.run("compose.send", &json!({})).unwrap();
+    let Some(Job::Send { id: resent, .. }) = s.take_jobs().into_iter().find(|j| matches!(j, Job::Send { .. })) else { panic!() };
+    s.apply(Event::Sent { account: id.clone(), id: resent });
+    assert!(answered(&mut s), "flag set when the edited reply is delivered");
+    // Removed from the Outbox: the owed flag is dropped.
+    let queued = queue_reply(&mut s);
+    let gone_id = s.outbox.first().map(|(_, i)| i.id).unwrap();
+    s.run("list.select", &json!({"key": queued.to_id()})).unwrap();
+    s.run("mail.delete", &json!({})).unwrap();
+    assert!(s.outbox.is_empty());
+    s.apply(Event::Sent { account: id.clone(), id: gone_id });
+    assert!(!answered(&mut s), "no flag for an undelivered reply");
+    s.run("folder.open", &json!({"account": id, "folder": "INBOX"})).unwrap();
 
     // Delete moves to Deleted Items through a job.
     s.run("list.select", &json!({"key": key.to_id()})).unwrap();
@@ -2231,6 +2300,23 @@ fn saving_a_contact_keeps_what_the_form_does_not_show() {
     assert_eq!((c.given.as_str(), c.family.as_str(), c.name.as_str()), ("Jeanne", "Muster", ""), "the parts of the same name stay");
     assert_eq!(c.emails.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["work", "home", ""], "kinds kept; the new one has none");
     assert_eq!(c.phones[0].kind, "cell", "the same number, written another way");
+    // Upstream's form since 0.16 (its `params`): the addresses as a list of strings, whose kinds stay; a number with the
+    // kind of its row, the person's choice even when it is none (« Other phone »); an object without a kind keeps its own.
+    s.run("contact.update", &json!({"uid": uid, "emails": ["jm@example.org", "jeanne@example.ch"], "phones": [{"value": "+41 79 000 00 00"}]}))
+        .unwrap();
+    let c = s.find_person(&uid).unwrap().card;
+    assert_eq!(
+        c.emails.iter().map(|e| (e.value.as_str(), e.kind.as_str())).collect::<Vec<_>>(),
+        [("jm@example.org", "home"), ("jeanne@example.ch", "work")]
+    );
+    assert_eq!(c.phones[0].kind, "cell", "no kind given: its own");
+    s.run(
+        "contact.update",
+        &json!({"uid": uid, "phones": [{"value": "+41 79 000 00 00", "kind": ""}, {"value": "+41 21 000 00 00", "kind": "work"}]}),
+    )
+    .unwrap();
+    let c = s.find_person(&uid).unwrap().card;
+    assert_eq!(c.phones.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(), ["", "work"], "the kinds given, none included");
     // Another name: it is the name now, and its parts go.
     s.run("contact.update", &json!({"uid": uid, "name": "Jeanne Exemple"})).unwrap();
     let c = s.find_person(&uid).unwrap().card;
@@ -2664,6 +2750,44 @@ fn a_formatted_signature_keeps_its_look() {
     s.run("account.setSignature", &json!({"account": "sample", "signature": "R."})).unwrap();
     assert!(s.account("sample").unwrap().config.signature_html.is_empty());
     assert!(s.run("account.setSignature", &json!({"account": "sample", "signature": "x", "html": "<p><b>\u{0}"})).is_ok(), "junk HTML");
+}
+
+/// Issue #1: a contact's numbers keep what they are (business, home, mobile…), and its
+/// addresses and birthday are fields of their own, as in Outlook.
+#[test]
+fn contacts_keep_typed_numbers_addresses_and_birthdays() {
+    let mut s = sample_session("contact-fields");
+    let uid = s
+        .run(
+            "contact.create",
+            &json!({
+                "name": "Jos Peeters",
+                "emails": ["jos@company.example", "jos@home.example"],
+                "phones": [{"value": "+32 2 123 45 67", "kind": "work"}, {"value": "+32 490 12 34 56", "kind": "cell"}, {"value": "+32 9 765 43 21", "kind": "home"}],
+                "addresses": [{"kind": "work", "street": "An street 1", "postcode": "1000", "city": "Brussel", "country": "Belgium"}, {"kind": "home", "city": "Gent"}, {"street": " "}],
+                "birthday": "1980-02-29",
+            }),
+        )
+        .unwrap()["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c = s.find_person(&uid).unwrap().card;
+    let kinds: Vec<(&str, &str)> = c.phones.iter().map(|p| (p.kind.as_str(), p.value.as_str())).collect();
+    assert_eq!(kinds, [("work", "+32 2 123 45 67"), ("cell", "+32 490 12 34 56"), ("home", "+32 9 765 43 21")]);
+    assert_eq!(c.addresses.len(), 2, "an empty one isn't kept");
+    assert_eq!(c.addresses[0].one_line(), "An street 1, 1000 Brussel, Belgium");
+    assert_eq!(c.birthday, "1980-02-29");
+    assert_eq!(c.emails.len(), 2);
+    // Changing one thing leaves the rest; a birthday that isn't a date is refused.
+    s.run("contact.update", &json!({"uid": uid, "title": "Owner"})).unwrap();
+    assert_eq!(s.find_person(&uid).unwrap().card.phones.len(), 3);
+    assert!(s.run("contact.update", &json!({"uid": uid, "birthday": "next tuesday"})).is_err());
+    s.run("contact.update", &json!({"uid": uid, "birthday": ""})).unwrap();
+    assert!(s.find_person(&uid).unwrap().card.birthday.is_empty());
+    // Strings still work for phones (kind unknown).
+    s.run("contact.update", &json!({"uid": uid, "phones": "+1 555 0100, +1 555 0101"})).unwrap();
+    assert_eq!(s.find_person(&uid).unwrap().card.phones.len(), 2);
 }
 
 /// Issue #1: Select Names opens with the address book chosen (Outlook's "Show this address list
@@ -3402,5 +3526,118 @@ fn an_invitation_s_time_is_read_by_its_own_date_s_offset() {
     let cal = s.read_calendar(ics.as_bytes());
     assert_eq!(cal.events[0].start, utc_at(2026, 10, 27, 9), "10:00 winter time");
     s.set_clock(utc_at(2026, 10, 17, 9), 7200);
+    done(s);
+}
+
+/// A big folder (tens of thousands of messages, as a 60 GB data file brings): selecting all and
+/// marking them read, then deleting them, takes moments, not minutes (per message, a delete read
+/// its whole folder again, and lookups went through whole lists: 8,000 took 65 s).
+#[test]
+fn a_big_folder_changes_all_at_once_quickly() {
+    let store = temp("big-folder-ops");
+    sample::seed_if_empty(&store, NOW).unwrap();
+    let n = 20_000u32;
+    let mut st = store.load_folder("sample", "Projects").unwrap();
+    st.validity = 7;
+    st.messages = (1..=n)
+        .map(|uid| mailcraft_model::Summary {
+            key: mailcraft_model::MessageKey { account: "sample".into(), folder: "Projects".into(), validity: 7, uid },
+            subject: format!("Report {uid}"),
+            date: NOW - i64::from(uid) * 60,
+            ..Default::default()
+        })
+        .collect();
+    store.save_folder("sample", "Projects", &st).unwrap();
+    let mut s = Session::open(Some(store), mailcraft_model::dates::Clock::new(NOW, 0));
+    s.run("folder.open", &json!({"account": "sample", "folder": "Projects"})).unwrap();
+    assert_eq!(s.list.len(), n as usize);
+    let began = std::time::Instant::now();
+    s.run("list.selectAll", &json!({})).unwrap();
+    s.run("mail.markRead", &json!({})).unwrap();
+    let took = began.elapsed();
+    assert!(s.list.iter().all(|m| m.flags.seen));
+    assert!(s.store.as_ref().unwrap().load_folder("sample", "Projects").unwrap().messages.iter().all(|m| m.flags.seen));
+    assert!(took < std::time::Duration::from_secs(15), "marking {n} read took {took:?}");
+    let began = std::time::Instant::now();
+    s.run("list.selectAll", &json!({})).unwrap();
+    s.run("mail.delete", &json!({})).unwrap();
+    let took = began.elapsed();
+    assert!(s.list.is_empty(), "{}", s.list.len());
+    assert!(took < std::time::Duration::from_secs(15), "deleting {n} took {took:?}");
+}
+
+/// Looking through a big mailbox (the address book reads every folder) keeps only so many
+/// messages' summaries in memory; the folder on screen stays, and one let go reads back whole.
+#[test]
+fn the_folder_cache_lets_go_of_folders_past_its_limit() {
+    let mut s = sample_session("folder-cache-limit");
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    s.set_cache_limit(3);
+    let inbox = s.list.len();
+    assert!(inbox > 3, "the sample's Inbox is bigger than the limit");
+    // A change: the address book is built again, reading every folder.
+    s.run("list.selectAll", &json!({})).unwrap();
+    s.run("mail.markRead", &json!({})).unwrap();
+    let loads = s.cache_order.len();
+    let _ = s.address_book("all", "");
+    assert!(s.cache_order.len() >= loads, "every folder was read");
+    let cached: usize = s.cache.values().map(|st| st.messages.len()).sum();
+    assert!(s.cache.contains_key(&("sample".to_string(), "INBOX".to_string())), "the folder on screen stays");
+    // The one on screen, and the one just read (kept even past the limit: it's being used).
+    let biggest = s.account("sample").unwrap().folders.iter().filter(|f| f.path != "INBOX").map(|f| f.total as usize).max().unwrap_or(0);
+    let held: Vec<(String, usize)> = s.cache.iter().map(|(k, v)| (k.1.clone(), v.messages.len())).collect();
+    assert!(cached <= inbox + biggest.max(3), "{cached} summaries kept: {held:?}, inbox {inbox}, biggest {biggest}, view {:?}", s.view);
+    let total: usize = s.account("sample").unwrap().folders.iter().map(|f| f.total as usize).sum();
+    assert!(cached < total, "not the whole mailbox: {cached} of {total}");
+    // A folder let go reads back as it was.
+    let sent_before = s.store.as_ref().unwrap().load_folder("sample", "Sent").unwrap().messages.len();
+    assert_eq!(s.folder_state("sample", "Sent").messages.len(), sent_before);
+    s.refresh_list();
+    assert_eq!(s.list.len(), inbox);
+}
+
+/// Rules go to a file and come back, on this computer or another: an account by its address,
+/// a missing category made, a rule already here not doubled, junk refused.
+#[test]
+fn rules_export_and_import() {
+    let mut s = sample_session("rules-io");
+    s.run("category.create", &json!({"name": "Clients"})).unwrap();
+    let rule = |name: &str, account: Option<&str>| json!({"rule": {"name": name, "conditions": [{"if": "from", "value": "printshop"}], "actions": [{"do": "categorize", "value": "Clients"}], "account": account}});
+    s.run("rules.add", &rule("Print shop", Some("sample"))).unwrap();
+    s.run("rules.add", &rule("Everywhere", None)).unwrap();
+    let file = s.store.as_ref().unwrap().root().join("rules.mailcraft-rules");
+    s.run("rules.export", &json!({"path": file.to_string_lossy()})).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("\"accountEmail\"") && !text.contains("\"account\": \"sample\""), "an account by its address: {text}");
+
+    // Here again: nothing doubled.
+    let r = s.run("rules.import", &json!({"path": file.to_string_lossy()})).unwrap();
+    assert_eq!((r["added"].as_u64(), s.rules.len()), (Some(0), 2));
+
+    // Another computer: the same address, no Clients category yet.
+    let mut other = sample_session("rules-io-2");
+    assert!(other.category("Clients").is_none());
+    let r = other.run("rules.import", &json!({"path": file.to_string_lossy()})).unwrap();
+    assert_eq!((r["added"].as_u64(), r["turnedOff"].as_u64()), (Some(2), Some(0)));
+    assert!(other.category("Clients").is_some(), "the category is made");
+    assert_eq!(other.rules[0].account.as_deref(), Some("sample"));
+    assert!(other.rules[0].enabled);
+
+    // An account this computer doesn't have: the rule comes in turned off. (Saved again by an
+    // editor that starts it with a byte order mark.)
+    let foreign = text.replacen("riley@studio.example", "nobody@elsewhere.example", 1);
+    std::fs::write(&file, [&b"\xEF\xBB\xBF"[..], foreign.as_bytes()].concat()).unwrap();
+    let r = other.run("rules.import", &json!({"path": file.to_string_lossy(), "replace": true})).unwrap();
+    assert_eq!((r["turnedOff"].as_u64(), other.rules.len()), (Some(1), 2));
+    assert!(!other.rules[0].enabled && other.rules[0].account.is_none());
+
+    // Junk, and a file that isn't one.
+    for junk in [&b"{\"rules\": []}"[..], b"not json", b"{\"mailcraftRules\": 1, \"rules\": [{\"name\": 3}]}", &[0xff; 64][..]] {
+        std::fs::write(&file, junk).unwrap();
+        assert!(other.run("rules.import", &json!({"path": file.to_string_lossy()})).is_err());
+    }
+    assert_eq!(other.rules.len(), 2, "a bad file changes nothing");
+    assert!(other.run("rules.import", &json!({"path": "/no/such/file"})).is_err());
+    done(other);
     done(s);
 }

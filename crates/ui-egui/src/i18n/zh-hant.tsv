@@ -513,7 +513,6 @@
 	Back to the reading pane	放回讀取窗格
 	Write it in a window of its own	在獨立的視窗中撰寫
 	Hide Bcc	隱藏密件副本
-	From ▾	寄件者 ▾
 	Untitled	未命名
 	Write new messages in a window of their own	在獨立的視窗中撰寫新郵件
 	Saved in Drafts	已儲存至草稿
@@ -556,7 +555,7 @@
 	Exporting to {file}…	正在匯出到 {file}…
 	Export	匯出
 	Export to Outlook data file	匯出到 Outlook 資料檔
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	將帳戶的郵件連同資料夾寫入 Outlook 和其他郵件應用程式可以開啟的 Outlook 資料檔 (.pst)。從未下載的郵件不包含在內。
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	將帳戶的郵件連同資料夾寫入 Outlook 和其他郵件應用程式可以開啟的 Outlook 資料檔 (.pst)。
 	Exchange server (EWS)	Exchange 伺服器 (EWS)
 	Exchange server	Exchange 伺服器
 	Server: {url} (EWS)	伺服器：{url} (EWS)
@@ -811,6 +810,49 @@
 	Everyone you've written to or heard from, and your contacts	與你通過郵件的所有人，以及你的連絡人
 	Hide {calendar}	隱藏 {calendar}
 	Write your signature, or paste it…	輸入簽名或貼上…
+	Address books	通訊錄
+	Birthday	生日
+	Business	商務
+	City	城市
+	Fax	傳真
+	Mobile	行動電話
+	Pager	呼叫器
+	Shared with you through {account}: read-only	透過 {account} 與你共用：唯讀
+	YYYY-MM-DD	YYYY-MM-DD
+	Email 2	電子郵件 2
+	Email 3	電子郵件 3
+	Business fax	商務傳真
+	Other phone	其他電話
+	Street	街道
+	Postal code	郵遞區號
+	State/Province	省/市
+	Country/Region	國家/地區
+	Business address	商務地址
+	Home address	住家地址
+	Delete “{name}”?	刪除「{name}」?
+	Delete this contact?	刪除此連絡人?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	將刪除此連絡人及其儲存的所有資訊。此動作無法復原。
+	Export…	匯出…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	新增由 MailCraft 儲存的檔案中的規則。此電腦上沒有的帳戶的規則會以關閉狀態新增。
+	Change…	變更…
+	Clean up	清理
+	Export rules	匯出規則
+	Import rules	匯入規則
+	Rules imported: {n}	已匯入 {n} 條規則
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	已匯入 {n} 條規則；{off} 條因其帳戶不在此電腦上而關閉
+	Import…	匯入…
+	No data file is open.	沒有開啟的資料檔。
+	On the server	伺服器上
+	On this computer	此電腦上
+	Open…	開啟…
+	Remove account	移除帳戶
+	Save your rules in a file, to keep them or to use them on another computer.	將規則儲存到檔案中，以便保留或在另一台電腦上使用。
+	Rules saved in {file}: {n}	已將 {n} 條規則儲存到 {file}
+	Save {n} Selected…	儲存所選的 {n} 個…
+	Run all	全部執行
+	Run every rule that's on, on the mail already in the Inbox	對收件匣中已有的郵件執行所有已開啟的規則
+	Find a rule	尋找規則
+	No rule matches.	沒有符合的規則。
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	封存

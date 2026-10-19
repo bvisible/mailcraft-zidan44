@@ -1,7 +1,7 @@
 //! The session: accounts, the current view and its message list, the open message, the message
 //! being written, preferences, and the queue of jobs for the network layer.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use mailcraft_mime::{self as mime, OutAttachment, Parsed, ReplyMode};
@@ -535,10 +535,26 @@ pub struct Notice {
 struct SearchIndex {
     index: Index,
     keys: Vec<MessageKey>,
-    bodies: HashMap<MessageKey, Arc<str>>,
+    /// Whether each message's body words are in the index (the words themselves aren't kept: a
+    /// big mailbox's would fill the memory; they're read again for the messages a search finds).
+    has_body: Vec<bool>,
     scope: SearchScope,
     view: View,
 }
+
+/// File for the Replied/Forwarded flags still owed by replies and forwards in the Outbox.
+const PENDING_MARKS: &str = "pending-marks.json";
+
+/// A local account with more messages than this keeps the counts it saved when it opens, rather
+/// than reading every folder to count them.
+const RECOUNT_MAX: u64 = 50_000;
+
+/// Message summaries kept in memory at most, besides the folders on screen (a big data file's
+/// whole mailbox is several times this).
+const CACHE_MESSAGES: usize = 300_000;
+
+/// Body words kept for search at most (bytes): enough for the messages a search looks at again.
+const BODY_WORDS_BYTES: usize = 48 << 20;
 
 pub struct Session {
     pub store: Option<Store>,
@@ -571,7 +587,14 @@ pub struct Session {
     /// Held-back Outbox messages already asked to be sent when their time came.
     flushed: BTreeSet<u64>,
     jobs: Vec<Job>,
-    cache: HashMap<(String, String), FolderState>,
+    pub(crate) cache: HashMap<(String, String), FolderState>,
+    /// The cached folders, the least recently used first.
+    pub(crate) cache_order: Vec<(String, String)>,
+    /// Flags owed to originals, keyed by the Outbox id of the reply or forward that earns them:
+    /// set when the server accepts that message. Saved to disk so a restart keeps them.
+    pending_marks: BTreeMap<u64, (MessageKey, Flag)>,
+    /// Summaries kept cached at most ([`CACHE_MESSAGES`]; tests make it small).
+    pub(crate) cache_limit: usize,
     /// Built on first use from the cached mail; dropped when mail arrives.
     contacts: Option<ContactBook>,
     /// The highest UID seen per Inbox, so only mail that arrives later is announced.
@@ -620,6 +643,8 @@ pub struct Session {
     /// the cache once: the index is rebuilt whenever mail changes, and parsing every message
     /// again each time made typing in the search box hang.
     body_words: HashMap<MessageKey, Arc<str>>,
+    /// Their size, kept under [`BODY_WORDS_BYTES`].
+    body_words_bytes: usize,
     registry: Arc<Registry>,
     next_id: u64,
     seed: u64,
@@ -654,6 +679,9 @@ impl Session {
             flushed: BTreeSet::new(),
             jobs: Vec::new(),
             cache: HashMap::new(),
+            cache_order: Vec::new(),
+            pending_marks: BTreeMap::new(),
+            cache_limit: CACHE_MESSAGES,
             contacts: None,
             seen_uid: HashMap::new(),
             new_mail: Vec::new(),
@@ -678,6 +706,7 @@ impl Session {
             read_due: None,
             read_on_leave: None,
             body_words: HashMap::new(),
+            body_words_bytes: 0,
             registry: Arc::new(crate::cmd::registry()),
             // Compose ids also name Outbox entries, which outlive a session: start from the clock.
             next_id: u64::try_from(clock.now.max(0)).unwrap_or(0).saturating_mul(1000),
@@ -686,6 +715,12 @@ impl Session {
         if let Some(store) = &s.store {
             s.rules = store.load_doc("rules.json").unwrap_or_default();
             s.snoozes = store.load_doc("snoozes.json").unwrap_or_default();
+            s.pending_marks = store
+                .load_doc::<Vec<(u64, MessageKey, Flag)>>(PENDING_MARKS)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, k, f)| (id, (k, f)))
+                .collect();
             let accounts = store.load_accounts().unwrap_or_else(|e| {
                 log::warn!("accounts: {e}");
                 Vec::new()
@@ -711,8 +746,13 @@ impl Session {
                 s.jobs.push(Job::Start { account: a.config.clone(), password: None });
             }
         }
+        // Counted again on opening, unless big: a big data file's counts were kept as it came in
+        // and with every change since (counting meant reading its every folder's list).
         for id in local {
-            s.recount_local(&id);
+            let kept: u64 = s.account(&id).map(|a| a.folders.iter().map(|f| u64::from(f.total)).sum()).unwrap_or(0);
+            if kept <= RECOUNT_MAX {
+                s.recount_local(&id, None);
+            }
         }
         // What's already cached isn't new.
         let inboxes: Vec<(String, String)> =
@@ -870,9 +910,45 @@ impl Session {
         if !self.cache.contains_key(&k) {
             let st = self.store.as_ref().and_then(|s| s.load_folder(account, folder).ok()).unwrap_or_default();
             self.cache.insert(k.clone(), st);
+            self.cache_order.retain(|o| *o != k);
+            self.cache_order.push(k.clone());
+            self.trim_cache(&k);
+        } else if self.cache_order.last() != Some(&k) {
+            self.cache_order.retain(|o| *o != k);
+            self.cache_order.push(k.clone());
         }
         static EMPTY: std::sync::OnceLock<FolderState> = std::sync::OnceLock::new();
         self.cache.get(&k).unwrap_or_else(|| EMPTY.get_or_init(FolderState::default))
+    }
+
+    /// Keep the cached lists under `cache_limit` summaries: the least recently used folders
+    /// go first (read again when wanted), never the ones on screen nor `keep`. Looking through a
+    /// big mailbox (the address book, a search of everything) no longer leaves all of it in memory.
+    fn trim_cache(&mut self, keep: &(String, String)) {
+        let mut total: usize = self.cache.values().map(|st| st.messages.len()).sum();
+        if total <= self.cache_limit {
+            return;
+        }
+        let shown = self.view_folders();
+        let mut i = 0;
+        while total > self.cache_limit && i < self.cache_order.len() {
+            let k = self.cache_order.get(i).cloned().unwrap_or_default();
+            if k == *keep || shown.contains(&k) {
+                i += 1;
+                continue;
+            }
+            if let Some(st) = self.cache.remove(&k) {
+                total = total.saturating_sub(st.messages.len());
+            }
+            self.cache_order.remove(i);
+        }
+    }
+
+    /// Change how many summaries the cache keeps, letting go of what's past it now.
+    #[cfg(test)]
+    pub(crate) fn set_cache_limit(&mut self, n: usize) {
+        self.cache_limit = n;
+        self.trim_cache(&(String::new(), String::new()));
     }
 
     fn reload_folder(&mut self, account: &str, folder: &str) {
@@ -1124,7 +1200,11 @@ impl Session {
 
     /// The selected messages (in list order).
     pub fn selected(&self) -> Vec<Summary> {
-        self.list.iter().filter(|m| self.selection.contains(&m.key)).cloned().collect()
+        if self.selection.len() < 8 {
+            return self.list.iter().filter(|m| self.selection.contains(&m.key)).cloned().collect();
+        }
+        let chosen: HashSet<&MessageKey> = self.selection.iter().collect();
+        self.list.iter().filter(|m| chosen.contains(&m.key)).cloned().collect()
     }
 
     /// The conversation a message belongs to in the current list.
@@ -1275,13 +1355,15 @@ impl Session {
             return;
         }
         let words: Arc<str> = Arc::from(mime::search_text(raw));
-        self.body_words.insert(key.clone(), words.clone());
+        self.keep_words(key, words.clone());
         if let Some(ix) = self.index.as_mut()
             && let Some(doc) = ix.keys.iter().position(|k| k == key)
-            && !ix.bodies.contains_key(key)
+            && ix.has_body.get(doc) == Some(&false)
         {
             ix.index.add(u32::try_from(doc).unwrap_or(u32::MAX), &words);
-            ix.bodies.insert(key.clone(), words);
+            if let Some(b) = ix.has_body.get_mut(doc) {
+                *b = true;
+            }
         }
     }
 
@@ -1392,7 +1474,8 @@ impl Session {
             if a != account {
                 continue;
             }
-            let mine: Vec<u32> = op.keys().iter().filter(|k| &k.folder == f && k.validity == st.validity).map(|k| k.uid).collect();
+            // A set: every message of a big folder may change at once.
+            let mine: HashSet<u32> = op.keys().iter().filter(|k| &k.folder == f && k.validity == st.validity).map(|k| k.uid).collect();
             if mine.is_empty() {
                 continue;
             }
@@ -1432,26 +1515,69 @@ impl Session {
     /// destination with new UIDs.
     fn apply_op_local(&mut self, account: &str, op: &Op) {
         let Some(store) = self.store.clone() else { return };
+        // The folders it touches (counted again after; all of them for a folder change).
+        let mut touched: Vec<String> = op.keys().iter().map(|k| k.folder.clone()).collect();
+        match op {
+            Op::Move { to, .. } => touched.push(to.clone()),
+            Op::EmptyFolder { path } => touched.push(path.clone()),
+            _ => {}
+        }
+        touched.sort();
+        touched.dedup();
+        // A flag or category: the lists in memory have it already (`apply_op_memory`), so they're
+        // saved as they are (a big folder's changed page only), not read from disk, changed and
+        // read again. One not in memory is changed on disk.
+        if matches!(op, Op::SetFlag { .. } | Op::SetKeyword { .. })
+            && touched.iter().all(|f| self.cache.contains_key(&(account.to_string(), f.clone())))
+        {
+            let changed: HashSet<u32> = op.keys().iter().map(|k| k.uid).collect();
+            for f in &touched {
+                if let Some(st) = self.cache.get(&(account.to_string(), f.clone()))
+                    && let Err(e) = store.save_folder_changed(account, f, st, &changed)
+                {
+                    self.notice(e.to_string(), true);
+                }
+            }
+            self.recount_local(account, Some(&touched));
+            return;
+        }
         if let Op::Move { keys, to } = op {
             let mut dest = store.load_folder(account, to).unwrap_or_default();
             if dest.validity == 0 {
                 dest.validity = 1;
             }
+            // Each source folder read once, its messages found by number; the bodies written
+            // together (a folder's every message may go at once: per message, all of this was
+            // read again, and each body was a write of its own).
+            let mut sources: HashMap<String, HashMap<u32, Summary>> = HashMap::new();
+            let mut uid = dest.uid_next.max(dest.messages.iter().map(|m| m.key.uid).max().unwrap_or(0) + 1);
+            let mut bodies: Vec<(MessageKey, Vec<u8>)> = Vec::new();
+            let mut pending = 0usize;
             for k in keys {
-                let Ok(src) = store.load_folder(account, &k.folder) else { continue };
                 if k.folder == *to {
                     continue;
                 }
-                let Some(m) = src.find(k.uid) else { continue };
-                let uid = dest.uid_next.max(dest.messages.iter().map(|m| m.key.uid).max().unwrap_or(0) + 1);
-                dest.uid_next = uid + 1;
+                let src = sources.entry(k.folder.clone()).or_insert_with(|| {
+                    store.load_folder(account, &k.folder).map(|st| st.messages.into_iter().map(|m| (m.key.uid, m)).collect()).unwrap_or_default()
+                });
+                let Some(m) = src.get(&k.uid) else { continue };
                 let mut moved = m.clone();
                 moved.key = MessageKey { account: account.to_string(), folder: to.clone(), validity: dest.validity, uid };
+                uid += 1;
                 if let Some(raw) = store.read_body(k) {
-                    let _ = store.write_body(&moved.key, &raw);
+                    pending += raw.len();
+                    bodies.push((moved.key.clone(), raw));
+                }
+                if bodies.len() >= 1000 || pending >= 16 << 20 {
+                    let _ = store.write_bodies(&std::mem::take(&mut bodies));
+                    pending = 0;
                 }
                 dest.messages.push(moved);
             }
+            if !bodies.is_empty() {
+                let _ = store.write_bodies(&bodies);
+            }
+            dest.uid_next = uid;
             sort_newest_first(&mut dest.messages);
             if let Err(e) = store.save_folder(account, to, &dest) {
                 self.notice(e.to_string(), true);
@@ -1474,7 +1600,7 @@ impl Session {
                 a.folders = folders;
             }
         }
-        self.recount_local(account);
+        self.recount_local(account, (!op.is_folder_op()).then_some(&touched));
     }
 
     /// A folder-list change, in memory: the account's folders, the open view, cached folder
@@ -1785,8 +1911,12 @@ impl Session {
         Ok(serde_json::json!({ "on": on }))
     }
 
-    fn recount_local(&mut self, account: &str) {
-        let paths: Vec<String> = self.account(account).map(|a| a.folders.iter().map(|f| f.path.clone()).collect()).unwrap_or_default();
+    /// Count a local account's folders again (`only` these, or all of them).
+    fn recount_local(&mut self, account: &str, only: Option<&[String]>) {
+        let paths: Vec<String> = match only {
+            Some(list) => list.to_vec(),
+            None => self.account(account).map(|a| a.folders.iter().map(|f| f.path.clone()).collect()).unwrap_or_default(),
+        };
         let mut counts = Vec::new();
         for p in paths {
             let st = self.folder_state(account, &p);
@@ -1815,6 +1945,7 @@ impl Session {
 
     /// The message to show after `gone` leave the list: the next one down, else the one above.
     fn successor(&self, gone: &[MessageKey]) -> Option<MessageKey> {
+        let gone: HashSet<&MessageKey> = gone.iter().collect();
         let last = self.list.iter().rposition(|m| gone.contains(&m.key))?;
         self.list
             .iter()
@@ -2020,20 +2151,30 @@ impl Session {
         };
         let mut index = Index::new();
         let mut keys = Vec::new();
-        let mut bodies = HashMap::new();
+        let mut has_body = Vec::new();
         for (a, f) in folders {
-            let msgs = self.folder_state(&a, &f).messages.clone();
-            for m in msgs {
-                let doc = u32::try_from(keys.len()).unwrap_or(u32::MAX);
-                index.add(doc, &summary_text(&m));
-                if let Some(words) = self.words_of(&m.key) {
-                    index.add(doc, &words);
-                    bodies.insert(m.key.clone(), words);
+            // A thousand at a time: a big folder isn't copied whole while it's read.
+            let n = self.folder_state(&a, &f).messages.len();
+            let mut at = 0;
+            while at < n {
+                let msgs: Vec<Summary> = self.folder_state(&a, &f).messages.get(at..(at + 1000).min(n)).map(<[Summary]>::to_vec).unwrap_or_default();
+                if msgs.is_empty() {
+                    break;
                 }
-                keys.push(m.key);
+                at += msgs.len();
+                for m in msgs {
+                    let doc = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+                    index.add(doc, &summary_text(&m));
+                    let words = self.words_of(&m.key);
+                    if let Some(words) = &words {
+                        index.add(doc, words);
+                    }
+                    has_body.push(words.is_some());
+                    keys.push(m.key);
+                }
             }
         }
-        self.index = Some(SearchIndex { index, keys, bodies, scope, view: self.view.clone() });
+        self.index = Some(SearchIndex { index, keys, has_body, scope, view: self.view.clone() });
     }
 
     /// A downloaded message's words for search, read once (`None`: not downloaded).
@@ -2042,12 +2183,22 @@ impl Session {
             return Some(w.clone());
         }
         let raw = self.store.as_ref().and_then(|s| s.read_body(key))?;
-        if self.body_words.len() > 200_000 {
-            self.body_words.clear();
-        }
         let words: Arc<str> = Arc::from(mime::search_text(&raw));
-        self.body_words.insert(key.clone(), words.clone());
+        self.keep_words(key, words.clone());
         Some(words)
+    }
+
+    /// Keep a message's body words, the oldest kept going first past [`BODY_WORDS_BYTES`] (all
+    /// at once: they're cheap to read again).
+    fn keep_words(&mut self, key: &MessageKey, words: Arc<str>) {
+        if self.body_words_bytes + words.len() > BODY_WORDS_BYTES {
+            self.body_words.clear();
+            self.body_words_bytes = 0;
+        }
+        self.body_words_bytes += words.len();
+        if let Some(old) = self.body_words.insert(key.clone(), words) {
+            self.body_words_bytes = self.body_words_bytes.saturating_sub(old.len());
+        }
     }
 
     fn search_results(&mut self, q: &str, scope: SearchScope) -> Vec<Summary> {
@@ -2070,10 +2221,23 @@ impl Session {
         self.ensure_index(scope);
         let Some(ix) = self.index.take() else { return Vec::new() };
         let mut out = Vec::new();
+        // Each folder's messages by number, made once: looked up one by one in the list, a search
+        // finding most of a big folder was quadratic.
+        let mut by_uid: HashMap<(String, String), HashMap<u32, usize>> = HashMap::new();
+        let needs_body = query.needs_body();
         for doc in ix.index.candidates(&query) {
             let Some(key) = ix.keys.get(doc as usize) else { continue };
-            let Some(m) = self.folder_state(&key.account, &key.folder).find(key.uid).cloned() else { continue };
-            if query.matches(&Doc { summary: &m, body: ix.bodies.get(key).map(|b| &**b) }) {
+            let folder = (key.account.clone(), key.folder.clone());
+            if !by_uid.contains_key(&folder) {
+                // Where each message is in its folder's list (not a copy of every summary).
+                let map = self.folder_state(&key.account, &key.folder).messages.iter().enumerate().map(|(i, m)| (m.key.uid, i)).collect();
+                by_uid.insert(folder.clone(), map);
+            }
+            let Some(&at) = by_uid.get(&folder).and_then(|f| f.get(&key.uid)) else { continue };
+            let Some(m) = self.folder_state(&key.account, &key.folder).messages.get(at).filter(|m| m.key.uid == key.uid).cloned() else { continue };
+            // The body read again only when the index can't settle the query.
+            let body = if needs_body && ix.has_body.get(doc as usize) == Some(&true) { self.words_of(key) } else { None };
+            if query.matches(&Doc { summary: &m, body: body.as_deref(), indexed: true }) {
                 out.push(m);
             }
         }
@@ -2164,8 +2328,8 @@ impl Session {
             id,
             account,
             signature: if sig.trim().is_empty() { String::new() } else { signature_block(&sig) },
-            to: addr::format_list(&d.to),
-            cc: addr::format_list(&d.cc),
+            to: addr::format_field(&d.to),
+            cc: addr::format_field(&d.cc),
             subject: d.subject,
             body: d.body,
             styles,
@@ -2259,7 +2423,7 @@ impl Session {
             let store = self.store.as_ref().ok_or_else(|| CmdError::Failed("there is nowhere to keep it".into()))?;
             store.outbox_add(&c.account, &item, &raw).map_err(|e| CmdError::Failed(format!("the Outbox couldn't keep it: {e}")))?;
             self.after_outbox_change();
-            self.finish_sent(&c);
+            self.finish_sent(&c, false);
             // finish_sent says "sent"; it isn't yet.
             self.notices.pop();
             self.notice(format!("It will be sent {}", mailcraft_model::dates::full_time(at, &self.clock)), false);
@@ -2269,7 +2433,7 @@ impl Session {
             if let Some(folder) = &sent_folder {
                 self.file_locally(&c.account, folder, &raw, true);
             }
-            self.finish_sent(&c);
+            self.finish_sent(&c, true);
             return Ok(serde_json::json!({ "sent": c.id, "local": true }));
         }
         self.jobs.push(Job::Send { account: c.account.clone(), id: c.id, raw, from, recipients: d.recipients(), sent_folder });
@@ -2280,10 +2444,27 @@ impl Session {
         Ok(serde_json::json!({ "sending": c.id }))
     }
 
-    fn finish_sent(&mut self, c: &Compose) {
+    fn save_pending_marks(&self) {
+        let list: Vec<(u64, &MessageKey, &Flag)> = self.pending_marks.iter().map(|(id, (k, f))| (*id, k, f)).collect();
+        if let Some(store) = &self.store
+            && let Err(e) = store.save_doc(PENDING_MARKS, &list)
+        {
+            log::warn!("{PENDING_MARKS}: {e}");
+        }
+    }
+
+    /// The compose is finished. `delivered`: the server accepted it, so the original gets its
+    /// Replied or Forwarded flag now; otherwise it sits in the Outbox and the flag is owed until
+    /// delivery.
+    fn finish_sent(&mut self, c: &Compose, delivered: bool) {
         if let (Some(src), Some(mode)) = (&c.source, c.mode) {
             let flag = if mode == ReplyMode::Forward { Flag::Forwarded } else { Flag::Answered };
-            self.apply_op(&src.account.clone(), Op::SetFlag { keys: vec![src.clone()], flag, on: true });
+            if delivered {
+                self.apply_op(&src.account.clone(), Op::SetFlag { keys: vec![src.clone()], flag, on: true });
+            } else if self.pending_marks.len() < 1000 {
+                self.pending_marks.insert(c.id, (src.clone(), flag));
+                self.save_pending_marks();
+            }
         }
         if let Some(draft) = &c.draft {
             self.apply_op(&draft.account.clone(), Op::Expunge { keys: vec![draft.clone()] });
@@ -2361,7 +2542,7 @@ impl Session {
             return None;
         }
         self.reload_folder(account, folder);
-        self.recount_local(account);
+        self.recount_local(account, Some(&[folder.to_string()]));
         self.refresh_list();
         Some(key)
     }
@@ -2465,6 +2646,12 @@ impl Session {
                 store.outbox_remove(a, i.id);
             }
         }
+        // Removed from the Outbox undelivered: whatever flags they owed are dropped.
+        let before = self.pending_marks.len();
+        self.pending_marks.retain(|id, _| !gone.iter().any(|(_, i)| i.id == *id));
+        if self.pending_marks.len() != before {
+            self.save_pending_marks();
+        }
         self.reading = None;
         self.selection.clear();
         self.focus = None;
@@ -2491,9 +2678,9 @@ impl Session {
         self.compose = Some(Compose {
             id,
             account: account.clone(),
-            to: addr::format_list(&p.to),
-            cc: addr::format_list(&p.cc),
-            bcc: bcc.join(", "),
+            to: addr::format_field(&p.to),
+            cc: addr::format_field(&p.cc),
+            bcc: if bcc.is_empty() { String::new() } else { format!("{}; ", bcc.join("; ")) },
             show_cc: !bcc.is_empty(),
             subject: p.subject.clone(),
             body: p.text.clone(),
@@ -2502,6 +2689,14 @@ impl Session {
             attachments,
             ..Default::default()
         });
+        // Pulled back for editing: the owed flag moves onto the compose, for its delivery.
+        if let Some((src, flag)) = self.pending_marks.remove(&item.id) {
+            self.save_pending_marks();
+            if let Some(c) = self.compose.as_mut() {
+                c.source = Some(src);
+                c.mode = Some(if flag == Flag::Forwarded { ReplyMode::Forward } else { ReplyMode::Reply });
+            }
+        }
         store.outbox_remove(&account, item.id);
         self.reading = None;
         self.selection.clear();
@@ -2947,16 +3142,22 @@ impl Session {
             }
             Event::Sent { id, .. } => {
                 if let Some(c) = self.compose.clone().filter(|c| c.id == id) {
-                    self.finish_sent(&c);
+                    self.finish_sent(&c, true);
                 } else {
                     self.notice("Message sent", false);
+                }
+                // Delivered from the Outbox: set the flag it owed.
+                if let Some((key, flag)) = self.pending_marks.remove(&id) {
+                    self.save_pending_marks();
+                    self.apply_op(&key.account.clone(), Op::SetFlag { keys: vec![key], flag, on: true });
                 }
                 self.after_outbox_change();
             }
             Event::Queued { id, error, .. } => {
                 if let Some(c) = self.compose.clone().filter(|c| c.id == id) {
-                    // It's safe in the Outbox: as far as the user is concerned, the message is done.
-                    self.finish_sent(&c);
+                    // It's safe in the Outbox: as far as the user is concerned, the message is done
+                    // (a Replied/Forwarded flag stays owed until delivery).
+                    self.finish_sent(&c, false);
                     self.notices.pop();
                     self.notice("Saved in the Outbox: it will be sent when you're back online", false);
                 } else {

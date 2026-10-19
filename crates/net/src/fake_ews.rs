@@ -54,9 +54,19 @@ pub struct Data {
     pub url: String,
     /// People whose calendars this account may change (delegates with editor rights).
     pub editors: Vec<String>,
+    /// The folder's rights say nothing of that (as some servers answer for another mailbox's
+    /// calendar): only each item's rights do.
+    pub item_rights_only: bool,
+    /// Listing a mail folder's messages takes this long (a big mailbox's first sync).
+    pub hold: Option<std::time::Duration>,
+    /// Messages whose source can't be had (the server fails on it).
+    pub unreadable: Vec<String>,
     /// The public folder mailbox holding the public folders' content (Exchange 2013 and
     /// later): reading inside them is only answered when routed there.
     pub pf_mailbox: Option<String>,
+    /// The public folder hierarchy mailbox (Exchange 2013 and later): listing public folders is
+    /// only answered when routed there.
+    pub pf_hierarchy: Option<String>,
     /// The request's `X-PublicFolderMailbox` header.
     routed: String,
     next: u32,
@@ -78,7 +88,11 @@ impl Default for Data {
             handshakes: 0,
             url: String::new(),
             editors: Vec::new(),
+            item_rights_only: false,
+            hold: None,
+            unreadable: Vec::new(),
             pf_mailbox: None,
+            pf_hierarchy: None,
             routed: String::new(),
             next: 0,
         };
@@ -167,6 +181,12 @@ impl Data {
         )
     }
 
+    /// Whether listing under this folder goes unanswered: the public folders, asked without
+    /// being routed to the hierarchy mailbox.
+    fn unrouted_hierarchy(&self, folder: &str) -> bool {
+        self.pf_hierarchy.as_ref().is_some_and(|m| *m != self.routed) && self.public_ids().iter().any(|p| p == folder)
+    }
+
     /// Whether a request for this folder's content goes unanswered: a public folder, asked
     /// without being routed to the mailbox holding it.
     fn unrouted(&self, folder: &str) -> bool {
@@ -249,7 +269,7 @@ impl Data {
                 for f in op.child("FolderIds").map(|f| f.kids.clone()).unwrap_or_default() {
                     // Someone else's calendar: what this account may do there.
                     if let Some(who) = self.folder_id(&f).and_then(|id| id.strip_prefix("mailbox:").map(str::to_string)) {
-                        let edit = self.editors.contains(&who);
+                        let edit = self.editors.contains(&who) && !self.item_rights_only;
                         out.push(ok(format!(
                             "<m:Folders><t:CalendarFolder><t:FolderId Id=\"mailbox:{who}\"/><t:EffectiveRights><t:CreateAssociated>false</t:CreateAssociated>\
                              <t:CreateContents>{edit}</t:CreateContents><t:CreateHierarchy>false</t:CreateHierarchy><t:Delete>{edit}</t:Delete>\
@@ -257,7 +277,11 @@ impl Data {
                         )));
                         continue;
                     }
+                    let root = f.attr("Id") == Some("publicfoldersroot");
                     match self.folder_id(&f).and_then(|id| self.folders.iter().find(|x| x.id == id).cloned()) {
+                        // The root is the hierarchy's; any other public folder, its content's.
+                        Some(fo) if root && self.unrouted_hierarchy(&fo.id) => out.push(err("ErrorFolderNotFound")),
+                        Some(fo) if !root && self.unrouted(&fo.id) => out.push(err("ErrorFolderNotFound")),
                         Some(fo) => out.push(ok(format!("<m:Folders>{}</m:Folders>", self.folder_xml(&fo)))),
                         None => out.push(err("ErrorFolderNotFound")),
                     }
@@ -266,6 +290,10 @@ impl Data {
             // Shallow (public folders): the folders right under the one asked for.
             "FindFolder" if op.attr("Traversal") == Some("Shallow") => {
                 let parent = op.child("ParentFolderIds").and_then(|p| p.kids.first()).and_then(|f| self.folder_id(f)).unwrap_or_default();
+                if self.unrouted_hierarchy(&parent) {
+                    out.push(err("ErrorFolderNotFound"));
+                    return ("FindFolderResponse".into(), out);
+                }
                 let kids: Vec<String> = self
                     .folders
                     .iter()
@@ -309,6 +337,10 @@ impl Data {
                     out.push(err("ErrorFolderNotFound"));
                     return ("FindItemResponse".into(), out);
                 };
+                if self.unrouted(&folder) {
+                    out.push(err("ErrorFolderNotFound"));
+                    return ("FindItemResponse".into(), out);
+                }
                 let max: usize =
                     op.child("IndexedPageItemView").and_then(|v| v.attr("MaxEntriesReturned")).and_then(|o| o.parse().ok()).unwrap_or(1000);
                 let mut list: Vec<&It> = self.items.iter().filter(|i| i.folder == folder).collect();
@@ -351,10 +383,23 @@ impl Data {
                                 ..Default::default()
                             },
                         );
+                        // Each item's own rights (`item:EffectiveRights`), when asked for.
+                        let mut fields = Vec::new();
+                        op.all("FieldURI", &mut fields);
+                        if fields.iter().any(|f| f.attr("FieldURI") == Some("item:EffectiveRights")) {
+                            let edit = self.may_change(&id);
+                            let rights = parse(&format!(
+                                "<t:EffectiveRights><t:CreateAssociated>false</t:CreateAssociated><t:CreateContents>false</t:CreateContents>\
+                                 <t:CreateHierarchy>false</t:CreateHierarchy><t:Delete>{edit}</t:Delete><t:Modify>{edit}</t:Modify><t:Read>true</t:Read></t:EffectiveRights>"
+                            ));
+                            el.kids.extend(rights.kids);
+                        }
                         out.push(ok(format!("<m:Items>{}</m:Items>", xml(&el))));
                         continue;
                     }
                     match self.items.iter().find(|i| i.id == id) {
+                        Some(i) if self.unrouted(&i.folder) => out.push(err("ErrorItemNotFound")),
+                        Some(i) if mime && self.unreadable.contains(&i.id) => out.push(err("ErrorInternalServerError")),
                         Some(i) => out.push(ok(format!("<m:Items>{}</m:Items>", self.item_xml(i, mime)))),
                         None => out.push(err("ErrorItemNotFound")),
                     }
@@ -629,9 +674,9 @@ fn serve_connection(mut s: std::net::TcpStream, shared: &Arc<Mutex<Data>>) {
         let doc = parse(&String::from_utf8_lossy(&body));
         // Autodiscover: this server's own address.
         if doc.find("Autodiscover").is_some_and(|a| a.find("EMailAddress").is_some()) {
-            let (url, pf) = {
+            let (url, pf, hierarchy) = {
                 let d = shared.lock().unwrap();
-                (d.url.clone(), d.pf_mailbox.clone())
+                (d.url.clone(), d.pf_mailbox.clone(), d.pf_hierarchy.clone())
             };
             // The public folder mailbox, asked for by its GUID: its address.
             let asked = doc.find("EMailAddress").map(|e| e.text.clone()).unwrap_or_default();
@@ -644,9 +689,12 @@ fn serve_connection(mut s: std::net::TcpStream, shared: &Arc<Mutex<Data>>) {
                 respond(&mut s, 200, &[], answer.as_bytes());
                 continue;
             }
+            // The account's: its server, and its public folder hierarchy mailbox.
+            let public =
+                hierarchy.map(|h| format!("<PublicFolderInformation><SmtpAddress>{h}</SmtpAddress></PublicFolderInformation>")).unwrap_or_default();
             let answer = format!(
                 "<?xml version=\"1.0\"?><Autodiscover><Response><User><DisplayName>Riley</DisplayName></User><Account><AccountType>email</AccountType><Action>settings</Action>\
-                 <Protocol><Type>EXCH</Type><EwsUrl>{url}</EwsUrl></Protocol></Account></Response></Autodiscover>"
+                 <Protocol><Type>EXCH</Type><EwsUrl>{url}</EwsUrl></Protocol>{public}</Account></Response></Autodiscover>"
             );
             respond(&mut s, 200, &[], answer.as_bytes());
             continue;
@@ -660,6 +708,14 @@ fn serve_connection(mut s: std::net::TcpStream, shared: &Arc<Mutex<Data>>) {
             );
             continue;
         };
+        // A slow server: listing a mail folder takes its time (without holding up the others).
+        let hold = {
+            let d = shared.lock().unwrap();
+            d.hold.filter(|_| op.name == "FindItem" && !d.pim_folder(op.child("ParentFolderIds").and_then(|p| p.kids.first())))
+        };
+        if let Some(h) = hold {
+            std::thread::sleep(h);
+        }
         let mut d = shared.lock().unwrap();
         d.calls.push(op.name.clone());
         d.routed = routed;
@@ -1083,9 +1139,140 @@ mod tests {
         assert!(!d.pim.iter().any(|(_, f, el)| !f.starts_with("mailbox:") && el.text_of("Subject") == Some("Poster check")), "not in this mailbox");
     }
 
+    /// Issue #1, again: a server whose answer about someone's calendar folder doesn't say an
+    /// editor may change it, while each of its events does (as Outlook finds by trying).
+    #[test]
+    fn an_editor_is_known_by_the_events_rights_too() {
+        use mailcraft_model::pim::{Pim, shared_calendar_id};
+        let mut d = Data { editors: vec!["ana@contoso.example".into()], item_rights_only: true, ..Default::default() };
+        d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.folder("Calendar", None, Some("calendar"), "IPF.Appointment");
+        d.folder("Contacts", None, Some("contacts"), "IPF.Contact");
+        let item = parse(
+            "<t:CalendarItem><t:Subject>Budget review</t:Subject><t:Start>2026-10-06T13:00:00Z</t:Start><t:End>2026-10-06T14:00:00Z</t:End>\
+             <t:IsAllDayEvent>false</t:IsAllDayEvent><t:UID>budget-1</t:UID></t:CalendarItem>",
+        );
+        d.pim.push(("S1".into(), "mailbox:ana@contoso.example".into(), item.kids[0].clone()));
+        d.pim.push(("B1".into(), "mailbox:ben@contoso.example".into(), item.kids[0].clone()));
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        let pim = Pim { shared: vec!["ana@contoso.example".into(), "ben@contoso.example".into()], ..Default::default() };
+        let sync = crate::ews_pim::sync(&c, &pim, 1_792_000_000).unwrap();
+        let cals = sync.calendars.clone().unwrap();
+        let ro = |id: &str| cals.iter().find(|x| x.id == id).map(|x| x.read_only);
+        assert_eq!(
+            (ro(&shared_calendar_id("ana@contoso.example")), ro(&shared_calendar_id("ben@contoso.example"))),
+            (Some(false), Some(true)),
+            "Ana made this account an editor; Ben didn't"
+        );
+    }
+
+    /// Mail sent and automatic replies asked for while a big mailbox's first sync is still going
+    /// go at once.
+    #[test]
+    fn sending_and_automatic_replies_dont_wait_for_a_long_sync() {
+        let mut d = Data { hold: Some(Duration::from_secs(4)), ..Default::default() };
+        let inbox = d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.folder("Sent Items", None, Some("sentitems"), "IPF.Note");
+        d.folder("Projects", None, None, "IPF.Note");
+        d.folder("Archive 2024", None, None, "IPF.Note");
+        d.deliver(&inbox, &mail("Storyboard", "m1"), false, "2024-05-06T09:00:00Z");
+        let server = serve(d);
+        let data = server.data.clone();
+        let dir = std::env::temp_dir().join(format!("mailcraft-ews-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let mut pool = crate::worker::Pool::new(store, Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig {
+            id: "a1".into(),
+            name: "Riley".into(),
+            email: "riley@contoso.example".into(),
+            username: format!("{DOMAIN}\\{USER}"),
+            ews: Some(server.url.clone()),
+            ..Default::default()
+        };
+        pool.submit(Job::Start { account, password: Some(Secret(PASSWORD.into())) });
+        // The folders are listed; their messages take 4 s a folder from here.
+        until(&pool, "folders", |e| matches!(e, Event::Folders { .. }));
+        let raw = b"From: riley@contoso.example\r\nTo: zoe@contoso.example\r\nSubject: Quick answer\r\nMessage-ID: <q1@x>\r\n\r\nYes.\r\n".to_vec();
+        let asked = Instant::now();
+        pool.submit(Job::Send {
+            account: "a1".into(),
+            id: 7,
+            raw,
+            from: "riley@contoso.example".into(),
+            recipients: vec!["zoe@contoso.example".into()],
+            sent_folder: Some("Sent Items".into()),
+        });
+        pool.submit(Job::GetVacation { account: "a1".into() });
+        let (mut sent, mut replies) = (None, None);
+        let end = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < end && (sent.is_none() || replies.is_none()) {
+            match pool.wait(Duration::from_millis(50)) {
+                Some(Event::Sent { id: 7, .. }) => sent = Some(asked.elapsed()),
+                Some(Event::SendFailed { error, .. }) => panic!("send failed: {error}"),
+                Some(Event::Vacation { vacation: Some(_), .. }) => replies = Some(asked.elapsed()),
+                _ => {}
+            }
+        }
+        let (sent, replies) = (sent.expect("sent"), replies.expect("replies read"));
+        assert!(sent < Duration::from_secs(3), "the message went in {sent:?}, behind the sync");
+        assert!(replies < Duration::from_secs(3), "the replies came in {replies:?}, behind the sync");
+        assert_eq!(data.lock().unwrap().sent.len(), 1, "sent once");
+        // Several at once, and the replies changed meanwhile: each goes once, in order.
+        for (id, subject) in [(8u64, "Second"), (9, "Third"), (10, "Fourth")] {
+            pool.submit(Job::Send {
+                account: "a1".into(),
+                id,
+                raw: format!("From: riley@contoso.example\r\nTo: zoe@contoso.example\r\nSubject: {subject}\r\nMessage-ID: <{id}@x>\r\n\r\nx\r\n")
+                    .into_bytes(),
+                from: "riley@contoso.example".into(),
+                recipients: vec!["zoe@contoso.example".into()],
+                sent_folder: Some("Sent Items".into()),
+            });
+        }
+        let away = mailcraft_model::job::Vacation { enabled: true, text: "Away".into(), ..Default::default() };
+        pool.submit(Job::SetVacation { account: "a1".into(), vacation: away.clone() });
+        let asked = Instant::now();
+        let mut done: Vec<u64> = Vec::new();
+        let mut set = false;
+        while asked.elapsed() < Duration::from_secs(30) && (done.len() < 3 || !set) {
+            match pool.wait(Duration::from_millis(50)) {
+                Some(Event::Sent { id, .. }) => done.push(id),
+                Some(Event::SendFailed { error, .. }) => panic!("send failed: {error}"),
+                Some(Event::Vacation { vacation: Some(v), error: None, .. }) if v == away => set = true,
+                Some(Event::Vacation { error: Some(e), .. }) => panic!("replies: {e}"),
+                _ => {}
+            }
+        }
+        assert_eq!(done, [8, 9, 10]);
+        assert!(set && asked.elapsed() < Duration::from_secs(4), "{:?}", asked.elapsed());
+        let subjects: Vec<String> =
+            data.lock().unwrap().sent.iter().map(|r| mailcraft_mime::parse(r).map(|p| p.subject).unwrap_or_default()).collect();
+        assert_eq!(subjects, ["Quick answer", "Second", "Third", "Fourth"]);
+        // The sync carries on, and finishes (each folder 4 s, Sent Items read again once however
+        // many went).
+        let end = Instant::now() + Duration::from_secs(60);
+        while !matches!(pool.wait(Duration::from_millis(100)), Some(Event::Status { status: SyncStatus::Online { .. }, .. })) {
+            assert!(Instant::now() < end, "the sync never finished");
+        }
+        assert_eq!(data.lock().unwrap().sent.len(), 4, "not sent again");
+        // Removing the account stops both connections.
+        pool.submit(Job::Remove { account: "a1".into() });
+        pool.submit(Job::GetVacation { account: "a1".into() });
+        until(&pool, "offline answer", |e| matches!(e, Event::Vacation { error: Some(_), .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn public_folders_list_under_their_own_folder_and_sync() {
-        let mut d = Data { pf_mailbox: Some("PFContent@contoso.example".into()), ..Default::default() };
+        // Exchange 2013 and later: the hierarchy and the content each in a public folder mailbox
+        // of their own, reached only when routed there.
+        let mut d = Data {
+            pf_mailbox: Some("PFContent@contoso.example".into()),
+            pf_hierarchy: Some("PFHierarchy@contoso.example".into()),
+            ..Default::default()
+        };
         d.folder("Inbox", None, Some("inbox"), "IPF.Note");
         d.folder("Calendar", None, Some("calendar"), "IPF.Appointment");
         d.folder("Contacts", None, Some("contacts"), "IPF.Contact");
@@ -1159,5 +1346,28 @@ mod tests {
         let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
         assert_eq!(c.mailboxes().unwrap().len(), 1);
         assert!(matches!(crate::ews::Client::connect(&server.url, "x", "y", "e"), Err(crate::NetError::Auth(_))));
+    }
+
+    /// A message whose source the server won't give doesn't stop the folder: the others
+    /// download, and the folder syncs.
+    #[test]
+    fn one_unreadable_message_holds_up_nothing() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"), "IPF.Note");
+        d.deliver(&inbox, &mail("one", "m1"), false, "2026-10-01T09:00:00Z");
+        let bad = d.deliver(&inbox, &mail("two", "m2"), false, "2026-10-01T10:00:00Z");
+        d.deliver(&inbox, &mail("three", "m3"), false, "2026-10-01T11:00:00Z");
+        d.unreadable.push(bad);
+        let server = serve(d);
+        let c = crate::ews::Client::connect(&server.url, &format!("{DOMAIN}\\{USER}"), PASSWORD, "riley@contoso.example").unwrap();
+        let store = crate::fake::tests_store("ews-unreadable");
+        let mut st = crate::jmap::State::default();
+        crate::ews::list_folders(&c, &mut st, "a1").unwrap();
+        crate::ews::sync_folder(&c, &mut st, &store, "a1", "INBOX", &crate::sync::SyncOptions::default()).unwrap();
+        let fs = store.load_folder("a1", "INBOX").unwrap();
+        assert_eq!(fs.messages.len(), 3);
+        let with_body: Vec<&str> = fs.messages.iter().filter(|m| store.has_body(&m.key)).map(|m| m.subject.as_str()).collect();
+        assert_eq!(with_body, ["three", "one"], "the others downloaded");
+        let _ = std::fs::remove_dir_all(store.root());
     }
 }

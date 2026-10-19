@@ -153,6 +153,7 @@ pub(crate) fn tour() {
             Dialog::add_account(),
             Dialog::move_to(),
             Dialog::ConfirmDelete { count: 2 },
+            Dialog::ConfirmDeleteContact { uid: "zoe".into(), name: "Zoe Park".into() },
             Dialog::EmptySubject,
             Dialog::edit_account(&a.session.accounts[0].config),
             Dialog::vacation(
@@ -498,11 +499,21 @@ fn calendar_and_people_forms_save_through_commands() {
     assert!(matches!(&a.ui.dialog, Some(Dialog::Event(f)) if f.error.is_some()));
     // A person from the form is picked afterwards.
     a.ui.dialog = Some(Dialog::new_contact());
-    let mut f = crate::pim_dialogs::ContactForm { name: "Mira Chen".into(), emails: "mira@colour.example".into(), ..Default::default() };
+    let mut f = crate::pim_dialogs::ContactForm { name: "Mira Chen".into(), ..Default::default() };
+    f.emails[0] = "mira@colour.example".into();
+    f.phones[2] = "+32 490 12 34 56".into();
+    f.addresses[1].city = "Gent".into();
+    f.birthday = "1990-07-12".into();
     a.act(crate::Action::Submit("contact.create", f.params()));
     let picked = a.ui.person.clone().unwrap();
-    assert_eq!(a.session.find_person(&picked).unwrap().card.display(), "Mira Chen");
-    f.emails = "not an address".into();
+    let card = a.session.find_person(&picked).unwrap().card;
+    assert_eq!(card.display(), "Mira Chen");
+    // Issue #1: each number keeps its kind, the address and birthday their fields, and the form
+    // shows them where they were.
+    assert_eq!((card.phones[0].kind.as_str(), card.addresses[0].kind.as_str(), card.birthday.as_str()), ("cell", "home", "1990-07-12"));
+    let back = crate::pim_dialogs::ContactForm::edit(&card);
+    assert_eq!((back.phones[2].as_str(), back.addresses[1].city.as_str(), back.address_shown), ("+32 490 12 34 56", "Gent", 1));
+    f.emails[0] = "not an address".into();
     a.ui.dialog = Some(Dialog::new_contact());
     a.act(crate::Action::Submit("contact.create", f.params()));
     assert!(matches!(&a.ui.dialog, Some(Dialog::Contact(f)) if f.error.is_some()));
@@ -638,11 +649,29 @@ fn recipient_boxes_suggest_people() {
     frame(&ctx, &mut a, vec![]);
     frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
     assert_eq!(a.session.compose.as_ref().unwrap().to, "Zoe Park <zoe@studio.example>, ");
+    // Picked with the mouse: the box keeps the cursor after the click, so the next address is
+    // typed straight in.
+    frame(&ctx, &mut a, vec![Event::Text("sh".into())]);
+    frame(&ctx, &mut a, vec![]);
+    let list =
+        ctx.memory(|m| m.areas().visible_layer_ids().into_iter().filter(|l| l.order == egui::Order::Foreground).find_map(|l| m.area_rect(l.id)));
+    let row = list.map(|r| r.left_top() + egui::vec2(20.0, 16.0)).expect("the suggestions show");
+    let button = |pressed| Event::PointerButton { pos: row, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    frame(&ctx, &mut a, vec![Event::PointerMoved(row)]);
+    frame(&ctx, &mut a, vec![button(true)]);
+    frame(&ctx, &mut a, vec![button(false)]);
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![Event::Text("x".into())]);
+    let to = a.session.compose.as_ref().unwrap().to.clone();
+    assert!(to.starts_with("Zoe Park <zoe@studio.example>, ") && to.ends_with(">, x") && to.matches('@').count() == 2, "{to}");
+    a.session.compose.as_mut().unwrap().to = "Zoe Park <zoe@studio.example>, ".into();
+
     // The next address starts fresh; Escape hides the list.
     frame(&ctx, &mut a, vec![Event::Text("sh".into())]);
     frame(&ctx, &mut a, vec![key(Key::ArrowDown, Modifiers::NONE), key(Key::Escape, Modifiers::NONE)]);
     frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
     assert!(a.session.compose.as_ref().unwrap().to.ends_with(", sh"), "{}", a.session.compose.as_ref().unwrap().to);
+
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1180,5 +1209,56 @@ fn notes_are_written_on_and_kept() {
     // Ctrl+1 goes back to Mail.
     frame(&ctx, &mut a, vec![key(Key::Num1, Modifiers::COMMAND)]);
     assert_eq!(a.session.module, mailcraft_engine::Module::Mail);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+A goes to what was last clicked: the attachments when they were, else the mail list.
+#[test]
+fn ctrl_a_selects_attachments_when_they_have_the_keyboard() {
+    let (mut a, dir) = app("attach-all");
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    let k = a.session.list.iter().find(|m| m.subject.contains("festival poster")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![]);
+    a.ui.attachments_active = true;
+    frame(&ctx, &mut a, vec![key(Key::A, Modifiers::COMMAND)]);
+    let picked = a.ui.attachment_selected.as_ref().map(|(_, v)| v.len());
+    assert_eq!(picked, Some(4), "all four attachments");
+    assert_eq!(a.session.selection.len(), 1, "the mail selection is left alone");
+    // Escape lets go of them.
+    frame(&ctx, &mut a, vec![key(Key::Escape, Modifiers::NONE)]);
+    assert!(a.ui.attachment_selected.is_none() && !a.ui.attachments_active);
+    a.ui.attachments_active = true;
+    frame(&ctx, &mut a, vec![key(Key::A, Modifiers::COMMAND)]);
+    assert_eq!(a.ui.attachment_selected.as_ref().map(|(_, v)| v.len()), Some(4));
+    // Elsewhere (a press off the attachments), Ctrl+A selects the mail again.
+    let off = egui::pos2(5.0, 400.0);
+    frame(&ctx, &mut a, vec![Event::PointerMoved(off)]);
+    frame(&ctx, &mut a, vec![Event::PointerButton { pos: off, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+    frame(&ctx, &mut a, vec![Event::PointerButton { pos: off, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+    assert!(!a.ui.attachments_active);
+    assert!(a.ui.attachment_selected.is_none(), "a click elsewhere lets go of them");
+    frame(&ctx, &mut a, vec![key(Key::A, Modifiers::COMMAND)]);
+    assert_eq!(a.session.selection.len(), a.session.list.len());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Back from a previewed attachment, its chip isn't left selected.
+#[test]
+fn leaving_an_attachment_preview_lets_go_of_its_chip() {
+    let (mut a, dir) = app("attach-back");
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    let k = a.session.list.iter().find(|m| m.subject.contains("festival poster")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    frame(&ctx, &mut a, vec![]);
+    let index = a.session.reading.as_ref().and_then(|r| r.parsed.as_ref()).map(|p| p.attachments[0].index).unwrap();
+    a.ui.attachment_view = Some((k.clone(), index));
+    a.ui.attachment_selected = Some((k.clone(), vec![index]));
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![key(Key::Escape, Modifiers::NONE)]);
+    assert!(a.ui.attachment_view.is_none() && a.ui.attachment_selected.is_none());
     let _ = std::fs::remove_dir_all(dir);
 }

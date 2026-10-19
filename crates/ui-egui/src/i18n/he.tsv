@@ -513,7 +513,6 @@
 	Back to the reading pane	חזרה לחלונית הקריאה
 	Write it in a window of its own	כתוב אותה בחלון נפרד
 	Hide Bcc	הסתר עותק מוסתר
-	From ▾	מאת ▾
 	Untitled	ללא כותרת
 	Write new messages in a window of their own	כתוב הודעות חדשות בחלון נפרד
 	Saved in Drafts	נשמר בטיוטות
@@ -556,7 +555,7 @@
 	Exporting to {file}…	מייצא אל {file}…
 	Export	ייצוא
 	Export to Outlook data file	ייצוא לקובץ נתונים של Outlook
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	כתוב את הדואר של חשבון, עם התיקיות שלו, לקובץ נתונים של Outlook ‏(.pst) ש-Outlook ואפליקציות דואר אחרות יכולות לפתוח. דואר שמעולם לא הורד לא נכלל.
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	כתוב את הדואר של חשבון, עם התיקיות שלו, לקובץ נתונים של Outlook ‏(.pst) ש-Outlook ואפליקציות דואר אחרות יכולות לפתוח.
 folder	Archive	ארכיון
 month	May	מאי
 	Exchange server (EWS)	שרת Exchange ‏(EWS)
@@ -813,3 +812,46 @@ month	May	מאי
 	Everyone you've written to or heard from, and your contacts	כל מי שכתבת לו או שכתב לך, ואנשי הקשר שלך
 	Hide {calendar}	הסתר את {calendar}
 	Write your signature, or paste it…	כתבו את החתימה או הדביקו אותה…
+	Address books	פנקסי כתובות
+	Birthday	יום הולדת
+	Business	עבודה
+	City	עיר
+	Fax	פקס
+	Mobile	נייד
+	Pager	זימונית
+	Shared with you through {account}: read-only	שותף איתך דרך {account}: לקריאה בלבד
+	YYYY-MM-DD	YYYY-MM-DD
+	Email 2	דואר אלקטרוני 2
+	Email 3	דואר אלקטרוני 3
+	Business fax	פקס בעבודה
+	Other phone	טלפון אחר
+	Street	רחוב
+	Postal code	מיקוד
+	State/Province	מדינה/מחוז
+	Country/Region	מדינה/אזור
+	Business address	כתובת בעבודה
+	Home address	כתובת בבית
+	Delete “{name}”?	למחוק את „{name}”?
+	Delete this contact?	למחוק את איש הקשר הזה?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	איש הקשר יימחק, יחד עם כל מה שנשמר עליו. אי אפשר לבטל זאת.
+	Export…	ייצוא…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	מוסיף את הכללים מקובץ ש-MailCraft שמר. כלל של חשבון שאינו במחשב הזה נוסף כשהוא כבוי.
+	Change…	שינוי…
+	Clean up	ניקוי
+	Export rules	ייצוא כללים
+	Import rules	ייבוא כללים
+	Rules imported: {n}	יובאו כללים: {n}
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	יובאו כללים: {n}; {off} כבויים, כי החשבון שלהם אינו במחשב הזה
+	Import…	ייבוא…
+	No data file is open.	אין קובץ נתונים פתוח.
+	On the server	בשרת
+	On this computer	במחשב הזה
+	Open…	פתיחה…
+	Remove account	הסרת חשבון
+	Save your rules in a file, to keep them or to use them on another computer.	שומר את הכללים שלך בקובץ, כדי לשמור אותם או להשתמש בהם במחשב אחר.
+	Rules saved in {file}: {n}	כללים נשמרו ב-{file}: {n}
+	Save {n} Selected…	שמירת {n} שנבחרו…
+	Run all	הפעלת הכול
+	Run every rule that's on, on the mail already in the Inbox	מפעיל את כל הכללים הפעילים על הדואר שכבר נמצא בתיבת הדואר הנכנס
+	Find a rule	חיפוש כלל
+	No rule matches.	אין כלל תואם.

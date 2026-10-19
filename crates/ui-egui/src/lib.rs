@@ -125,6 +125,10 @@ pub trait Services {
     fn open_with(&mut self, _app: &std::path::Path, _file: &std::path::Path) -> Result<(), String> {
         Err("not available".into())
     }
+    /// A rules file to import (`None` when cancelled, or where there's no file picker).
+    fn pick_rules_file(&mut self) -> Option<PathBuf> {
+        None
+    }
     /// A folder to save into (`None` when cancelled).
     fn pick_folder(&mut self) -> Option<PathBuf> {
         None
@@ -286,6 +290,11 @@ pub enum Action {
     OpenInCraft(usize, &'static str),
     /// Save every attachment of the open message into a folder.
     SaveAll,
+    /// Save some attachments of the open message (by index) into a folder.
+    SaveAttachments(Vec<usize>),
+    /// The rules to a file, or rules from one (Outlook's Export and Import Rules).
+    ExportRules,
+    ImportRules,
     /// Sign an account in again: the browser for OAuth accounts, else the password dialog.
     SignInAgain(String),
     /// Insert a picture at the cursor of the message being written (from a file).
@@ -403,6 +412,13 @@ pub struct UiState {
     /// The attachment shown in place of its message's text (a click on its chip), as Outlook
     /// previews attachments in the reading pane.
     pub attachment_view: Option<(MessageKey, usize)>,
+    /// The attachments selected in a message's strip (a click picks one, Ctrl+click adds or
+    /// removes one, Ctrl+A takes them all), and whether the strip has the keyboard: it was the
+    /// last thing clicked, so Ctrl+A selects attachments rather than mail.
+    pub attachment_selected: Option<(MessageKey, Vec<usize>)>,
+    pub attachments_active: bool,
+    /// The pointer was over an attachment chip in the last frame drawn.
+    pub attachment_hovered: bool,
     /// Where the ribbon was last drawn (a click on the Search tab's buttons takes the focus
     /// from the box, and mustn't close the tab).
     ribbon_rect: Option<egui::Rect>,
@@ -427,6 +443,9 @@ pub struct UiState {
     pub(crate) suggest_field: Option<&'static str>,
     pub(crate) suggest_index: usize,
     pub(crate) suggest_dismissed: Option<String>,
+    /// The recipient box a suggestion was just picked into: it keeps the cursor through the rest
+    /// of that click (the release lands outside the box, which would otherwise end its focus).
+    pub(crate) suggest_refocus: Option<&'static str>,
     /// Installed Craft apps (command, path), found at start-up.
     pub(crate) craft_apps: Vec<(&'static str, PathBuf)>,
     /// The interface language setting (`auto` or a language code).
@@ -456,6 +475,10 @@ pub struct UiState {
     /// The day and week views have been scrolled to the working day once (each has its own scroll).
     pub(crate) cal_scrolled: [bool; 2],
     pub(crate) people_query: String,
+    /// The address book People shows (account, book id); `None`: all of them.
+    pub(crate) people_book: Option<(String, String)>,
+    /// The message list's rows and where each starts, kept while the list stays the same.
+    pub(crate) list_rows: Option<list::ListRows>,
     /// How People lays contacts out (Outlook's Change View).
     pub people_view: people::PeopleView,
     /// The People list's columns and sort.
@@ -524,6 +547,9 @@ impl MailApp {
                 search_due: None,
                 compose_alert: None,
                 attachment_view: None,
+                attachment_selected: None,
+                attachments_active: false,
+                attachment_hovered: false,
                 ribbon_rect: None,
                 dialog: None,
                 previews: HashMap::new(),
@@ -539,6 +565,7 @@ impl MailApp {
                 suggest_field: None,
                 suggest_index: 0,
                 suggest_dismissed: None,
+                suggest_refocus: None,
                 craft_apps: Vec::new(),
                 language: i18n::AUTO.into(),
                 fonts: (None, None),
@@ -555,6 +582,8 @@ impl MailApp {
                 mini_month: None,
                 cal_scrolled: [false; 2],
                 people_query: String::new(),
+                people_book: None,
+                list_rows: None,
                 people_view: people::PeopleView::default(),
                 people_list: people::ListSettings::default(),
                 notes_query: String::new(),
@@ -1049,8 +1078,7 @@ impl MailApp {
         }
     }
 
-    /// New mail: a desktop notification, the taskbar asking for attention when the window is in
-    /// the background, and the unread count in the window title.
+    /// New mail: a desktop notification and the unread count in the window title.
     fn announce(&mut self, ctx: &egui::Context) {
         let news = self.session.take_new_mail();
         if !news.is_empty() {
@@ -1074,10 +1102,9 @@ impl MailApp {
                     (tf!("{n} new messages", n = many.len()), tf!("From {names}", names = names))
                 }
             });
+            // Only the system notification and the title's unread count announce mail. No
+            // RequestUserAttention: Windows keeps that highlight on the taskbar until focus returns.
             self.services.notify(&title, &body);
-            if !ctx.input(|i| i.focused) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
-            }
         }
         let unread = self.session.inbox_unread();
         // The system lays out the title (right-to-left text too): as written.
@@ -1169,13 +1196,47 @@ impl MailApp {
                 }
             }
             Action::ExportDataFile(account) => {
-                let name = self.session.account(&account).map(|a| a.config.name.clone()).unwrap_or_default();
+                // Named after the account's address, as Outlook names a data file.
+                let name = self
+                    .session
+                    .account(&account)
+                    .map(|a| if a.config.email.trim().is_empty() { a.config.name.clone() } else { a.config.email.clone() })
+                    .unwrap_or_default();
                 let name = mailcraft_engine::mime::sanitize_filename(if name.trim().is_empty() { "Mail" } else { name.trim() });
                 if let Some(path) = self.services.save_path(&format!("{name}.pst")) {
                     match self.session.run("account.exportPst", &json!({"account": account, "path": path.to_string_lossy()})) {
                         Ok(_) => {
                             self.ui.backstage = None;
                             self.session.notice(tf!("Exporting to {file}…", file = path.file_name().unwrap_or_default().to_string_lossy()), false);
+                        }
+                        Err(e) => self.session.notice(e.to_string(), true),
+                    }
+                }
+            }
+            Action::ExportRules => {
+                if let Some(path) = self.services.save_path("MailCraft rules.json") {
+                    match self.session.run("rules.export", &json!({"path": path.to_string_lossy()})) {
+                        Ok(v) => {
+                            let n = v.get("rules").and_then(Value::as_u64).unwrap_or(0);
+                            let file = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            self.session.notice(tf!("Rules saved in {file}: {n}", n = n, file = file), false);
+                        }
+                        Err(e) => self.session.notice(e.to_string(), true),
+                    }
+                }
+            }
+            Action::ImportRules => {
+                if let Some(path) = self.services.pick_rules_file() {
+                    match self.session.run("rules.import", &json!({"path": path.to_string_lossy()})) {
+                        Ok(v) => {
+                            let n = v.get("added").and_then(Value::as_u64).unwrap_or(0);
+                            let off = v.get("turnedOff").and_then(Value::as_u64).unwrap_or(0);
+                            let text = if off > 0 {
+                                tf!("Rules imported: {n} ({off} turned off, as their account isn't on this computer)", n = n, off = off)
+                            } else {
+                                tf!("Rules imported: {n}", n = n)
+                            };
+                            self.session.notice(text, false);
                         }
                         Err(e) => self.session.notice(e.to_string(), true),
                     }
@@ -1276,9 +1337,8 @@ impl MailApp {
             Action::InsertPicture if self.services.pick_later("picture") => {}
             Action::AttachFiles if self.services.pick_later("attach") => {}
             Action::Print => {
-                let dir = std::env::temp_dir().join("mailcraft-print");
-                let _ = std::fs::create_dir_all(&dir);
-                let path = dir.join(format!("{}.pdf", self.message_file_name()));
+                // The message as a PDF, saved where asked, then opened to print from the viewer.
+                let Some(path) = self.services.save_path(&format!("{}.pdf", self.message_file_name())) else { return };
                 match self.session.run("message.exportPdf", &json!({"path": path.to_string_lossy()})) {
                     Ok(_) => match self.services.open_path(&path) {
                         Ok(()) => self.session.notice(tl!("Opened as a PDF: print it from the viewer"), false),
@@ -1296,9 +1356,10 @@ impl MailApp {
                     }
                 }
             }
-            Action::SaveAll => {
+            Action::SaveAll | Action::SaveAttachments(_) => {
+                let indices = if let Action::SaveAttachments(v) = &a { json!(v) } else { Value::Null };
                 if let Some(dir) = self.services.pick_folder() {
-                    match self.session.run("attachment.saveAll", &json!({"dir": dir.to_string_lossy()})) {
+                    match self.session.run("attachment.saveAll", &json!({"dir": dir.to_string_lossy(), "indices": indices})) {
                         Ok(v) => {
                             let n = v.get("saved").and_then(Value::as_array).map_or(0, Vec::len);
                             self.session.notice(tf!("Saved {n} attachments in {folder}", n = n, folder = dir.display()), false);
@@ -1451,6 +1512,13 @@ impl MailApp {
             .unwrap_or_else(|| "attachment".into())
     }
 
+    /// Every attachment of the message being read, selected (Ctrl+A in its attachments).
+    fn select_all_attachments(&mut self) {
+        let Some(r) = self.session.reading.as_ref() else { return };
+        let all: Vec<usize> = r.parsed.as_ref().map(|p| p.attachments.iter().filter(|a| !a.inline).map(|a| a.index).collect()).unwrap_or_default();
+        self.ui.attachment_selected = Some((r.key.clone(), all));
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.ui.dialog.is_some() {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -1465,6 +1533,19 @@ impl MailApp {
             return;
         }
         let typing = ctx.text_edit_focused();
+        // A press anywhere but on an attachment hands the keyboard back from the attachments and
+        // clears their selection; not one in a menu over them (Save Selected… is one).
+        if ctx.input(|i| i.pointer.primary_pressed()) && !self.ui.attachment_hovered {
+            let in_menu =
+                ctx.input(|i| i.pointer.interact_pos()).and_then(|p| ctx.layer_id_at(p)).is_some_and(|l| l.order != egui::Order::Background);
+            if !in_menu {
+                self.ui.attachments_active = false;
+                self.ui.attachment_selected = None;
+            }
+        }
+        self.ui.attachment_hovered = false;
+        // Text selected in a message (its body, headers): Ctrl+A and Ctrl+C are the text's.
+        let text_selected = ctx.plugin_opt::<egui::text_selection::LabelSelectionState>().is_some_and(|p| p.lock().has_selection());
         let pressed: Vec<(Key, egui::Modifiers)> = ctx.input(|i| {
             i.events
                 .iter()
@@ -1513,6 +1594,12 @@ impl MailApp {
                 continue;
             }
             if combo == "Escape" {
+                // Escape lets go of selected attachments first.
+                if self.ui.attachment_selected.as_ref().is_some_and(|(_, v)| !v.is_empty()) {
+                    self.ui.attachment_selected = None;
+                    self.ui.attachments_active = false;
+                    continue;
+                }
                 if self.session.search.is_some() {
                     self.ui.search_text.clear();
                     self.run("search.clear", json!({}));
@@ -1521,6 +1608,14 @@ impl MailApp {
             }
             // In a text box these edit the text (select all, undo, redo).
             if typing && matches!(combo.as_str(), "Mod+A" | "Mod+Z" | "Mod+Y" | "Mod+Shift+Z") {
+                continue;
+            }
+            // Ctrl+A in the attachments selects them all, as Outlook's does.
+            if combo == "Mod+A" && self.ui.attachments_active {
+                self.select_all_attachments();
+                continue;
+            }
+            if text_selected && matches!(combo.as_str(), "Mod+A" | "Mod+C") {
                 continue;
             }
             if let Some(spec) = reg.by_shortcut(&combo) {
@@ -1813,7 +1908,8 @@ impl MailApp {
                     .clicked()
                         && let Some(p) = &picked
                     {
-                        // //// Neoffice — asked first in a hosting page (read_only.rs).
+                        // //// Neoffice — one question first: Neoffice's own for its contacts in a hosting page, upstream's
+                        // ConfirmDeleteContact elsewhere (read_only.rs).
                         acts.push(read_only::delete(s, p));
                     }
                     // Outlook's Change View: the list with a card, business cards, a phone list.
@@ -2096,7 +2192,7 @@ impl MailApp {
         ui.horizontal_centered(|ui| {
             // The items of what's shown: the list's mail, or (in People) the contacts.
             if s.module == Module::People {
-                ui.label(RichText::new(tf!("Items: {n}", n = s.people(&self.ui.people_query).len())).color(t.dim).small());
+                ui.label(RichText::new(tf!("Items: {n}", n = people::shown(s, &self.ui).len())).color(t.dim).small());
             } else if s.module == Module::Mail {
                 let unread = s.list.iter().filter(|m| !m.flags.seen).count();
                 ui.label(RichText::new(tf!("Items: {n}", n = s.list.len())).color(t.dim).small());

@@ -513,7 +513,6 @@
 	Back to the reading pane	العودة إلى جزء القراءة
 	Write it in a window of its own	اكتبها في نافذة مستقلة
 	Hide Bcc	إخفاء النسخة المخفية
-	From ▾	من ▾
 	Untitled	بلا عنوان
 	Write new messages in a window of their own	اكتب الرسائل الجديدة في نافذة مستقلة
 	Saved in Drafts	حُفظت في المسودات
@@ -556,7 +555,7 @@
 	Exporting to {file}…	جارٍ التصدير إلى {file}…
 	Export	تصدير
 	Export to Outlook data file	تصدير إلى ملف بيانات Outlook
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	اكتب بريد حساب، بمجلداته، في ملف بيانات Outlook (.pst) يمكن لـ Outlook وتطبيقات البريد الأخرى فتحه. يُستبعد البريد الذي لم يُنزّل قط.
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	اكتب بريد حساب، بمجلداته، في ملف بيانات Outlook (.pst) يمكن لـ Outlook وتطبيقات البريد الأخرى فتحه.
 folder	Archive	أرشيف
 month	May	مايو
 	Exchange server (EWS)	خادم Exchange (EWS)
@@ -813,3 +812,46 @@ month	May	مايو
 	Everyone you've written to or heard from, and your contacts	كل من راسلته أو راسلك، وجهات اتصالك
 	Hide {calendar}	إخفاء {calendar}
 	Write your signature, or paste it…	اكتب توقيعك أو الصقه…
+	Address books	دفاتر العناوين
+	Birthday	تاريخ الميلاد
+	Business	العمل
+	City	المدينة
+	Fax	فاكس
+	Mobile	الجوال
+	Pager	جهاز النداء
+	Shared with you through {account}: read-only	مشترك معك عبر {account}: للقراءة فقط
+	YYYY-MM-DD	YYYY-MM-DD
+	Email 2	البريد الإلكتروني 2
+	Email 3	البريد الإلكتروني 3
+	Business fax	فاكس العمل
+	Other phone	هاتف آخر
+	Street	الشارع
+	Postal code	الرمز البريدي
+	State/Province	الولاية/المقاطعة
+	Country/Region	البلد/المنطقة
+	Business address	عنوان العمل
+	Home address	عنوان المنزل
+	Delete “{name}”?	هل تريد حذف «{name}»؟
+	Delete this contact?	هل تريد حذف جهة الاتصال هذه؟
+	This contact will be deleted, along with everything kept about them. This can't be undone.	سيتم حذف جهة الاتصال هذه مع كل ما هو محفوظ عنها. لا يمكن التراجع عن ذلك.
+	Export…	تصدير…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	يضيف القواعد من ملف حفظه MailCraft. القاعدة الخاصة بحساب غير موجود على هذا الكمبيوتر تُضاف معطّلة.
+	Change…	تغيير…
+	Clean up	تنظيف
+	Export rules	تصدير القواعد
+	Import rules	استيراد القواعد
+	Rules imported: {n}	تم استيراد القواعد: {n}
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	تم استيراد القواعد: {n}؛ عُطّل منها {off} لأن حسابها غير موجود على هذا الكمبيوتر
+	Import…	استيراد…
+	No data file is open.	لا يوجد ملف بيانات مفتوح.
+	On the server	على الخادم
+	On this computer	على هذا الكمبيوتر
+	Open…	فتح…
+	Remove account	إزالة الحساب
+	Save your rules in a file, to keep them or to use them on another computer.	يحفظ قواعدك في ملف للاحتفاظ بها أو لاستخدامها على كمبيوتر آخر.
+	Rules saved in {file}: {n}	تم حفظ القواعد في {file}: {n}
+	Save {n} Selected…	حفظ العناصر المحددة ({n})…
+	Run all	تشغيل الكل
+	Run every rule that's on, on the mail already in the Inbox	يشغّل كل القواعد المفعّلة على البريد الموجود في البريد الوارد
+	Find a rule	البحث عن قاعدة
+	No rule matches.	لا توجد قاعدة مطابقة.

@@ -514,7 +514,6 @@
 	Back to the reading pane	Voltar ao painel de leitura
 	Write it in a window of its own	Escrever em uma janela separada
 	Hide Bcc	Ocultar Cco
-	From ▾	De ▾
 	Untitled	Sem título
 	Write new messages in a window of their own	Escrever mensagens novas em uma janela separada
 	Saved in Drafts	Salvo em Rascunhos
@@ -557,7 +556,7 @@
 	Exporting to {file}…	Exportando para {file}…
 	Export	Exportar
 	Export to Outlook data file	Exportar para arquivo de dados do Outlook
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	Grava os emails de uma conta, com suas pastas, em um arquivo de dados do Outlook (.pst) que o Outlook e outros apps de email podem abrir. Emails nunca baixados ficam de fora.
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	Grava os emails de uma conta, com suas pastas, em um arquivo de dados do Outlook (.pst) que o Outlook e outros apps de email podem abrir.
 	Exchange server (EWS)	Servidor Exchange (EWS)
 	Exchange server	Servidor Exchange
 	Server: {url} (EWS)	Servidor: {url} (EWS)
@@ -812,6 +811,49 @@
 	Everyone you've written to or heard from, and your contacts	Todas as pessoas para quem você escreveu ou que escreveram para você, e seus contatos
 	Hide {calendar}	Ocultar {calendar}
 	Write your signature, or paste it…	Escreva sua assinatura ou cole-a…
+	Address books	Catálogos de endereços
+	Birthday	Aniversário
+	Business	Comercial
+	City	Cidade
+	Fax	Fax
+	Mobile	Celular
+	Pager	Pager
+	Shared with you through {account}: read-only	Compartilhado com você por {account}: somente leitura
+	YYYY-MM-DD	AAAA-MM-DD
+	Email 2	Email 2
+	Email 3	Email 3
+	Business fax	Fax comercial
+	Other phone	Outro telefone
+	Street	Rua
+	Postal code	CEP
+	State/Province	Estado/Província
+	Country/Region	País/Região
+	Business address	Endereço comercial
+	Home address	Endereço residencial
+	Delete “{name}”?	Excluir “{name}”?
+	Delete this contact?	Excluir este contato?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	Este contato será excluído, com tudo o que está guardado sobre ele. Isso não pode ser desfeito.
+	Export…	Exportar…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	Adiciona as regras de um arquivo salvo pelo MailCraft. Uma regra de uma conta que este computador não tem chega desativada.
+	Change…	Alterar…
+	Clean up	Limpar
+	Export rules	Exportar regras
+	Import rules	Importar regras
+	Rules imported: {n}	Regras importadas: {n}
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	Regras importadas: {n}; {off} desativadas, pois a conta delas não está neste computador
+	Import…	Importar…
+	No data file is open.	Nenhum arquivo de dados está aberto.
+	On the server	No servidor
+	On this computer	Neste computador
+	Open…	Abrir…
+	Remove account	Remover conta
+	Save your rules in a file, to keep them or to use them on another computer.	Salva suas regras em um arquivo, para guardá-las ou usá-las em outro computador.
+	Rules saved in {file}: {n}	Regras salvas em {file}: {n}
+	Save {n} Selected…	Salvar {n} selecionados…
+	Run all	Executar todas
+	Run every rule that's on, on the mail already in the Inbox	Executa todas as regras ativadas nos emails que já estão na Caixa de Entrada
+	Find a rule	Encontrar uma regra
+	No rule matches.	Nenhuma regra corresponde.
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Arquivo

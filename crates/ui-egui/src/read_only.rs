@@ -33,14 +33,14 @@ pub fn no_change(s: &Session, uid: Option<&str>) -> Option<&'static str> {
     uid.filter(|u| s.person_read_only(u)).map(|_| tl!("Your rights do not let you change this contact"))
 }
 
-/// What Delete does to this person: in the browser build with a hosting page's mailboxes, a card of the server's book is
-/// the company's (Neoffice's contacts, shared by the whole team, which the desk never deletes without asking), so it asks
-/// first; elsewhere it is deleted at once, as upstream does.
+/// What Delete does to this person: one question first. In the browser build with a hosting page's mailboxes, a card of
+/// the server's book is the company's (Neoffice's contacts, shared by the whole team, which an administrator can
+/// restore), so Neoffice's own question says so; elsewhere upstream's (`Dialog::ConfirmDeleteContact`), never both.
 pub fn delete(s: &Session, p: &Person) -> Action {
     if !s.keeps_local_pim && p.book != LOCAL {
         return Action::Dialog(Dialog::DeleteContact { uid: p.card.uid.clone(), name: p.card.display() });
     }
-    Action::Run("contact.delete", json!({"uid": p.card.uid}))
+    Action::Dialog(Dialog::ConfirmDeleteContact { uid: p.card.uid.clone(), name: p.card.display() })
 }
 
 /// The question `delete` asks: who, that the card goes from Neoffice's contacts for the whole team, and that an
@@ -350,12 +350,18 @@ mod tests {
         // Edit stays: the person may change it.
         f.click(&mut app, at(&shown, "Edit")[1]);
         assert!(matches!(app.ui.dialog, Some(Dialog::Contact(_))), "the form opens");
-        // Where the server keeps no notes on its contacts (the browser build with a hosting page's mailboxes), the form says so.
+        // Where the server keeps no notes on its contacts (the browser build with a hosting page's mailboxes), the form says so;
+        // nor a postal address or a birthday, which it doesn't offer there.
+        let says = |shown: &[(String, Rect)], text: &str| shown.iter().any(|(t, _)| t == text);
         app.session.keeps_local_pim = false;
         let shown = f.run(&mut app, vec![]);
-        assert!(shown.iter().any(|(t, _)| t == "Neoffice keeps no notes on contacts"), "the notes field says why it is greyed");
+        assert!(says(&shown, "Neoffice keeps no notes on contacts"), "the notes field says why it is greyed");
+        assert!(!says(&shown, "Postal code") && !says(&shown, "Birthday"), "no address nor birthday offered");
+        assert!(says(&shown, "Mobile phone"), "the numbers by kind still are");
         app.session.keeps_local_pim = true;
-        assert!(!f.run(&mut app, vec![]).iter().any(|(t, _)| t == "Neoffice keeps no notes on contacts"));
+        let shown = f.run(&mut app, vec![]);
+        assert!(!says(&shown, "Neoffice keeps no notes on contacts"));
+        assert!(says(&shown, "Postal code") && says(&shown, "Birthday"), "upstream's form elsewhere");
     }
 
     /// What a dialog just opened shows, once it has faded in.
@@ -409,13 +415,16 @@ mod tests {
         assert!(app.ui.dialog.is_none() && app.session.find_person("c1").is_none(), "deleted");
         assert!(app.session.pim["sample"].deleted.iter().any(|t| t.href == "jmap:C1"));
 
-        // Upstream's behaviour elsewhere: a card of the book here, or the desktop app, is deleted at once.
+        // Elsewhere (a card of the book here, or the desktop app): upstream's question, and only it.
         app.session.keeps_local_pim = true;
         app.ui.person = app.session.people("").into_iter().find(|p| p.book == LOCAL).map(|p| p.card.uid);
         let gone = app.ui.person.clone().unwrap();
         let shown = f.run(&mut app, vec![]);
         f.click(&mut app, at(&shown, "Delete")[1]);
-        assert!(app.ui.dialog.is_none() && app.session.find_person(&gone).is_none(), "at once");
+        assert!(matches!(&app.ui.dialog, Some(Dialog::ConfirmDeleteContact { uid, .. }) if *uid == gone), "upstream's question");
+        let shown = f.run(&mut app, vec![]);
+        f.click(&mut app, last(&shown, "Delete").unwrap());
+        assert!(app.ui.dialog.is_none() && app.session.find_person(&gone).is_none(), "deleted after that one question");
     }
 
     #[test]

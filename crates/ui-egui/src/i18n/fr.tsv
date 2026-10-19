@@ -25,7 +25,7 @@
 	Archive	Archiver
 	Archive (Backspace)	Archiver (Retour arrière)
 	Ask before deleting for good	Demander avant de supprimer définitivement
-	At the top of {account}	En haut de {account}
+	At the top of {account}	À la racine du compte {account}
 	Attach file	Joindre un fichier
 	Audio	Audio
 	Aug	août
@@ -69,7 +69,7 @@
 	Edit	Modifier
 	Edit rule	Modifier la règle
 	Email address	Adresse e-mail
-	Enter the password for {email}.	Saisissez le mot de passe de {email}.
+	Enter the password for {email}.	Mot de passe du compte {email} :
 	Favorites	Favoris
 	Feb	févr.
 	File	Fichier
@@ -87,7 +87,7 @@
 	Friday	vendredi
 	From	De
 	From contains	L’expéditeur contient
-	From {names}	De {names}
+	From {names}	Expéditeurs : {names}
 	Group messages by conversation	Regrouper les messages par conversation
 	Has attachments	Contient des pièces jointes
 	Has files	Contient des fichiers
@@ -119,7 +119,7 @@
 	Links like {link} aren't opened	Les liens comme {link} ne sont pas ouverts
 	Local-first: mail is cached on this computer for fast offline search. Passwords stay in the system keychain.	Local d’abord : le courrier est conservé sur cet ordinateur pour une recherche rapide hors connexion. Les mots de passe restent dans le trousseau du système.
 	Looking up the server settings…	Recherche des paramètres du serveur…
-	Mail from {sender}	Courrier de {sender}
+	Mail from {sender}	Nouveau message — expéditeur : {sender}
 	MailCraft	MailCraft
 	MailCraft {version} · an ArtCraft app · MIT OR Apache-2.0	MailCraft {version} · une application ArtCraft · MIT OR Apache-2.0
 	Mailing list: unsubscribe at {address}	Liste de diffusion : désabonnement à {address}
@@ -308,7 +308,7 @@
 	Upcoming	À venir
 	Update folder	Actualiser le dossier
 	Updated {time}	Mis à jour {time}
-	Updating {folder}…	Mise à jour de {folder}…
+	Updating {folder}…	Actualisation : dossier {folder}…
 	User name	Nom d’utilisateur
 	Usually the email address	En général, l’adresse e-mail
 	Video	Vidéo
@@ -327,7 +327,7 @@
 	Your name	Votre nom
 	categorize {category}	classer dans {category}
 	folder	dossier
-	from “{text}”	vient de « {text} »
+	from “{text}”	a pour expéditeur « {text} »
 	in your browser: no password stored	dans votre navigateur : aucun mot de passe enregistré
 	mentions “{text}”	mentionne « {text} »
 	move to {folder}	déplacer vers {folder}
@@ -441,7 +441,7 @@
 	Every week	Toutes les semaines
 	Every year	Tous les ans
 	February	février
-	In the address book of {account}	Dans le carnet d’adresses de {account}
+	In the address book of {account}	Carnet d’adresses : {account}
 	January	janvier
 	Job title	Fonction
 	July	juillet
@@ -501,7 +501,7 @@
 	Outlook data file	Fichier de données Outlook
 	Opened from an Outlook data file, kept on this computer only	Ouvert depuis un fichier de données Outlook, conservé sur cet ordinateur uniquement
 	Not available: a data file has no server.	Non disponible : un fichier de données n’a pas de serveur.
-	Opening {file}…	Ouverture de {file}…
+	Opening {file}…	Lecture : {file}…
 	Exchange (Microsoft 365)	Exchange (Microsoft 365)
 	Exchange (Microsoft Graph)	Exchange (Microsoft Graph)
 	Server: {url} (Microsoft Graph)	Serveur : {url} (Microsoft Graph)
@@ -514,7 +514,6 @@
 	Back to the reading pane	Revenir au volet de lecture
 	Write it in a window of its own	L’écrire dans une fenêtre à part
 	Hide Bcc	Masquer Cci
-	From ▾	De ▾
 	Untitled	Sans titre
 	Write new messages in a window of their own	Écrire les nouveaux messages dans une fenêtre à part
 	Saved in Drafts	Enregistré dans Brouillons
@@ -557,7 +556,7 @@
 	Exporting to {file}…	Exportation vers {file}…
 	Export	Exporter
 	Export to Outlook data file	Exporter vers un fichier de données Outlook
-	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open. Mail that was never downloaded is left out.	Enregistre le courrier d'un compte, avec ses dossiers, dans un fichier de données Outlook (.pst) que Outlook et d'autres applications de messagerie peuvent ouvrir. Le courrier jamais téléchargé est omis.
+	Write an account's mail, with its folders, to an Outlook data file (.pst) that Outlook and other mail apps can open.	Enregistre le courrier d'un compte, avec ses dossiers, dans un fichier de données Outlook (.pst) que Outlook et d'autres applications de messagerie peuvent ouvrir.
 	Exchange server (EWS)	Serveur Exchange (EWS)
 	Exchange server	Serveur Exchange
 	Server: {url} (EWS)	Serveur : {url} (EWS)
@@ -644,7 +643,7 @@
 	Account settings…	Paramètres du compte…
 	Delete all…	Tout supprimer…
 	Delete all	Tout supprimer
-	Delete everything in “{folder}”?	Supprimer tout le contenu de « {folder} » ?
+	Delete everything in “{folder}”?	Vider entièrement « {folder} » ?
 	Every message in it will be moved to Deleted Items.	Tous ses messages seront déplacés dans Éléments supprimés.
 	Find related	Rechercher les éléments associés
 	Messages in this conversation	Messages de cette conversation
@@ -656,7 +655,7 @@
 	Messages	Messages
 	Open file location	Ouvrir l'emplacement du fichier
 	Properties…	Propriétés…
-	{folder} Properties	Propriétés de {folder}
+	{folder} Properties	{folder} : propriétés
 	Size on this computer	Taille sur cet ordinateur
 	Quick print	Impression rapide
 	Always move to Focused	Toujours déplacer vers Prioritaire
@@ -812,6 +811,49 @@
 	Everyone you've written to or heard from, and your contacts	Toutes les personnes à qui vous avez écrit ou qui vous ont écrit, et vos contacts
 	Hide {calendar}	Masquer {calendar}
 	Write your signature, or paste it…	Écrivez votre signature ou collez-la…
+	Address books	Carnets d'adresses
+	Birthday	Anniversaire
+	Business	Bureau
+	City	Ville
+	Fax	Télécopie
+	Mobile	Mobile
+	Pager	Récepteur de radiomessagerie
+	Shared with you through {account}: read-only	Partagé avec vous via {account} : lecture seule
+	YYYY-MM-DD	AAAA-MM-JJ
+	Email 2	Adresse de messagerie 2
+	Email 3	Adresse de messagerie 3
+	Business fax	Télécopie (bureau)
+	Other phone	Autre téléphone
+	Street	Rue
+	Postal code	Code postal
+	State/Province	État/Province
+	Country/Region	Pays/Région
+	Business address	Adresse (bureau)
+	Home address	Adresse (domicile)
+	Delete “{name}”?	Supprimer « {name} » ?
+	Delete this contact?	Supprimer ce contact ?
+	This contact will be deleted, along with everything kept about them. This can't be undone.	Ce contact sera supprimé, avec tout ce qui est enregistré à son sujet. Cette action est irréversible.
+	Export…	Exporter…
+	Add the rules from a file saved by MailCraft. A rule for an account this computer doesn't have comes in turned off.	Ajoute les règles d'un fichier enregistré par MailCraft. Une règle pour un compte absent de cet ordinateur arrive désactivée.
+	Change…	Modifier…
+	Clean up	Nettoyer
+	Export rules	Exporter les règles
+	Import rules	Importer des règles
+	Rules imported: {n}	Règles importées : {n}
+	Rules imported: {n} ({off} turned off, as their account isn't on this computer)	Règles importées : {n} ; {off} désactivées, car leur compte n'est pas sur cet ordinateur
+	Import…	Importer…
+	No data file is open.	Aucun fichier de données n'est ouvert.
+	On the server	Sur le serveur
+	On this computer	Sur cet ordinateur
+	Open…	Ouvrir…
+	Remove account	Supprimer le compte
+	Save your rules in a file, to keep them or to use them on another computer.	Enregistre vos règles dans un fichier, pour les conserver ou les utiliser sur un autre ordinateur.
+	Rules saved in {file}: {n}	Règles enregistrées dans {file} : {n}
+	Save {n} Selected…	Enregistrer les {n} sélectionnés…
+	Run all	Tout exécuter
+	Run every rule that's on, on the mail already in the Inbox	Exécute toutes les règles activées sur le courrier déjà dans la boîte de réception
+	Find a rule	Rechercher une règle
+	No rule matches.	Aucune règle ne correspond.
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archives
