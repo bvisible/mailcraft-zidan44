@@ -25,6 +25,10 @@ mod idb;
 mod host;
 #[cfg(target_arch = "wasm32")]
 mod nora;
+// //// Neoffice — the HTML of what is pasted, so that formatted text keeps its look as in the desktop app
+// (maintenance#1705).
+#[cfg(target_arch = "wasm32")]
+mod paste;
 // //// Neoffice — what a hosting page's answer to a renewal of tokens means for each mailbox (backend.rs), and what is kept
 // between visits with its mailboxes (web.rs): built on every target, so that their tests run natively.
 mod kept;

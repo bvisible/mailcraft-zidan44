@@ -44,4 +44,6 @@ web-sys = { version = "0.3", features = [
     "DomStringList", "Event",
     # //// Neoffice — the hosting page's `?author=`, read as the document editors read it (host.rs).
     "UrlSearchParams",
+    # //// Neoffice — the HTML of what is pasted, for the editor (paste.rs, maintenance#1705).
+    "ClipboardEvent", "DataTransfer",
 ] }

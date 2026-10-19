@@ -28,6 +28,9 @@ const MAX_KEPT: usize = 3 << 20;
 
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    // //// Neoffice — what is pasted keeps its look: the editor reads its HTML as the desktop app reads the system's
+    // clipboard (paste.rs, maintenance#1705).
+    crate::paste::install();
     wasm_bindgen_futures::spawn_local(async {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             log::error!("no document");
