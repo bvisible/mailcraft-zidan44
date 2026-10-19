@@ -783,6 +783,8 @@ impl MailApp {
             });
         } else {
             let module = self.session.module;
+            // //// Neoffice — no Notes in the module switch with a hosting page's mailboxes (maintenance#1698).
+            let hosted = self.session.hosted();
             // Right-to-left languages mirror the window: folders on the right, then the list,
             // the reading pane on the left.
             let rtl = i18n::current().rtl();
@@ -801,7 +803,8 @@ impl MailApp {
                                 acts.push(Action::Run("view.folderPane", json!({"minimized": false})));
                             }
                             ui.add_space(10.0);
-                            module_switch_vertical(ui, &t, module, &mut acts);
+                            // //// Neoffice — `hosted`: no Notes (above).
+                            module_switch_vertical(ui, &t, module, hosted, &mut acts);
                         });
                     });
             }
@@ -813,7 +816,8 @@ impl MailApp {
                     .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin::symmetric(6, 8)))
                     .show(ui, |ui| {
                         egui::Panel::bottom("modules").frame(egui::Frame::new().inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| {
-                            module_switch(ui, &t, module, &mut acts);
+                            // //// Neoffice — `hosted`: no Notes (above).
+                            module_switch(ui, &t, module, hosted, &mut acts);
                         });
                         // Minimize, as Outlook's ‹ at the top of its folder pane.
                         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -2457,7 +2461,8 @@ fn window_toolbar(ui: &mut Ui, s: &Session, t: &Tokens, key: &MessageKey, acts: 
 }
 
 /// Mail, Calendar and People, at the bottom of the side pane.
-fn module_switch(ui: &mut Ui, t: &Tokens, module: Module, acts: &mut Vec<Action>) {
+// //// Neoffice — `hosted`: Notes left out with a hosting page's mailboxes, which keep none (maintenance#1698).
+fn module_switch(ui: &mut Ui, t: &Tokens, module: Module, hosted: bool, acts: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (m, icon, label, code) in [
@@ -2466,6 +2471,10 @@ fn module_switch(ui: &mut Ui, t: &Tokens, module: Module, acts: &mut Vec<Action>
             (Module::People, Icon::People, "People", "people"),
             (Module::Notes, Icon::Note, "Notes", "notes"),
         ] {
+            // //// Neoffice — see `hosted` above.
+            if hosted && m == Module::Notes {
+                continue;
+            }
             let (r, resp) = ui.allocate_exact_size(vec2(40.0, 34.0), Sense::click());
             let on = m == module;
             if on || resp.hovered() {
@@ -2480,13 +2489,18 @@ fn module_switch(ui: &mut Ui, t: &Tokens, module: Module, acts: &mut Vec<Action>
 }
 
 /// Mail, Calendar and People one above another (the minimized folder pane).
-fn module_switch_vertical(ui: &mut Ui, t: &Tokens, module: Module, acts: &mut Vec<Action>) {
+// //// Neoffice — `hosted`: no Notes, as in `module_switch` (maintenance#1698).
+fn module_switch_vertical(ui: &mut Ui, t: &Tokens, module: Module, hosted: bool, acts: &mut Vec<Action>) {
     for (m, icon, label, code) in [
         (Module::Mail, Icon::Unread, "Mail", "mail"),
         (Module::Calendar, Icon::Calendar, "Calendar", "calendar"),
         (Module::People, Icon::People, "People", "people"),
         (Module::Notes, Icon::Note, "Notes", "notes"),
     ] {
+        // //// Neoffice — see `hosted` above.
+        if hosted && m == Module::Notes {
+            continue;
+        }
         let (r, resp) = ui.allocate_exact_size(vec2(40.0, 34.0), Sense::click());
         let on = m == module;
         if on || resp.hovered() {

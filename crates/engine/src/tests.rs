@@ -3643,3 +3643,20 @@ fn rules_export_and_import() {
     done(other);
     done(s);
 }
+
+// //// Neoffice — with a hosting page's mailboxes, nothing keeps a note (neither the tab nor the instance): Notes is not
+// offered, by its module switch or by Ctrl+5 (maintenance#1698); with an app that keeps them, it is.
+#[test]
+fn a_hosting_page_s_mailboxes_offer_no_notes() {
+    let mut s = sample_session("hosted-notes");
+    s.keeps_local_pim = false;
+    assert!(matches!(s.run("view.notes", &json!({})), Err(CmdError::Disabled(_))));
+    assert!(matches!(s.run("view.module", &json!({"name": "notes"})), Err(CmdError::Disabled(_))));
+    assert_eq!(s.module, crate::Module::Mail, "still on the mail");
+    s.run("view.module", &json!({"name": "people"})).unwrap();
+    assert_eq!(s.module, crate::Module::People, "the other modules still open");
+    s.keeps_local_pim = true;
+    s.run("view.notes", &json!({})).unwrap();
+    assert_eq!(s.module, crate::Module::Notes);
+    done(s);
+}

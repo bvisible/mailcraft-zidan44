@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 use crate::session::{ListFilter, MoveTarget, ReadingPane, SearchScope, View, parse_key};
 use crate::{CmdError, CmdResult, CommandSpec, Registry, Session, p, parse_local};
 
+// //// Neoffice — why Notes isn't offered with a hosting page's mailboxes (`view.module`, `view.notes`, maintenance#1698).
+pub const NO_NOTES_HOSTED: &str = "notes are not kept with the mailboxes of a hosting page";
+
 fn has_selection(s: &Session) -> Option<&'static str> {
     if s.selection.is_empty() { Some("no message selected") } else { None }
 }
@@ -466,6 +469,9 @@ pub fn registry() -> Registry {
                 "mail" => crate::Module::Mail,
                 "calendar" => crate::Module::Calendar,
                 "people" => crate::Module::People,
+                // //// Neoffice — no Notes with a hosting page's mailboxes: nothing keeps them (neither this tab nor the
+                // instance), so a note would be gone at the next visit (maintenance#1698).
+                "notes" if s.hosted() => return Err(CmdError::Disabled(NO_NOTES_HOSTED.into())),
                 "notes" => crate::Module::Notes,
                 other => return Err(CmdError::Params(format!("unknown module `{other}`"))),
             };
@@ -489,6 +495,10 @@ pub fn registry() -> Registry {
         })
         .key("Mod+3"),
         CommandSpec::new("view.notes", "Notes", "Navigation", |s, _| {
+            // //// Neoffice — see `view.module`: no Notes with a hosting page's mailboxes (maintenance#1698).
+            if s.hosted() {
+                return Err(CmdError::Disabled(NO_NOTES_HOSTED.into()));
+            }
             s.module = crate::Module::Notes;
             Ok(json!({"module": s.module}))
         })
