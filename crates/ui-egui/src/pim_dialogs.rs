@@ -539,6 +539,10 @@ pub struct ContactForm {
     pub phones: [String; 5],
     /// Numbers beyond one of each kind, kept as they were.
     pub more_phones: Vec<mailcraft_engine::model::vcard::Typed>,
+    // //// Neoffice — the number each of `phones` was given when the card was opened (`edit`), with the card's kind: one the
+    // person didn't change goes back with it rather than with its row's (a pager, text or video number shown as « Other
+    // phone », a "mobile" one as « Mobile phone »), so that a save changes no kind the form didn't let them change.
+    pub phones_read: [Option<mailcraft_engine::model::vcard::Typed>; 5],
     /// Business, home and other (as [`ADDRESSES`]).
     pub addresses: [mailcraft_engine::model::vcard::PostalAddress; 3],
     /// The address shown in the form.
@@ -574,9 +578,13 @@ impl ContactForm {
                 k if PHONES.iter().any(|(_, x)| *x == k) => k,
                 _ => "",
             };
-            let slot = PHONES.iter().position(|(_, k)| *k == kind).and_then(|i| f.phones.get_mut(i)).filter(|s| s.is_empty());
-            match slot {
-                Some(slot) => *slot = ph.value.clone(),
+            // //// Neoffice — the row's number kept as read too (`phones_read`).
+            let row = PHONES.iter().position(|(_, k)| *k == kind).filter(|i| f.phones.get(*i).is_some_and(String::is_empty));
+            match row.and_then(|i| f.phones.get_mut(i).zip(f.phones_read.get_mut(i))) {
+                Some((slot, read)) => {
+                    *slot = ph.value.clone();
+                    *read = Some(ph.clone());
+                }
                 None => f.more_phones.push(ph.clone()),
             }
         }
@@ -596,8 +604,13 @@ impl ContactForm {
         let mut phones: Vec<Value> = PHONES
             .iter()
             .zip(&self.phones)
-            .filter(|(_, v)| !v.trim().is_empty())
-            .map(|((_, kind), v)| json!({"value": v.trim(), "kind": kind}))
+            // //// Neoffice — a number the person didn't change goes back with the kind the card gave it (`phones_read`).
+            .zip(&self.phones_read)
+            .filter(|((_, v), _)| !v.trim().is_empty())
+            .map(|(((_, kind), v), read)| {
+                let kind = read.as_ref().filter(|r| r.value.trim() == v.trim()).map_or(*kind, |r| r.kind.as_str());
+                json!({"value": v.trim(), "kind": kind})
+            })
             .collect();
         phones.extend(self.more_phones.iter().map(|x| json!({"value": x.value, "kind": x.kind})));
         let addresses: Vec<Value> = ADDRESSES
@@ -625,8 +638,9 @@ impl ContactForm {
     }
 }
 
-// //// Neoffice — `notes`: why the notes can't be written, if so (a Neoffice book, which keeps none: read_only.rs).
-pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Action>, notes: Option<&'static str>) -> bool {
+// //// Neoffice — `notes`: why the notes can't be written, if so (a Neoffice book, which keeps none: read_only.rs); `jmap`:
+// the card is in a JMAP server's book, which this client gives no postal address, birthday or fax (read_only::jmap_book).
+pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Action>, notes: Option<&'static str>, jmap: bool) -> bool {
     ui.set_width(560.0);
     // The person's initials once a name is typed, as the people list shows them.
     let initials: String = f.name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
@@ -651,6 +665,10 @@ pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Acti
             }
         }
         for (i, (label, _)) in PHONES.iter().enumerate() {
+            // //// Neoffice — no fax row for a JMAP server's card (`jmap` above): its number would come back as another kind.
+            if jmap && *label == "Fax" {
+                continue;
+            }
             if let Some(v) = f.phones.get_mut(i) {
                 let label = match *label {
                     "Business" => "Business phone",
@@ -664,10 +682,10 @@ pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Acti
                 });
             }
         }
-        // //// Neoffice — where the book keeps no notes (one of Neoffice's in a hosting page: `notes` above), it keeps no
-        // postal address and no birthday either (the instance's contacts carry names, email addresses, numbers, companies
-        // and titles): what is typed there would go at the next read, so those rows aren't offered.
-        let kept = notes.is_none();
+        // //// Neoffice — no postal address and no birthday for a JMAP server's card (`jmap` above: a Neoffice book in a
+        // hosting page, or the person's own JMAP account): this client doesn't write them there, and the read after it
+        // would replace what is typed, so those rows aren't offered.
+        let kept = !jmap;
         // //// Neoffice — see `kept` above.
         if kept {
             // One address at a time, as Outlook's form: choose which.

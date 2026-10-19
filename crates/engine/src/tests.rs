@@ -2310,6 +2310,8 @@ fn saving_a_contact_keeps_what_the_form_does_not_show() {
         [("jm@example.org", "home"), ("jeanne@example.ch", "work")]
     );
     assert_eq!(c.phones[0].kind, "cell", "no kind given: its own");
+    s.run("contact.update", &json!({"uid": uid, "phones": [{"value": "+41 79 000 00 00", "kind": null}]})).unwrap();
+    assert_eq!(s.find_person(&uid).unwrap().card.phones[0].kind, "cell", "a null kind is none given");
     s.run(
         "contact.update",
         &json!({"uid": uid, "phones": [{"value": "+41 79 000 00 00", "kind": ""}, {"value": "+41 21 000 00 00", "kind": "work"}]}),

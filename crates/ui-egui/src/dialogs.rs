@@ -2158,10 +2158,11 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             close_row(ui)
         }
         Dialog::Event(f) => crate::pim_dialogs::event(ui, f, t, acts),
-        // //// Neoffice — and whether its book keeps notes (read_only.rs).
+        // //// Neoffice — and whether its book keeps notes, and whether it is a JMAP server's (read_only.rs).
         Dialog::Contact(f) => {
             let notes = crate::read_only::no_notes(s, f.uid.as_deref());
-            crate::pim_dialogs::contact(ui, f, t, acts, notes)
+            let jmap = crate::read_only::jmap_book(s, f.uid.as_deref());
+            crate::pim_dialogs::contact(ui, f, t, acts, notes, jmap)
         }
         Dialog::Vacation(f) => vacation(ui, f, t, acts),
         // //// Neoffice — see `Dialog::DeleteContact`.

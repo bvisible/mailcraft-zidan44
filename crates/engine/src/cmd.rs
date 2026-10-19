@@ -1736,12 +1736,12 @@ fn card_from(v: &Value, mut c: mailcraft_model::vcard::Card) -> Result<mailcraft
         }
     };
     // //// Neoffice — an address or a number already on the card keeps its kind (work, home, mobile) when it comes without
-    // one, as a plain string (the form sends addresses that way) or an object with no "kind"; a kind given, even empty
-    // (« Other phone »), is the person's choice. Only new ones have none.
+    // one, as a plain string (the form sends addresses that way) or an object whose "kind" is missing or null, as `typed`
+    // reads it; a kind given, even empty (« Other phone »), is the person's choice. Only new ones have none.
     let given_kind = |k: &str, value: &str| {
         v.get(k).and_then(Value::as_array).is_some_and(|a| {
             a.iter().any(|x| {
-                x.get("kind").is_some()
+                p::str(x, "kind").is_some()
                     && p::str(x, "value").or_else(|| p::str(x, "number")).is_some_and(|w| w.trim().chars().take(300).collect::<String>() == value)
             })
         })

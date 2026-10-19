@@ -166,6 +166,19 @@ pub fn no_notes(s: &Session, uid: Option<&str>) -> Option<&'static str> {
     (!s.keeps_local_pim && book.is_some_and(|b| b != LOCAL)).then(|| tl!("Neoffice keeps no notes on contacts"))
 }
 
+/// Whether the contact form's card (`uid`, or a new one) is in a book of a JMAP server (Neoffice's in a hosting page, or
+/// the person's own JMAP account): this client reads and writes there what JSContact carries for it here (names, email
+/// addresses, numbers as mobile or not, companies, titles, notes: crates/jmap/src/contacts.rs), no postal address, no
+/// birthday and no fax, so the form doesn't offer those for it: what is typed there would be left out of what goes to the
+/// server, and the read after it would replace the card.
+pub fn jmap_book(s: &Session, uid: Option<&str>) -> bool {
+    let target = match uid {
+        Some(uid) => s.find_person(uid).map(|p| (p.account, p.book)),
+        None => s.new_card_target(None),
+    };
+    target.is_some_and(|(account, book)| book != LOCAL && s.pim.get(&account).is_some_and(|p| p.carddav_home.as_deref() == Some("jmap")))
+}
+
 /// Why no contact can be added, if so (with no account at all, the controls are greyed already).
 pub fn no_new_cards(s: &Session) -> Option<&'static str> {
     (!s.accounts.is_empty() && !s.can_add_cards()).then(|| tl!("Your rights do not let you add contacts"))
@@ -344,24 +357,85 @@ mod tests {
         let deletes = at(&shown, "Delete");
         for spot in &deletes {
             f.click(&mut app, *spot);
+            // Every Delete asks first now: greyed, it doesn't even ask.
+            assert!(app.ui.dialog.is_none(), "greyed: no question either");
         }
         assert!(app.session.find_person("c1").is_some(), "not deleted");
         assert!(f.hovered(&mut app, deletes[1]).iter().any(|t| t == "Your rights do not let you delete this contact"), "why, on hover");
         // Edit stays: the person may change it.
         f.click(&mut app, at(&shown, "Edit")[1]);
         assert!(matches!(app.ui.dialog, Some(Dialog::Contact(_))), "the form opens");
-        // Where the server keeps no notes on its contacts (the browser build with a hosting page's mailboxes), the form says so;
-        // nor a postal address or a birthday, which it doesn't offer there.
+        // Where the server keeps no notes on its contacts (the browser build with a hosting page's mailboxes), the form says so.
         let says = |shown: &[(String, Rect)], text: &str| shown.iter().any(|(t, _)| t == text);
         app.session.keeps_local_pim = false;
         let shown = f.run(&mut app, vec![]);
         assert!(says(&shown, "Neoffice keeps no notes on contacts"), "the notes field says why it is greyed");
-        assert!(!says(&shown, "Postal code") && !says(&shown, "Birthday"), "no address nor birthday offered");
-        assert!(says(&shown, "Mobile phone"), "the numbers by kind still are");
         app.session.keeps_local_pim = true;
         let shown = f.run(&mut app, vec![]);
         assert!(!says(&shown, "Neoffice keeps no notes on contacts"));
-        assert!(says(&shown, "Postal code") && says(&shown, "Birthday"), "upstream's form elsewhere");
+        // A card of a CardDAV book: upstream's whole form.
+        app.session.pim_mut("sample").carddav_home = Some("https://dav.example.org/".into());
+        let shown = f.run(&mut app, vec![]);
+        assert!(says(&shown, "Postal code") && says(&shown, "Birthday") && says(&shown, "Business fax"), "upstream's form");
+        // A JMAP server's book, in a hosting page or the person's own account: no postal address, birthday or fax, which
+        // this client doesn't write there and the next read would replace; the numbers by kind still are.
+        app.session.pim_mut("sample").carddav_home = Some("jmap".into());
+        for hosted in [false, true] {
+            app.session.keeps_local_pim = !hosted;
+            let shown = f.run(&mut app, vec![]);
+            assert!(!says(&shown, "Postal code") && !says(&shown, "Birthday") && !says(&shown, "Business fax"), "none of those, hosted: {hosted}");
+            assert!(says(&shown, "Mobile phone") && says(&shown, "Other phone"), "hosted: {hosted}");
+        }
+    }
+
+    /// The contact form, saved with only its job title changed, gives back every kind the card had: the email addresses'
+    /// (sent as text, kept by the engine), the numbers' in their rows, one of a kind the form has no row for (a pager, shown
+    /// as « Other phone ») and one past a row already taken (kept as it was).
+    #[test]
+    fn the_contact_form_keeps_the_kinds_it_does_not_let_the_person_change() {
+        use mailcraft_engine::model::vcard::Typed;
+        let (mut app, _f) = sample_app();
+        let typed = |value: &str, kind: &str| Typed { value: value.into(), kind: kind.into() };
+        let card = Card {
+            name: "Jeanne Muster".into(),
+            title: "Accountant".into(),
+            emails: vec![typed("jeanne@example.ch", "work"), typed("jm@example.org", "home")],
+            phones: vec![
+                typed("+41 21 000 00 00", "work"),
+                typed("+41 79 000 00 00", "cell"),
+                typed("+41 79 111 11 11", "pager"),
+                typed("+41 79 222 22 22", "text"),
+                typed("+41 79 333 33 33", "mobile"),
+            ],
+            ..Default::default()
+        };
+        let uid = app.session.create_card(None, card).unwrap()["uid"].as_str().unwrap().to_string();
+        let mut form = crate::pim_dialogs::ContactForm::edit(&app.session.find_person(&uid).unwrap().card);
+        form.title = "Chief accountant".into();
+        app.session.run("contact.update", &form.params()).unwrap();
+        let c = app.session.find_person(&uid).unwrap().card;
+        assert_eq!(c.title, "Chief accountant");
+        let kinds = |list: &[Typed]| {
+            let mut all: Vec<(String, String)> = list.iter().map(|x| (x.value.clone(), x.kind.clone())).collect();
+            all.sort();
+            all
+        };
+        assert_eq!(kinds(&c.emails), [("jeanne@example.ch".to_string(), "work".to_string()), ("jm@example.org".to_string(), "home".to_string())]);
+        let expected = [
+            ("+41 21 000 00 00", "work"),
+            ("+41 79 000 00 00", "cell"),
+            ("+41 79 111 11 11", "pager"),
+            ("+41 79 222 22 22", "text"),
+            ("+41 79 333 33 33", "mobile"),
+        ];
+        assert_eq!(kinds(&c.phones), expected.map(|(v, k)| (v.to_string(), k.to_string())), "every kind, as the card had them");
+        // A number the person changes takes its row's kind: the person's choice.
+        let mut form = crate::pim_dialogs::ContactForm::edit(&c);
+        let other = form.phones.iter().position(|v| v == "+41 79 111 11 11").unwrap();
+        form.phones[other] = "+41 79 444 44 44".into();
+        app.session.run("contact.update", &form.params()).unwrap();
+        let c = app.session.find_person(&uid).unwrap().card;
+        assert!(c.phones.iter().any(|p| p.value == "+41 79 444 44 44" && p.kind.is_empty()), "« Other phone »: no kind");
     }
 
     /// What a dialog just opened shows, once it has faded in.
