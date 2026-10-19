@@ -159,11 +159,18 @@ pub fn no_categories(s: &Session, calendar: Option<&str>) -> Option<&'static str
 /// Why the contact form's notes can't be written, if so: in the browser build with a hosting page's mailboxes, the card
 /// (`uid`, or a new one) is in a Neoffice book, and Neoffice keeps no notes on contacts.
 pub fn no_notes(s: &Session, uid: Option<&str>) -> Option<&'static str> {
+    neoffice_book(s, uid).then(|| tl!("Neoffice keeps no notes on contacts"))
+}
+
+/// Whether the contact form's card (`uid`, or a new one) is in a book of Neoffice's: in the browser build with a hosting
+/// page's mailboxes, a server's book is the instance's. The instance keeps no notes there (`no_notes`), and keeps a
+/// number but not what it is for, so the form offers no fax row for it.
+pub fn neoffice_book(s: &Session, uid: Option<&str>) -> bool {
     let book = match uid {
         Some(uid) => s.find_person(uid).map(|p| p.book),
         None => s.new_card_target(None).map(|(_, book)| book),
     };
-    (!s.keeps_local_pim && book.is_some_and(|b| b != LOCAL)).then(|| tl!("Neoffice keeps no notes on contacts"))
+    !s.keeps_local_pim && book.is_some_and(|b| b != LOCAL)
 }
 
 /// Whether the contact form's card (`uid`, or a new one) is in a book of a JMAP server (Neoffice's in a hosting page, or
@@ -438,6 +445,26 @@ mod tests {
         app.session.run("contact.update", &form.params()).unwrap();
         let c = app.session.find_person(&uid).unwrap().card;
         assert!(c.phones.iter().any(|p| p.value == "+41 79 444 44 44" && p.kind.is_empty()), "« Other phone »: no kind");
+    }
+
+    /// A new contact's form offers a fax row where its card goes keeps one: the person's own JMAP account, not Neoffice's
+    /// book in a hosting page.
+    #[test]
+    fn the_fax_row_of_a_new_contact_follows_where_it_goes() {
+        let (mut app, mut f) = sample_app();
+        let p = app.session.pim_mut("sample");
+        p.books.push(BookInfo { id: "B1".into(), name: "Neoffice".into(), read_only: false, ctag: String::new() });
+        p.carddav_home = Some("jmap".into());
+        let says = |shown: &[(String, Rect)], text: &str| shown.iter().any(|(t, _)| t == text);
+        for hosted in [false, true] {
+            app.session.keeps_local_pim = !hosted;
+            assert_eq!(crate::read_only::neoffice_book(&app.session, None), hosted, "hosted: {hosted}");
+            app.ui.dialog = Some(Dialog::new_contact());
+            let shown = shows(&mut f, &mut app);
+            assert!(says(&shown, "Mobile phone"), "the form is open, hosted: {hosted}");
+            assert_eq!(says(&shown, "Business fax"), !hosted, "a fax row where it is kept, hosted: {hosted}");
+            app.ui.dialog = None;
+        }
     }
 
     /// A number saved again with only its spaces changed keeps its kind (a pager shown as « Other phone »), and a number

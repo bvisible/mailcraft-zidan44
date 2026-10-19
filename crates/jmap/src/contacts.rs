@@ -683,7 +683,8 @@ pub fn card_of(v: &Value) -> Card {
         title: first_text("titles", "name"),
         note: first_text("notes", "note"),
         // Not read (nor written by `card_json`): the hosting instance's contacts keep neither, its ContactCard/set
-        // refuses them, and the contact form offers neither, nor a fax row, for a JMAP book (read_only::jmap_book).
+        // refuses them, and the contact form offers neither for a JMAP book (read_only::jmap_book). A fax is read
+        // (`phone_kind`), and offered except for a card of Neoffice's book (read_only::neoffice_book).
         addresses: Vec::new(),
         birthday: String::new(),
         extra,
