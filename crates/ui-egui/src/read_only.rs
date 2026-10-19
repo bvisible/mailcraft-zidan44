@@ -168,9 +168,9 @@ pub fn no_notes(s: &Session, uid: Option<&str>) -> Option<&'static str> {
 
 /// Whether the contact form's card (`uid`, or a new one) is in a book of a JMAP server (Neoffice's in a hosting page, or
 /// the person's own JMAP account): this client reads and writes there what JSContact carries for it here (names, email
-/// addresses, numbers as mobile or not, companies, titles, notes: crates/jmap/src/contacts.rs), no postal address, no
-/// birthday and no fax, so the form doesn't offer those for it: what is typed there would be left out of what goes to the
-/// server, and the read after it would replace the card.
+/// addresses, numbers and what they are for, companies, titles, notes: crates/jmap/src/contacts.rs), no postal address
+/// and no birthday, so the form doesn't offer those for it: what is typed there would be left out of what goes to the
+/// server, and the read after it would replace the card. (A fax is offered where the server keeps it: not Neoffice's.)
 pub fn jmap_book(s: &Session, uid: Option<&str>) -> bool {
     let target = match uid {
         Some(uid) => s.find_person(uid).map(|p| (p.account, p.book)),
@@ -377,13 +377,15 @@ mod tests {
         app.session.pim_mut("sample").carddav_home = Some("https://dav.example.org/".into());
         let shown = f.run(&mut app, vec![]);
         assert!(says(&shown, "Postal code") && says(&shown, "Birthday") && says(&shown, "Business fax"), "upstream's form");
-        // A JMAP server's book, in a hosting page or the person's own account: no postal address, birthday or fax, which
-        // this client doesn't write there and the next read would replace; the numbers by kind still are.
+        // A JMAP server's book, in a hosting page or the person's own account: no postal address or birthday, which this
+        // client doesn't write there and the next read would replace; the numbers by kind still are, a fax where the server
+        // keeps what a number is for (the person's own account), not in Neoffice's book (a hosting page).
         app.session.pim_mut("sample").carddav_home = Some("jmap".into());
         for hosted in [false, true] {
             app.session.keeps_local_pim = !hosted;
             let shown = f.run(&mut app, vec![]);
-            assert!(!says(&shown, "Postal code") && !says(&shown, "Birthday") && !says(&shown, "Business fax"), "none of those, hosted: {hosted}");
+            assert!(!says(&shown, "Postal code") && !says(&shown, "Birthday"), "none of those, hosted: {hosted}");
+            assert_eq!(says(&shown, "Business fax"), !hosted, "a fax row where it is kept, hosted: {hosted}");
             assert!(says(&shown, "Mobile phone") && says(&shown, "Other phone"), "hosted: {hosted}");
         }
     }
@@ -436,6 +438,30 @@ mod tests {
         app.session.run("contact.update", &form.params()).unwrap();
         let c = app.session.find_person(&uid).unwrap().card;
         assert!(c.phones.iter().any(|p| p.value == "+41 79 444 44 44" && p.kind.is_empty()), "« Other phone »: no kind");
+    }
+
+    /// A number saved again with only its spaces changed keeps its kind (a pager shown as « Other phone »), and a number
+    /// the card calls "mobile" shows in the Mobile row and keeps its word.
+    #[test]
+    fn a_number_respaced_or_called_mobile_keeps_its_kind() {
+        use mailcraft_engine::model::vcard::Typed;
+        let (mut app, _f) = sample_app();
+        let typed = |value: &str, kind: &str| Typed { value: value.into(), kind: kind.into() };
+        let card = Card {
+            name: "Jeanne Muster".into(),
+            phones: vec![typed("+41 79 333 33 33", "mobile"), typed("+41 79 111 11 11", "pager")],
+            ..Default::default()
+        };
+        let uid = app.session.create_card(None, card).unwrap()["uid"].as_str().unwrap().to_string();
+        let mut form = crate::pim_dialogs::ContactForm::edit(&app.session.find_person(&uid).unwrap().card);
+        assert_eq!(form.phones.iter().position(|v| v == "+41 79 333 33 33"), Some(2), "the Mobile phone row");
+        let pager = form.phones.iter().position(|v| v == "+41 79 111 11 11").unwrap();
+        form.phones[pager] = "+41791111111".into();
+        app.session.run("contact.update", &form.params()).unwrap();
+        let c = app.session.find_person(&uid).unwrap().card;
+        let kind = |value: &str| c.phones.iter().find(|p| p.value == value).map(|p| p.kind.clone());
+        assert_eq!(kind("+41 79 333 33 33").as_deref(), Some("mobile"));
+        assert_eq!(kind("+41791111111").as_deref(), Some("pager"), "re-spaced, still a pager");
     }
 
     /// What a dialog just opened shows, once it has faded in.

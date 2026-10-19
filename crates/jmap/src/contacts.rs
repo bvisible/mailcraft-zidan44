@@ -437,6 +437,40 @@ impl Sent {
     }
 }
 
+/// What a number is for, as JSContact says it (RFC 9553 §2.3.3): a mobile, a fax, a pager, a text or a video number, so
+/// that its kind survives a save (another client wrote it, or the form kept it); any other kind (work, home, none) is a
+/// voice number, its kind told by its context.
+fn phone_features(kind: &str) -> Value {
+    match kind {
+        "cell" | "mobile" => json!({"mobile": true}),
+        "fax" => json!({"fax": true}),
+        "pager" => json!({"pager": true}),
+        "text" => json!({"text": true}),
+        "video" => json!({"video": true}),
+        _ => json!({"voice": true}),
+    }
+}
+
+/// The kind a number's features say (the reverse of `phone_features`), if they say one: a voice number's is its context.
+fn phone_kind(p: &Value) -> Option<&'static str> {
+    let has = |feature: &str| p.get("features").and_then(|f| f.get(feature)).and_then(Value::as_bool).unwrap_or(false);
+    if has("mobile") {
+        Some("cell")
+    } else if has("fax") {
+        Some("fax")
+    } else if has("pager") {
+        Some("pager")
+    } else if has("voice") {
+        None
+    } else if has("text") {
+        Some("text")
+    } else if has("video") {
+        Some("video")
+    } else {
+        None
+    }
+}
+
 /// A card as JSContact (RFC 9553), with the whole properties MailCraft edits (a `/set` update replaces each of them),
 /// its note too where the server keeps notes (`notes`). No `name` when the card has none, so that the server names it
 /// from its address. The organizations and titles it doesn't show are written back as they were read.
@@ -468,8 +502,10 @@ pub fn card_json(c: &Card, notes: bool) -> Value {
         .filter(|p| !p.value.trim().is_empty())
         .enumerate()
         .map(|(n, p)| {
-            let features = if p.kind == "cell" { json!({"mobile": true}) } else { json!({"voice": true}) };
-            (format!("p{}", n + 1), json!({"@type": "Phone", "number": p.value.trim(), "features": features, "contexts": context(&p.kind)}))
+            (
+                format!("p{}", n + 1),
+                json!({"@type": "Phone", "number": p.value.trim(), "features": phone_features(&p.kind), "contexts": context(&p.kind)}),
+            )
         })
         .collect();
     let mut v = json!({
@@ -617,8 +653,7 @@ pub fn card_of(v: &Value) -> Card {
         .into_iter()
         .filter_map(|p| {
             let number = p.get("number")?.as_str()?.trim().to_string();
-            let mobile = p.get("features").and_then(|f| f.get("mobile")).and_then(Value::as_bool).unwrap_or(false);
-            Some(Typed { value: number, kind: if mobile { "cell".into() } else { context(p).into() } })
+            Some(Typed { value: number, kind: phone_kind(p).unwrap_or_else(|| context(p)).into() })
         })
         .filter(|t| !t.value.is_empty())
         .collect();
@@ -692,6 +727,28 @@ mod tests {
         let bare = card_of(&json!({"id": "C2", "emails": {"e": {"address": "x@example.ch"}}}));
         assert_eq!(bare.display(), "x@example.ch");
         assert_eq!(bare.uid, "jmap:C2");
+    }
+
+    /// A number keeps what it is for through a save and the read after it: a fax, a pager, a text or a video number that
+    /// another client wrote, as a mobile, a work or a home one.
+    #[test]
+    fn a_number_keeps_its_kind_through_jscontact() {
+        let kinds = ["work", "home", "cell", "fax", "pager", "text", "video", ""];
+        let card = Card {
+            uid: "4f2b".into(),
+            name: "Jeanne Muster".into(),
+            phones: kinds.iter().enumerate().map(|(i, k)| Typed { value: format!("+41 79 000 00 0{i}"), kind: (*k).into() }).collect(),
+            ..Default::default()
+        };
+        let back = card_of(&card_json(&card, false));
+        let read: Vec<&str> = back.phones.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(read, kinds);
+        // A "mobile" number (vCard's other word for it) is a mobile: read back as one.
+        let mobile = Card { phones: vec![Typed { value: "+41 79 111 11 11".into(), kind: "mobile".into() }], ..card };
+        assert_eq!(card_of(&card_json(&mobile, false)).phones[0].kind, "cell");
+        // A number that is a voice and a text one at once is a voice number, told by its context.
+        let both = json!({"phones": {"p": {"number": "+41 21 000 00 00", "features": {"voice": true, "text": true}, "contexts": {"work": true}}}});
+        assert_eq!(card_of(&both).phones[0].kind, "work");
     }
 
     /// A canned server: answers in order, and keeps what was asked.

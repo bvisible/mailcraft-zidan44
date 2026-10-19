@@ -608,7 +608,8 @@ impl ContactForm {
             .zip(&self.phones_read)
             .filter(|((_, v), _)| !v.trim().is_empty())
             .map(|(((_, kind), v), read)| {
-                let kind = read.as_ref().filter(|r| r.value.trim() == v.trim()).map_or(*kind, |r| r.kind.as_str());
+                // //// Neoffice — the same number however it is spaced, as the engine matches numbers (cmd.rs, `kind_of`).
+                let kind = read.as_ref().filter(|r| same_number(&r.value, v)).map_or(*kind, |r| r.kind.as_str());
                 json!({"value": v.trim(), "kind": kind})
             })
             .collect();
@@ -638,8 +639,13 @@ impl ContactForm {
     }
 }
 
+// //// Neoffice — a number unchanged but for its spaces (`ContactForm::params`), as the engine matches numbers (cmd.rs).
+fn same_number(a: &str, b: &str) -> bool {
+    a.split_whitespace().collect::<String>() == b.split_whitespace().collect::<String>()
+}
+
 // //// Neoffice — `notes`: why the notes can't be written, if so (a Neoffice book, which keeps none: read_only.rs); `jmap`:
-// the card is in a JMAP server's book, which this client gives no postal address, birthday or fax (read_only::jmap_book).
+// the card is in a JMAP server's book, which this client gives no postal address or birthday (read_only::jmap_book).
 pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Action>, notes: Option<&'static str>, jmap: bool) -> bool {
     ui.set_width(560.0);
     // The person's initials once a name is typed, as the people list shows them.
@@ -665,8 +671,9 @@ pub fn contact(ui: &mut Ui, f: &mut ContactForm, t: &Tokens, acts: &mut Vec<Acti
             }
         }
         for (i, (label, _)) in PHONES.iter().enumerate() {
-            // //// Neoffice — no fax row for a JMAP server's card (`jmap` above): its number would come back as another kind.
-            if jmap && *label == "Fax" {
+            // //// Neoffice — no fax row for a card of Neoffice's book (`notes` above): the instance keeps a number, not what
+            // it is for, so a fax would come back as another kind. A JMAP server keeps it (crates/jmap/src/contacts.rs).
+            if notes.is_some() && *label == "Fax" {
                 continue;
             }
             if let Some(v) = f.phones.get_mut(i) {
