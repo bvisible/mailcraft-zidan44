@@ -14,6 +14,11 @@ use crate::{CmdError, CmdResult, CommandSpec, Registry, Session, p, parse_local}
 // //// Neoffice — why Notes isn't offered with a hosting page's mailboxes (`view.module`, `view.notes`, maintenance#1698).
 pub const NO_NOTES_HOSTED: &str = "notes are not kept with the mailboxes of a hosting page";
 
+// //// Neoffice — the note commands refused there too, so that no script or agent makes a note lost at the next visit.
+fn refuse_notes_hosted(s: &Session) -> Result<(), CmdError> {
+    if s.hosted() { Err(CmdError::Disabled(NO_NOTES_HOSTED.into())) } else { Ok(()) }
+}
+
 fn has_selection(s: &Session) -> Option<&'static str> {
     if s.selection.is_empty() { Some("no message selected") } else { None }
 }
@@ -698,16 +703,25 @@ pub fn registry() -> Registry {
         })
         .params(r#"{"query"?: string}"#),
         CommandSpec::new("note.create", "New note", "Notes", |s, v| {
+            // //// Neoffice — no note with a hosting page's mailboxes, by a command either (maintenance#1698).
+            refuse_notes_hosted(s)?;
             let color = p::u64(v, "color").and_then(|c| u8::try_from(c).ok());
             s.create_note(p::str(v, "account"), p::str(v, "text").unwrap_or(""), color)
         })
         .params(r#"{"text"?: string, "color"?: 0|1|2|3|4 (blue, green, pink, yellow, white), "account"?: string}"#),
         CommandSpec::new("note.update", "Edit note", "Notes", |s, v| {
+            // //// Neoffice — see `note.create`.
+            refuse_notes_hosted(s)?;
             let color = p::u64(v, "color").and_then(|c| u8::try_from(c).ok());
             s.update_note(p::req_str(v, "uid")?, p::str(v, "text"), color)
         })
         .params(r#"{"uid": string, "text"?: string, "color"?: 0|1|2|3|4}"#),
-        CommandSpec::new("note.delete", "Delete note", "Notes", |s, v| s.delete_note(p::req_str(v, "uid")?)).params(r#"{"uid": string}"#),
+        // //// Neoffice — see `note.create`.
+        CommandSpec::new("note.delete", "Delete note", "Notes", |s, v| {
+            refuse_notes_hosted(s)?;
+            s.delete_note(p::req_str(v, "uid")?)
+        })
+        .params(r#"{"uid": string}"#),
         CommandSpec::new("folder.empty", "Empty folder", "Folder › Empty", |s, v| {
             let account = account_param(s, v)?;
             let folder = match (p::str(v, "folder"), p::str(v, "role")) {

@@ -128,7 +128,11 @@ fn line(ui: &mut Ui, t: &Tokens, mut items: impl FnMut(&mut Ui)) {
     let available = ui.available_width();
     let plan: Plan = ui.data(|d| d.get_temp(base().with("plan"))).unwrap_or_default();
     let more_id = base().with("more");
-    let menu_open = egui::Popup::is_id_open(&ctx, more_id.with("popup"));
+    // « ⋯ » open, or opening: egui opens a popup in the frame of the click, so its rows are drawn in this frame too, and
+    // the line's waiting items must not take their ids (one id in two layers in a frame is a debug assertion of egui).
+    let clicked_open =
+        plan.more.is_some_and(|more| ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|at| more.contains(at))));
+    let menu_open = clicked_open || egui::Popup::is_id_open(&ctx, more_id.with("popup"));
     keep(ui, Fit { on: true, menu_open, plan: plan.clone(), ..Fit::default() });
     let mut more_at = None;
     ui.horizontal(|ui| {
@@ -222,7 +226,10 @@ fn item_id(ui: &Ui) -> Id {
 /// What an item not in the line answers: never clicked; anchored at « ⋯ » for a menu of its own.
 pub fn hidden(ui: &mut Ui) -> Response {
     let f = fit(ui);
-    let at = f.plan.more.unwrap_or_else(|| Rect::from_min_size(ui.cursor().min, egui::Vec2::ZERO));
+    // In the line, anchored at « ⋯ » for a menu of its own; in « ⋯ », nowhere (an item over « ⋯ » in the menu's layer
+    // would take its hover and pile up tooltips over the menu).
+    let nowhere = Rect::from_min_size(ui.cursor().min, egui::Vec2::ZERO);
+    let at = if f.rows { nowhere } else { f.plan.more.unwrap_or(nowhere) };
     // While « ⋯ » is open its rows carry the items' ids: these take others.
     let id = if f.menu_open || f.rows { base().with(("hidden", f.rows, f.next)) } else { item_id(ui) };
     ui.interact(at, id, Sense::hover())

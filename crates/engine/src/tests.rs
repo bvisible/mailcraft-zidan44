@@ -3673,3 +3673,15 @@ fn the_layout_is_modern_by_default_and_switches() {
     assert!(!s.prefs.classic_layout, "without `modern`, the other one");
     done(s);
 }
+
+// //// Neoffice — with a hosting page's mailboxes, the note commands are refused too: a note made by a script or an agent
+// would be lost at the next visit (maintenance#1698).
+#[test]
+fn a_hosting_page_s_mailboxes_take_no_note_by_command() {
+    let mut s = sample_session("hosted-note-commands");
+    s.keeps_local_pim = false;
+    for (id, params) in [("note.create", json!({"text": "x"})), ("note.update", json!({"uid": "n"})), ("note.delete", json!({"uid": "n"}))] {
+        assert!(matches!(s.run(id, &params), Err(CmdError::Disabled(_))), "{id}");
+    }
+    done(s);
+}
