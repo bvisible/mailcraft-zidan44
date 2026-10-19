@@ -315,6 +315,14 @@ pub fn registry() -> Registry {
             Ok(json!({"on": s.prefs.reverse_sort}))
         })
         .params(r#"{"on"?: bool}"#),
+        // //// Neoffice — the modern layout (the new Outlook's, Neoffice's default) or upstream's classic one
+        // (`Prefs::classic_layout`, maintenance#1706); without `modern`, the other one.
+        CommandSpec::new("view.layout", "Modern or classic layout", "View › Layout", |s, v| {
+            let modern = p::bool(v, "modern").unwrap_or(s.prefs.classic_layout);
+            s.prefs.classic_layout = !modern;
+            Ok(json!({"modern": modern}))
+        })
+        .params(r#"{"modern"?: bool}"#),
         CommandSpec::new("view.folderPane", "Minimize the folder pane", "View › Layout", |s, v| {
             s.prefs.folder_pane_minimized = p::bool(v, "minimized").unwrap_or(!s.prefs.folder_pane_minimized);
             Ok(json!({"minimized": s.prefs.folder_pane_minimized}))

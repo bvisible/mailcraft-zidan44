@@ -39,6 +39,8 @@ pub(crate) fn interface_strings() -> BTreeSet<String> {
         // //// Neoffice — and the account settings offered with a hosting page's mailboxes.
         include_str!("../hosted.rs"),
         include_str!("../notes.rs"),
+        // //// Neoffice — and the modern layout's ribbon (ribbon.rs).
+        include_str!("../ribbon.rs"),
     ];
     // (prefix, which string literals after it are interface text)
     // //// Neoffice — and the labels of the event and contact forms' rows (pim_dialogs.rs, `form_row`): one of them, the

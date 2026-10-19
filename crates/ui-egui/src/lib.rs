@@ -48,6 +48,8 @@ mod read_only;
 // account settings it offers there.
 pub mod hosted;
 mod reading;
+// //// Neoffice — the modern layout's ribbon: one line, names giving way, then « ⋯ », never a scroll bar.
+mod ribbon;
 mod rich_edit;
 pub mod theme;
 mod thumbs;
@@ -1937,8 +1939,17 @@ impl MailApp {
         let confirm_delete = self.needs_delete_confirm();
         let ust = &mut self.ui;
         // A narrow window scrolls the ribbon sideways rather than cutting buttons off.
-        egui::ScrollArea::horizontal().id_salt("ribbon").show(ui, |ui| {
-            ui.horizontal(|ui| {
+        // //// Neoffice — but not in the modern layout (the new Outlook's), Neoffice's default: there the Home tab's line
+        // fits, its names giving way and then « ⋯ », and the other tabs wrap; the classic layout keeps upstream's scroll
+        // (ribbon.rs, maintenance#1701, #1706).
+        let mode = match (s.prefs.classic_layout, ust.tab) {
+            (true, _) => ribbon::Mode::Classic,
+            (false, RibbonTab::Home) => ribbon::Mode::Fit,
+            (false, _) => ribbon::Mode::Wrap,
+        };
+        ribbon::container(ui, &t, mode, |ui| {
+            // //// Neoffice — the line, its wrapping or the rows of « ⋯ » (ribbon.rs).
+            ribbon::row(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 match ust.tab {
                     RibbonTab::Home => {
@@ -2182,6 +2193,12 @@ impl MailApp {
                             if ui.selectable_label(ust.dark == v, tl!(label)).clicked() {
                                 acts.push(Action::SetDark(v));
                             }
+                        }
+                        // //// Neoffice — the modern layout (the new Outlook's), or upstream's classic one (maintenance#1706).
+                        widgets::group_sep(ui, &t);
+                        let modern = !s.prefs.classic_layout;
+                        if ui.selectable_label(modern, tl!("Modern layout")).clicked() {
+                            acts.push(Action::Run("view.layout", json!({"modern": !modern})));
                         }
                     }
                 }

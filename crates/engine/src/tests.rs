@@ -3660,3 +3660,16 @@ fn a_hosting_page_s_mailboxes_offer_no_notes() {
     assert_eq!(s.module, crate::Module::Notes);
     done(s);
 }
+
+// //// Neoffice — the modern layout (the new Outlook's) by default, upstream's classic one on demand, and back
+// (maintenance#1706).
+#[test]
+fn the_layout_is_modern_by_default_and_switches() {
+    let mut s = sample_session("layout");
+    assert!(!s.prefs.classic_layout, "modern by default");
+    assert_eq!(s.run("view.layout", &json!({"modern": false})).unwrap()["modern"], json!(false));
+    assert!(s.prefs.classic_layout);
+    s.run("view.layout", &json!({})).unwrap();
+    assert!(!s.prefs.classic_layout, "without `modern`, the other one");
+    done(s);
+}

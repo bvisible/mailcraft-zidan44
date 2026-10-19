@@ -11,6 +11,14 @@ pub fn tool_button(ui: &mut Ui, icon: Icon, label: &str, t: &Tokens, enabled: bo
     let label = tl!(label);
     let font = theme::regular(13.0);
     let galley = ui.painter().layout_no_wrap(label.to_string(), font, t.text);
+    // //// Neoffice — in the modern layout's ribbon, the button may show its icon alone, wait under « ⋯ », or be one of
+    // its rows (ribbon.rs, maintenance#1701).
+    match crate::ribbon::item(ui, galley.size().x + 36.0, crate::ribbon::ICON_W) {
+        crate::ribbon::Show::Hidden => return crate::ribbon::hidden(ui),
+        crate::ribbon::Show::Row => return crate::ribbon::row_button(ui, Some(icon), label, t, enabled, false),
+        crate::ribbon::Show::Icon => return crate::ribbon::icon_button(ui, icon, label, t, enabled, false),
+        crate::ribbon::Show::Whole => {}
+    }
     let size = vec2(galley.size().x + 36.0, 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let color = if enabled { t.text } else { t.faint };
@@ -27,6 +35,13 @@ pub fn tool_button(ui: &mut Ui, icon: Icon, label: &str, t: &Tokens, enabled: bo
 pub fn tool_toggle(ui: &mut Ui, icon: Icon, label: &str, t: &Tokens, on: bool) -> Response {
     let label = tl!(label);
     let galley = ui.painter().layout_no_wrap(label.to_string(), theme::regular(13.0), t.text);
+    // //// Neoffice — see `tool_button`: the modern layout's ribbon (ribbon.rs, maintenance#1701).
+    match crate::ribbon::item(ui, galley.size().x + 36.0, crate::ribbon::ICON_W) {
+        crate::ribbon::Show::Hidden => return crate::ribbon::hidden(ui),
+        crate::ribbon::Show::Row => return crate::ribbon::row_button(ui, Some(icon), label, t, true, on),
+        crate::ribbon::Show::Icon => return crate::ribbon::icon_button(ui, icon, label, t, true, on),
+        crate::ribbon::Show::Whole => {}
+    }
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 36.0, 30.0), Sense::click());
     if on {
         ui.painter().rect(rect, 6.0, t.accent_soft, Stroke::new(1.0, t.accent.gamma_multiply(0.5)), egui::StrokeKind::Inside);
@@ -54,6 +69,12 @@ pub fn accent_button(ui: &mut Ui, icon: Icon, label: &str, t: &Tokens, enabled: 
     let label = tl!(label);
     let font = theme::bold(13.0);
     let galley = ui.painter().layout_no_wrap(label.to_string(), font, t.on_accent);
+    // //// Neoffice — see `tool_button` (ribbon.rs, maintenance#1701); the main button keeps its name.
+    match crate::ribbon::item(ui, galley.size().x + 40.0, galley.size().x + 40.0) {
+        crate::ribbon::Show::Hidden => return crate::ribbon::hidden(ui),
+        crate::ribbon::Show::Row => return crate::ribbon::row_button(ui, Some(icon), label, t, enabled, false),
+        crate::ribbon::Show::Icon | crate::ribbon::Show::Whole => {}
+    }
     let size = vec2(galley.size().x + 40.0, 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let fill = if !enabled {
@@ -100,6 +121,12 @@ pub fn bar_icon_button(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
 
 /// A small icon button inside panes.
 pub fn tiny_icon_button(ui: &mut Ui, icon: Icon, tip: &str, t: &Tokens) -> Response {
+    // //// Neoffice — see `tool_button` (ribbon.rs, maintenance#1701): under « ⋯ », a row named by its tip.
+    match crate::ribbon::item(ui, 22.0, 22.0) {
+        crate::ribbon::Show::Hidden => return crate::ribbon::hidden(ui),
+        crate::ribbon::Show::Row => return crate::ribbon::row_button(ui, Some(icon), tl!(tip), t, true, false),
+        crate::ribbon::Show::Icon | crate::ribbon::Show::Whole => {}
+    }
     let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect, 4.0, t.hover);
@@ -230,6 +257,13 @@ pub fn segmented(ui: &mut Ui, t: &Tokens, id: &str, options: &[&str], selected: 
 }
 
 pub fn group_sep(ui: &mut Ui, t: &Tokens) {
+    // //// Neoffice — see `tool_button` (ribbon.rs, maintenance#1701): a separator waits under « ⋯ » with the group that
+    // follows it, and parts its rows there.
+    match crate::ribbon::item(ui, 11.0, 11.0) {
+        crate::ribbon::Show::Hidden => return,
+        crate::ribbon::Show::Row => return crate::ribbon::row_separator(ui),
+        crate::ribbon::Show::Icon | crate::ribbon::Show::Whole => {}
+    }
     ui.add_space(4.0);
     let (r, _) = ui.allocate_exact_size(vec2(1.0, 26.0), Sense::hover());
     ui.painter().rect_filled(r, 0.0, t.border);

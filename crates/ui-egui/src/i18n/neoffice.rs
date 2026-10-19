@@ -10,6 +10,24 @@ type Entry = (&'static str, &'static [(&'static str, &'static str)]);
 
 const STRINGS: &[Entry] = &[
     (
+        "Modern layout",
+        &[
+            ("es", "Diseño moderno"),
+            ("fr", "Disposition moderne"),
+            ("de", "Modernes Layout"),
+            ("nl", "Moderne indeling"),
+            ("pt-br", "Layout moderno"),
+            ("it", "Layout moderno"),
+            ("ru", "Современный макет"),
+            ("ja", "モダン レイアウト"),
+            ("ko", "최신 레이아웃"),
+            ("zh-hans", "现代布局"),
+            ("zh-hant", "現代版面配置"),
+            ("ar", "تخطيط حديث"),
+            ("he", "פריסה מודרנית"),
+        ],
+    ),
+    (
         "Nora",
         &[
             ("es", "Nora"),

@@ -246,6 +246,9 @@ pub struct Prefs {
     pub ignored: BTreeSet<String>,
     /// The folder pane minimized to a narrow strip (View › Folder pane, or its ‹ button).
     pub folder_pane_minimized: bool,
+    // //// Neoffice — upstream's classic layout (its ribbon scrolls sideways) rather than the new Outlook's, Neoffice's
+    // default (its ribbon fits on one line): View › Modern layout, `view.layout` (maintenance#1706).
+    pub classic_layout: bool,
     /// What's collapsed in the folder pane, kept from one start to the next as Outlook keeps it:
     /// `favorites`, `account:<id>`, `folder:<account>/<path>`.
     #[serde(default)]
@@ -416,6 +419,8 @@ impl Default for Prefs {
             ignored: BTreeSet::new(),
             follow_up: BTreeMap::new(),
             folder_pane_minimized: false,
+            // //// Neoffice — the modern layout by default (`classic_layout` above).
+            classic_layout: false,
             collapsed: BTreeSet::new(),
         }
     }
